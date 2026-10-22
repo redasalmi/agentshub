@@ -252,11 +252,12 @@ impl Workspace {
         let exited = cx.subscribe(&terminal, {
             let key = key.clone();
             move |this, _, _: &Exited, cx| {
-                // The one that is shown stays, to say that it exited.
-                if this.active.as_ref() != Some(&key) {
-                    this.chats.retain(|chat| chat.key != key);
+                this.chats.retain(|chat| chat.key != key);
+                if this.active.as_ref() == Some(&key) {
+                    this.active = None;
                 }
                 this.sync_sidebar(cx);
+                cx.notify();
             }
         });
         self.chats.push(Chat {
@@ -272,8 +273,6 @@ impl Workspace {
     }
 
     fn activate(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.chats
-            .retain(|chat| chat.key == key || !chat.terminal.read(cx).exited());
         for chat in &self.chats {
             let shown = chat.key == key;
             chat.terminal.read(cx).set_visible(shown);

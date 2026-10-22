@@ -86,7 +86,9 @@ pub struct Session {
     pub path: PathBuf,
     pub cwd: PathBuf,
     pub title: String,
-    pub updated: SystemTime,
+    /// When the session started, which orders the list so resuming a session
+    /// doesn't move it.
+    pub created: SystemTime,
 }
 
 #[derive(Clone, Debug)]
@@ -190,8 +192,8 @@ impl SessionStore {
         if !self.cache.contains_key(path) {
             return;
         }
-        let Ok((len, modified)) =
-            fs::metadata(path).and_then(|metadata| Ok((metadata.len(), metadata.modified()?)))
+        let Ok((len, modified, created)) = fs::metadata(path)
+            .and_then(|metadata| Ok((metadata.len(), metadata.modified()?, metadata.created())))
         else {
             self.cache.remove(path);
             return;
@@ -203,6 +205,8 @@ impl SessionStore {
         } else if file.modified == Some(modified) && (file.at_end || file.done(&self.loaded)) {
             return;
         }
+        // Filesystems without birth times fall back to the first time seen.
+        file.created.get_or_insert(created.unwrap_or(modified));
         match file.read(path, &self.loaded) {
             // Only a complete read counts, so a failed one is tried again.
             Ok(()) => file.modified = Some(modified),
@@ -233,11 +237,11 @@ impl SessionStore {
         let mut projects: Vec<Project> = projects
             .into_iter()
             .map(|(path, mut sessions)| {
-                sessions.sort_by_key(|session| Reverse(session.updated));
+                sessions.sort_by_key(|session| Reverse(session.created));
                 Project::new(path, sessions)
             })
             .collect();
-        projects.sort_by_key(|project| Reverse(project.sessions[0].updated));
+        projects.sort_by_key(|project| Reverse(project.sessions[0].created));
         projects
     }
 }
@@ -337,6 +341,7 @@ struct SessionFile {
     agent: Agent,
     /// When the file had been modified as of the last read.
     modified: Option<SystemTime>,
+    created: Option<SystemTime>,
     /// Where the first line that hasn't been read starts.
     offset: u64,
     /// Whether the last read went on to the end of the file, rather than
@@ -358,6 +363,7 @@ impl SessionFile {
         Self {
             agent,
             modified: None,
+            created: None,
             offset: 0,
             at_end: false,
             // Claude names its files after the session.
@@ -389,7 +395,7 @@ impl SessionFile {
                 .or(self.first_prompt.as_ref())
                 .cloned()
                 .unwrap_or_default(),
-            updated: self.modified?,
+            created: self.created?,
         })
     }
 
@@ -672,6 +678,7 @@ mod tests {
 
     fn read(file: &mut SessionFile, path: &Path) -> Session {
         file.modified = Some(SystemTime::now());
+        file.created = file.modified;
         file.read(path, &HashSet::from([PathBuf::from("/p")]))
             .unwrap();
         file.session(path).unwrap()

@@ -4,7 +4,6 @@ use std::rc::Rc;
 use std::sync::LazyLock;
 
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use libghostty_vt::key::{self, Key};
 use libghostty_vt::render::CursorVisualStyle;
@@ -218,7 +217,6 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let terminal = self.terminal.clone();
         let frame = terminal.read(cx).frame();
-        let exited = terminal.read(cx).exited();
         let focused = self.focus_handle.is_focused(window);
         let background = frame
             .as_ref()
@@ -280,21 +278,6 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
-            .when(exited, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .bottom_2()
-                        .right_3()
-                        .px_2()
-                        .py_1()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().secondary)
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Process exited. Select the chat again to resume it."),
-                )
-            })
     }
 }
 
