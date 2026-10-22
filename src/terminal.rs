@@ -26,6 +26,7 @@ use libghostty_vt::{
     },
 };
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use smol::future::FutureExt as _;
 
 /// Output bursts are coalesced into at most one frame per interval. The first
 /// frame after a quiet period is sent right away so typing stays instant.
@@ -39,6 +40,15 @@ const EXIT_POLL: Duration = Duration::from_millis(25);
 /// How long the CLI's processes get to handle SIGHUP before they're killed.
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_millis(200);
+
+/// How often the CLI is checked for having exited during its grace period.
+#[cfg(unix)]
+const KILL_POLL: Duration = Duration::from_millis(5);
+
+/// How long the app waits on quit for its CLIs to be killed, a little more
+/// than their grace period. Whatever is left gets the hangup of its PTY
+/// closing as the app exits.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Room kept free in the input buffer before encoding.
 ///
@@ -113,6 +123,7 @@ enum Msg {
     Paste(String),
     Scroll { lines: isize, x: f32, y: f32 },
     Resize(GridSize),
+    Visible(bool),
     Exited,
     Shutdown,
 }
@@ -127,6 +138,11 @@ pub struct Pty {
     tx: mpsc::Sender<Msg>,
     updates: smol::channel::Receiver<Update>,
     pid: Arc<Mutex<Option<u32>>>,
+    /// Asks for the CLI to be killed, without going through the terminal
+    /// thread, which blocks while the CLI isn't reading its input.
+    stop: mpsc::Sender<()>,
+    /// Closes once the CLI has been reaped.
+    reaped: smol::channel::Receiver<()>,
 }
 
 impl Pty {
@@ -172,12 +188,14 @@ impl Pty {
         // only here, so the pid, which may get reused once it is reaped, is
         // never signalled. The shared pid is cleared, under its lock, before
         // the child is reaped, so nobody else uses it after that either.
-        // Dropping the sender, which happens when the terminal goes away, is
-        // what asks for the kill.
+        // The terminal asks for the kill when it goes away, and so does its
+        // thread when it ends.
         let (stop_tx, stop_rx) = mpsc::channel();
+        let (reaped_tx, reaped) = smol::channel::bounded::<()>(1);
         let exit_tx = tx.clone();
         let reaper_pid = pid.clone();
         thread::spawn(move || {
+            let _reaped_tx = reaped_tx;
             let mut child = child;
             loop {
                 {
@@ -206,29 +224,71 @@ impl Pty {
         });
 
         let failed_tx = updates_tx.clone();
+        let run_stop_tx = stop_tx.clone();
         thread::spawn(move || {
             if let Err(err) = run(rx, pair.master, writer, colors, updates_tx) {
                 eprintln!("terminal thread failed: {err:#}");
                 // The CLI gets killed below and nothing reports it anymore.
                 failed_tx.send_blocking(Update::Exited).ok();
             }
-            drop(stop_tx);
+            run_stop_tx.send(()).ok();
         });
 
-        Ok(Self { tx, updates, pid })
+        Ok(Self {
+            tx,
+            updates,
+            pid,
+            stop: stop_tx,
+            reaped,
+        })
     }
 }
 
-/// Hangs up the CLI's process group, then kills whatever is left of it, so
-/// processes it started, like the native binary behind an npm launcher, don't
-/// outlive it. The CLI leads its own session, so the group id is its pid. The
-/// CLI isn't reaped before the last signal, which keeps that id from being
-/// reused by another group in the meantime.
+/// Waits for CLIs that were shut down to be reaped, for at most
+/// `SHUTDOWN_TIMEOUT`.
+pub fn wait_reaped(reaped: impl IntoIterator<Item = smol::channel::Receiver<()>>) {
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    smol::block_on(async {
+        for reaped in reaped {
+            let timeout = async {
+                smol::Timer::at(deadline).await;
+                Ok(())
+            };
+            reaped.recv().or(timeout).await.ok();
+        }
+    });
+}
+
+/// Hangs up the CLI's process group, then kills whatever is left of it once
+/// the CLI has exited or its grace period is over, so processes it started,
+/// like the native binary behind an npm launcher or anything that ignores
+/// SIGHUP, don't outlive it. The CLI leads its own session, so the group id is
+/// its pid. The CLI isn't reaped before the last signal, which keeps that id
+/// from being reused by another group in the meantime.
 #[cfg(unix)]
 fn kill_group(pid: u32) {
     unsafe { libc::killpg(pid as libc::pid_t, libc::SIGHUP) };
-    thread::sleep(KILL_GRACE);
+    let deadline = Instant::now() + KILL_GRACE;
+    while !has_exited(pid) && Instant::now() < deadline {
+        thread::sleep(KILL_POLL);
+    }
     unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+}
+
+/// Whether the child has exited, leaving it to be reaped.
+#[cfg(unix)]
+fn has_exited(pid: u32) -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    // A child that is still running leaves `info` zeroed.
+    result != 0 || unsafe { info.si_pid() } != 0
 }
 
 pub struct Terminal {
@@ -237,6 +297,8 @@ pub struct Terminal {
     size: Option<GridSize>,
     exited: bool,
     pid: Arc<Mutex<Option<u32>>>,
+    stop: mpsc::Sender<()>,
+    reaped: smol::channel::Receiver<()>,
     _updates: Task<()>,
 }
 
@@ -282,6 +344,8 @@ impl Terminal {
             size: None,
             exited: false,
             pid: pty.pid,
+            stop: pty.stop,
+            reaped: pty.reaped,
             _updates: task,
         }
     }
@@ -324,11 +388,25 @@ impl Terminal {
     pub fn scroll(&self, lines: isize, x: f32, y: f32) {
         self.tx.send(Msg::Scroll { lines, x, y }).ok();
     }
+
+    /// Kills the CLI. The returned channel closes once it has been reaped,
+    /// which `wait_reaped` waits for.
+    pub fn shutdown(&self) -> smol::channel::Receiver<()> {
+        self.tx.send(Msg::Shutdown).ok();
+        self.stop.send(()).ok();
+        self.reaped.clone()
+    }
+
+    /// Frames are only built while the terminal is shown. Output still gets
+    /// parsed in the meantime.
+    pub fn set_visible(&self, visible: bool) {
+        self.tx.send(Msg::Visible(visible)).ok();
+    }
 }
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        self.tx.send(Msg::Shutdown).ok();
+        self.shutdown();
     }
 }
 
@@ -388,10 +466,11 @@ fn run(
     let mut size = None;
     let mut input = Vec::new();
     let mut dirty = false;
+    let mut visible = true;
     let mut last_frame = Instant::now() - FRAME_INTERVAL;
 
     loop {
-        let msg = if dirty {
+        let msg = if dirty && visible {
             match rx.recv_timeout(FRAME_INTERVAL.saturating_sub(last_frame.elapsed())) {
                 Ok(msg) => Some(msg),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -479,6 +558,10 @@ fn run(
                 size = Some(new_size);
                 dirty = true;
             }
+            Some(Msg::Visible(shown)) => {
+                visible = shown;
+                dirty = true;
+            }
             Some(Msg::Exited) => {
                 updates.send_blocking(Update::Exited).ok();
             }
@@ -492,7 +575,7 @@ fn run(
             input.clear();
         }
 
-        if dirty && last_frame.elapsed() >= FRAME_INTERVAL {
+        if dirty && visible && last_frame.elapsed() >= FRAME_INTERVAL {
             let frame = build_frame(&mut render_state, &mut rows, &mut cells, &terminal)?;
             if updates.send_blocking(Update::Frame(frame)).is_err() {
                 break;
@@ -625,6 +708,8 @@ fn build_frame<'alloc>(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn white() -> RgbColor {
@@ -729,5 +814,85 @@ mod tests {
             assert!(Instant::now() < deadline, "{pid} outlived the terminal");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kills_what_ignores_hangups_once_the_child_exits() {
+        let pty = Pty::spawn(
+            "sh",
+            &[
+                "-c".into(),
+                "(trap '' HUP; exec sleep 100) & echo $!; wait".into(),
+            ],
+            &[],
+            Path::new("/"),
+            (RgbColor::default(), white()),
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid = loop {
+            assert!(Instant::now() < deadline, "no frame with the pid");
+            let Ok(Update::Frame(frame)) = smol::block_on(pty.updates.recv()) else {
+                continue;
+            };
+            let text = frame.rows[0]
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>();
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                break pid;
+            }
+        };
+        let start = Instant::now();
+        pty.tx.send(Msg::Shutdown).unwrap();
+        pty.reaped.recv_blocking().unwrap_err();
+        // The child exits on the hangup, so the grace period is cut short.
+        assert!(start.elapsed() < KILL_GRACE, "{:?}", start.elapsed());
+        // Gone, or a zombie left for its new parent to reap.
+        while fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.contains(") Z "))
+        {
+            assert!(Instant::now() < deadline, "{pid} outlived the terminal");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shuts_down_while_input_is_stuck() {
+        let pty = Pty::spawn(
+            "sh",
+            &[
+                "-c".into(),
+                "stty -icanon; echo ready; exec sleep 30".into(),
+            ],
+            &[],
+            Path::new("/"),
+            (RgbColor::default(), white()),
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "no frame with the prompt");
+            let Ok(Update::Frame(frame)) = smol::block_on(pty.updates.recv()) else {
+                continue;
+            };
+            if frame.rows[0].iter().any(|run| run.text.contains("ready")) {
+                break;
+            }
+        }
+        // `sleep` never reads it, so writing it blocks the terminal thread.
+        pty.tx.send(Msg::Paste("x".repeat(1 << 20))).unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        let start = Instant::now();
+        pty.tx.send(Msg::Shutdown).unwrap();
+        pty.stop.send(()).unwrap();
+        wait_reaped([pty.reaped.clone()]);
+        assert!(pty.reaped.is_closed(), "the CLI wasn't reaped");
+        assert!(start.elapsed() < SHUTDOWN_TIMEOUT, "{:?}", start.elapsed());
     }
 }

@@ -13,7 +13,7 @@ use crate::agent::Agent;
 use crate::reports::{self, Reports};
 use crate::sessions::{self, Session};
 use crate::sidebar::{NewChat, Sidebar, SidebarEvent};
-use crate::terminal::{Exited, Pty, Terminal};
+use crate::terminal::{self, Exited, Pty, Terminal};
 use crate::terminal_view::{TerminalView, rgb_color};
 
 const SIDEBAR_WIDTH: Pixels = px(280.);
@@ -40,7 +40,6 @@ pub struct Workspace {
     reports: Reports,
     _sidebar_events: Subscription,
     _report_events: Task<()>,
-    _remove_reports: Subscription,
     new_session_select: Option<Subscription>,
 }
 
@@ -80,10 +79,20 @@ impl Workspace {
                 }
             }
         });
-        let remove_reports = cx.on_app_quit(|this, _| {
+        // Closing the window releases the workspace before the app quits, and
+        // quitting releases it too.
+        cx.on_release(|this, cx| {
             this.reports.remove();
-            async {}
-        });
+            // The CLIs are killed on threads of their own, which the app would
+            // otherwise exit before they are done with.
+            let reaped: Vec<_> = this
+                .chats
+                .iter()
+                .map(|chat| chat.terminal.read(cx).shutdown())
+                .collect();
+            terminal::wait_reaped(reaped);
+        })
+        .detach();
 
         Self {
             sidebar,
@@ -92,7 +101,6 @@ impl Workspace {
             reports,
             _sidebar_events: sidebar_events,
             _report_events: report_events,
-            _remove_reports: remove_reports,
             new_session_select: None,
         }
     }
@@ -266,8 +274,12 @@ impl Workspace {
     fn activate(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
         self.chats
             .retain(|chat| chat.key == key || !chat.terminal.read(cx).exited());
-        if let Some(chat) = self.chats.iter().find(|chat| chat.key == key) {
-            chat.view.focus_handle(cx).focus(window, cx);
+        for chat in &self.chats {
+            let shown = chat.key == key;
+            chat.terminal.read(cx).set_visible(shown);
+            if shown {
+                chat.view.focus_handle(cx).focus(window, cx);
+            }
         }
         self.active = Some(key);
         self.sync_sidebar(cx);

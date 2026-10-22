@@ -14,3 +14,17 @@ serde_json = "1"
 smol = "2"
 unicode-segmentation = "1"
 uuid = { version = "1", features = ["v4"] }
+
+# Dependencies are built optimized even in dev builds: GPUI and the terminal
+# are far too slow unoptimized, and they rarely need a debugger.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Its build script compiles Ghostty in Zig's Debug mode whenever debug info is
+# on, which parses terminal output orders of magnitude slower.
+[profile.dev.package.libghostty-vt-sys]
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,7 +1,9 @@
 //! Reads the sessions the CLIs already store on disk. Nothing is written.
 //!
-//! Session files can be many megabytes. The CLIs only append to them, so each
-//! file is read once and later rescans only read the lines added since.
+//! Session files can be many megabytes. Listing a session only takes the start
+//! of its file, but titles can be added anywhere, so the rest is only read for
+//! the projects that are shown. The CLIs only append to their files, so each is
+//! read once and later rescans only read the lines added since.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -114,9 +116,30 @@ impl Project {
 pub struct SessionStore {
     cache: HashMap<PathBuf, SessionFile>,
     codex_titles: HashMap<String, String>,
+    /// The projects whose session files are read in full, for their titles.
+    loaded: HashSet<PathBuf>,
 }
 
 impl SessionStore {
+    /// Sets the projects that are shown, and reads the rest of the files of
+    /// those that weren't.
+    pub fn load(&mut self, projects: HashSet<PathBuf>) {
+        let added: Vec<PathBuf> = self
+            .cache
+            .iter()
+            .filter(|(_, file)| {
+                file.cwd
+                    .as_ref()
+                    .is_some_and(|cwd| projects.contains(cwd) && !self.loaded.contains(cwd))
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        self.loaded = projects;
+        for path in &added {
+            self.update(path);
+        }
+    }
+
     /// Lists the session files again and reads those that changed.
     pub fn scan(&mut self) -> Vec<Project> {
         let mut cache = HashMap::with_capacity(self.cache.len());
@@ -177,17 +200,17 @@ impl SessionStore {
         // A file shorter than what was read has been rewritten.
         if file.offset > len {
             *file = SessionFile::new(file.agent, path);
-        } else if file.modified == Some(modified) {
+        } else if file.modified == Some(modified) && (file.at_end || file.done(&self.loaded)) {
             return;
         }
-        match file.read(path) {
+        match file.read(path, &self.loaded) {
             // Only a complete read counts, so a failed one is tried again.
             Ok(()) => file.modified = Some(modified),
             Err(err) => eprintln!("can't read {}: {err}", path.display()),
         }
     }
 
-    fn projects(&self) -> Vec<Project> {
+    pub fn projects(&self) -> Vec<Project> {
         let mut projects: HashMap<PathBuf, Vec<Session>> = HashMap::new();
         for (path, file) in &self.cache {
             let Some(mut session) = file.session(path) else {
@@ -316,6 +339,9 @@ struct SessionFile {
     modified: Option<SystemTime>,
     /// Where the first line that hasn't been read starts.
     offset: u64,
+    /// Whether the last read went on to the end of the file, rather than
+    /// stopping once it had what was needed.
+    at_end: bool,
     id: Option<String>,
     cwd: Option<PathBuf>,
     first_prompt: Option<String>,
@@ -333,6 +359,7 @@ impl SessionFile {
             agent,
             modified: None,
             offset: 0,
+            at_end: false,
             // Claude names its files after the session.
             id: match agent {
                 Agent::Claude => path.file_stem().map(|s| s.to_string_lossy().into_owned()),
@@ -366,13 +393,22 @@ impl SessionFile {
         })
     }
 
-    /// Everything Codex sessions show is at their start, while titles can be
-    /// added to the others at any point.
-    fn complete(&self) -> bool {
-        self.agent == Agent::Codex && (self.hidden || self.first_prompt.is_some())
+    /// Whether the rest of the file can't change what is shown. Everything
+    /// Codex sessions show is at their start. Titles can be added to the
+    /// others at any point, but those only matter in the `loaded` projects,
+    /// and the start is enough to list them.
+    fn done(&self, loaded: &HashSet<PathBuf>) -> bool {
+        match self.agent {
+            Agent::Codex => self.hidden || self.first_prompt.is_some(),
+            Agent::Claude | Agent::Pi => {
+                self.id.is_some()
+                    && self.first_prompt.is_some()
+                    && self.cwd.as_ref().is_some_and(|cwd| !loaded.contains(cwd))
+            }
+        }
     }
 
-    fn read(&mut self, path: &Path) -> io::Result<()> {
+    fn read(&mut self, path: &Path, loaded: &HashSet<PathBuf>) -> io::Result<()> {
         let mut file = File::open(path)?;
         let mut line = Vec::new();
         // An extension can keep a title on pi's first line, rewritten in
@@ -381,7 +417,8 @@ impl SessionFile {
             BufReader::new(&file).read_until(b'\n', &mut line)?;
             self.read_line(&String::from_utf8_lossy(&line));
         }
-        if self.complete() {
+        self.at_end = false;
+        if self.done(loaded) {
             return Ok(());
         }
 
@@ -392,11 +429,12 @@ impl SessionFile {
             let len = reader.read_until(b'\n', &mut line)?;
             // A line still being written is read again on the next change.
             if line.last() != Some(&b'\n') {
+                self.at_end = true;
                 return Ok(());
             }
             self.offset += len as u64;
             self.read_line(&String::from_utf8_lossy(&line));
-            if self.complete() {
+            if self.done(loaded) {
                 return Ok(());
             }
         }
@@ -634,7 +672,8 @@ mod tests {
 
     fn read(file: &mut SessionFile, path: &Path) -> Session {
         file.modified = Some(SystemTime::now());
-        file.read(path).unwrap();
+        file.read(path, &HashSet::from([PathBuf::from("/p")]))
+            .unwrap();
         file.session(path).unwrap()
     }
 
@@ -791,6 +830,29 @@ mod tests {
         // A fresh read, as after a restart, finds it too.
         let mut file = SessionFile::new(Agent::Claude, &path);
         assert_eq!(read(&mut file, &path).title, "Renamed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reads_titles_once_the_project_is_loaded() {
+        let dir = temp_dir();
+        let path = dir.join("abc.jsonl");
+        append(
+            &path,
+            &[
+                r#"{"type":"user","cwd":"/p","message":{"content":"first prompt"}}"#.into(),
+                r#"{"type":"custom-title","customTitle":"Renamed"}"#.into(),
+            ],
+        );
+        let mut store = SessionStore::default();
+        store
+            .cache
+            .insert(path.clone(), SessionFile::new(Agent::Claude, &path));
+
+        let projects = store.refresh(&HashSet::from([path.clone()]));
+        assert_eq!(projects[0].sessions[0].title, "first prompt");
+        store.load(HashSet::from([PathBuf::from("/p")]));
+        assert_eq!(store.projects()[0].sessions[0].title, "Renamed");
         fs::remove_dir_all(dir).unwrap();
     }
 

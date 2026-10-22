@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::LazyLock;
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -297,13 +298,16 @@ impl Render for TerminalView {
     }
 }
 
+/// Built once, since every run of every frame needs it.
+static TERMINAL_FONT: LazyLock<Font> = LazyLock::new(|| Font {
+    fallbacks: Some(FontFallbacks::from_fonts(
+        FONT_FALLBACKS.iter().map(|name| name.to_string()).collect(),
+    )),
+    ..font(FONT_FAMILY)
+});
+
 fn terminal_font() -> Font {
-    Font {
-        fallbacks: Some(FontFallbacks::from_fonts(
-            FONT_FALLBACKS.iter().map(|name| name.to_string()).collect(),
-        )),
-        ..font(FONT_FAMILY)
-    }
+    TERMINAL_FONT.clone()
 }
 
 fn cell_size(window: &Window) -> Size<Pixels> {

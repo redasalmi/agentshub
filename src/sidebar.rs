@@ -34,6 +34,8 @@ enum Change {
     Structure,
     /// Files were written to.
     Files(HashSet<PathBuf>),
+    /// Projects were expanded, so the rest of their sessions is read.
+    Expanded,
 }
 
 /// A running CLI whose session isn't listed yet, as before its first prompt.
@@ -54,6 +56,7 @@ pub struct Sidebar {
     watches: HashMap<PathBuf, RecursiveMode>,
     /// What the watcher looks for changes in, which moves as folders appear.
     targets: Arc<Mutex<Vec<PathBuf>>>,
+    changes: smol::channel::Sender<Change>,
     _rescan: Task<()>,
 }
 
@@ -65,6 +68,7 @@ impl Sidebar {
         let (changed_tx, changed) = smol::channel::unbounded();
         let watcher = notify::recommended_watcher({
             let targets = targets.clone();
+            let changed_tx = changed_tx.clone();
             move |event: notify::Result<notify::Event>| {
                 let Ok(event) = event else {
                     return;
@@ -81,16 +85,21 @@ impl Sidebar {
             let mut store = SessionStore::default();
             let mut change = Change::Structure;
             loop {
-                if this.update(cx, |this, _| this.update_watches()).is_err() {
+                let Ok(expanded) = this.update(cx, |this, _| {
+                    this.update_watches();
+                    this.expanded.clone()
+                }) else {
                     break;
-                }
+                };
                 let (projects, hidden);
                 (store, projects, hidden) = cx
                     .background_executor()
                     .spawn(async move {
+                        store.load(expanded);
                         let projects = match change {
                             Change::Structure => store.scan(),
                             Change::Files(paths) => store.refresh(&paths),
+                            Change::Expanded => store.projects(),
                         };
                         let hidden = store.hidden();
                         (store, projects, hidden)
@@ -106,7 +115,10 @@ impl Sidebar {
                 let Ok(first) = changed.recv().await else {
                     break;
                 };
-                cx.background_executor().timer(RESCAN_DELAY).await;
+                // An expanded project shows its sessions right away.
+                if first != Change::Expanded {
+                    cx.background_executor().timer(RESCAN_DELAY).await;
+                }
                 change = std::iter::from_fn(|| changed.try_recv().ok()).fold(
                     first,
                     |change, next| match (change, next) {
@@ -114,6 +126,7 @@ impl Sidebar {
                             paths.extend(more);
                             Change::Files(paths)
                         }
+                        (Change::Expanded, change) | (change, Change::Expanded) => change,
                         _ => Change::Structure,
                     },
                 );
@@ -129,6 +142,7 @@ impl Sidebar {
             watcher,
             watches: HashMap::new(),
             targets,
+            changes: changed_tx,
             _rescan: rescan,
         }
     }
@@ -191,7 +205,7 @@ impl Sidebar {
     ) {
         for chat in &new_chats {
             if !self.new_chats.iter().any(|known| known.key == chat.key) {
-                self.expanded.insert(chat.cwd.clone());
+                self.expand(chat.cwd.clone());
             }
         }
         self.new_chats = new_chats;
@@ -208,7 +222,7 @@ impl Sidebar {
         if self.projects.is_empty()
             && let Some(first) = projects.first()
         {
-            self.expanded.insert(first.path.clone());
+            self.expand(first.path.clone());
         }
         self.projects = projects;
         self.hidden = hidden;
@@ -216,11 +230,19 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Collapsed projects keep their sessions, which take a few hundred bytes
+    /// each, but their files are no longer read past what lists them.
     fn toggle_project(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
         if !self.expanded.remove(path) {
-            self.expanded.insert(path.clone());
+            self.expand(path.clone());
         }
         cx.notify();
+    }
+
+    fn expand(&mut self, path: PathBuf) {
+        if self.expanded.insert(path) {
+            self.changes.try_send(Change::Expanded).ok();
+        }
     }
 
     fn render_project(&self, project: &Project, cx: &Context<Self>) -> impl IntoElement {
