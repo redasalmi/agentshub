@@ -1,20 +1,21 @@
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::agent::Agent;
+use crate::appearance;
 use crate::reports::{self, Reports};
 use crate::sessions::{self, Session};
-use crate::sidebar::{NewChat, Sidebar, SidebarEvent};
+use crate::sidebar::{NewChat, Sidebar, SidebarEvent, lamp};
 use crate::terminal::{self, Exited, Pty, Terminal};
-use crate::terminal_view::{TerminalView, rgb_color};
+use crate::terminal_view::TerminalView;
 
 const SIDEBAR_WIDTH: Pixels = px(280.);
 
@@ -28,6 +29,13 @@ impl SelectItem for Agent {
     fn value(&self) -> &Self::Value {
         self
     }
+
+    fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        h_flex()
+            .gap_2()
+            .child(lamp(appearance::agent_color(*self, cx), false))
+            .child(self.display_name())
+    }
 }
 
 pub struct Workspace {
@@ -40,6 +48,8 @@ pub struct Workspace {
     reports: Reports,
     _sidebar_events: Subscription,
     _report_events: Task<()>,
+    _appearance: Subscription,
+    _theme: Subscription,
     new_session_select: Option<Subscription>,
 }
 
@@ -94,6 +104,16 @@ impl Workspace {
         })
         .detach();
 
+        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
+            Theme::sync_system_appearance(Some(window), cx)
+        });
+        let theme = cx.observe_global::<Theme>(|this, cx| {
+            let colors = appearance::terminal_colors(cx);
+            for chat in &this.chats {
+                chat.terminal.read(cx).set_colors(colors);
+            }
+        });
+
         Self {
             sidebar,
             chats: Vec::new(),
@@ -101,6 +121,8 @@ impl Workspace {
             reports,
             _sidebar_events: sidebar_events,
             _report_events: report_events,
+            _appearance: appearance,
+            _theme: theme,
             new_session_select: None,
         }
     }
@@ -199,6 +221,7 @@ impl Workspace {
             .map(|session| (session.path.as_path(), session.id.as_str()))
             .collect();
         let mut new_chats = Vec::new();
+        let mut running = HashSet::new();
         let mut active = None;
         for chat in &self.chats {
             let id = match chat.session.as_deref().and_then(|path| listed.get(path)) {
@@ -215,11 +238,15 @@ impl Workspace {
                 }
             };
             if self.active.as_ref() == Some(&chat.key) {
-                active = Some(id);
+                active = Some(id.clone());
+            }
+            if !chat.terminal.read(cx).exited() {
+                running.insert(id);
             }
         }
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.set_chats(new_chats, active, cx));
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_chats(new_chats, running, active, cx)
+        });
     }
 
     fn open_terminal(
@@ -232,10 +259,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let key = uuid::Uuid::new_v4().to_string();
-        let colors = (
-            rgb_color(cx.theme().background),
-            rgb_color(cx.theme().foreground),
-        );
+        let colors = appearance::terminal_colors(cx);
         let mut all_args = self.reports.args(agent);
         all_args.extend_from_slice(args);
         let report = self.reports.path(&key);
@@ -309,21 +333,78 @@ impl Render for Workspace {
                         .flex_none(),
                 ),
             )
-            .child(div().flex_1().min_w_0().h_full().map(|this| {
-                match active_terminal {
-                    Some(view) => this.child(view.clone()),
-                    None => this.child(
-                        v_flex()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .gap_3()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::SquareTerminal).large())
-                            .child("Pick a chat, or press + next to a project to start an agent."),
-                    ),
-                }
-            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .map(|this| match active_terminal {
+                        Some(view) => this.child(view.clone()),
+                        None => this.child(render_empty(cx)),
+                    }),
+            )
     }
+}
+
+/// What shows while no chat is open: how to open one, and how to read the
+/// sidebar's lamps.
+fn render_empty(cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let legend_item =
+        |color, lit, label: &'static str| h_flex().gap_2().child(lamp(color, lit)).child(label);
+
+    h_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .p_8()
+        .child(
+            v_flex()
+                .max_w(px(440.))
+                .gap_6()
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_semibold()
+                                .child("Resume a session, or start a new one"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .line_height(rems(1.4))
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    "Choose a session on the left to reopen it. To start \
+                                     Claude Code, Codex or Pi in a project, press + beside \
+                                     it. Agents keep running while you look at another \
+                                     session.",
+                                ),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .pt_5()
+                        .gap_3()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .child(h_flex().gap_5().children(Agent::ALL.map(|agent| {
+                            legend_item(
+                                appearance::agent_color(agent, cx),
+                                false,
+                                agent.display_name(),
+                            )
+                        })))
+                        .child(
+                            h_flex()
+                                .gap_5()
+                                .text_color(theme.muted_foreground)
+                                .child(legend_item(theme.muted_foreground, false, "Saved"))
+                                .child(legend_item(theme.muted_foreground, true, "Running")),
+                        ),
+                ),
+        )
 }

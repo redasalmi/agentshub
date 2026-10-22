@@ -108,6 +108,15 @@ pub struct GridSize {
     pub cell_height: f32,
 }
 
+/// The colors that output without colors of its own is drawn in.
+#[derive(Clone, Copy)]
+pub struct Colors {
+    pub background: RgbColor,
+    pub foreground: RgbColor,
+    /// The 16 ANSI colors, which CLIs pick from by index.
+    pub ansi: [RgbColor; 16],
+}
+
 pub struct KeyInput {
     pub key: key::Key,
     pub mods: key::Mods,
@@ -124,6 +133,7 @@ enum Msg {
     Scroll { lines: isize, x: f32, y: f32 },
     Resize(GridSize),
     Visible(bool),
+    Colors(Colors),
     Exited,
     Shutdown,
 }
@@ -151,7 +161,7 @@ impl Pty {
         args: &[String],
         env: &[(&str, &OsStr)],
         cwd: &Path,
-        colors: (RgbColor, RgbColor),
+        colors: Colors,
     ) -> Result<Self> {
         let pair = native_pty_system().openpty(PtySize::default())?;
         let mut command = CommandBuilder::new(program);
@@ -402,6 +412,10 @@ impl Terminal {
     pub fn set_visible(&self, visible: bool) {
         self.tx.send(Msg::Visible(visible)).ok();
     }
+
+    pub fn set_colors(&self, colors: Colors) {
+        self.tx.send(Msg::Colors(colors)).ok();
+    }
 }
 
 impl Drop for Terminal {
@@ -414,7 +428,7 @@ fn run(
     rx: mpsc::Receiver<Msg>,
     master: Box<dyn MasterPty + Send>,
     mut writer: Box<dyn Write + Send>,
-    (background, foreground): (RgbColor, RgbColor),
+    colors: Colors,
     updates: smol::channel::Sender<Update>,
 ) -> Result<()> {
     let mut terminal = VtTerminal::new(TerminalOptions {
@@ -422,9 +436,7 @@ fn run(
         rows: 24,
         max_scrollback: SCROLLBACK_LINES,
     })?;
-    terminal
-        .set_default_bg_color(Some(background))?
-        .set_default_fg_color(Some(foreground))?;
+    set_colors(&mut terminal, colors)?;
 
     // Replies to terminal queries are collected while parsing and written to
     // the PTY afterwards. The CLIs probe device attributes at startup to
@@ -562,6 +574,10 @@ fn run(
                 visible = shown;
                 dirty = true;
             }
+            Some(Msg::Colors(colors)) => {
+                set_colors(&mut terminal, colors)?;
+                dirty = true;
+            }
             Some(Msg::Exited) => {
                 updates.send_blocking(Update::Exited).ok();
             }
@@ -585,6 +601,16 @@ fn run(
         }
     }
 
+    Ok(())
+}
+
+fn set_colors(terminal: &mut VtTerminal<'_, '_>, colors: Colors) -> Result<()> {
+    let mut palette = terminal.default_color_palette()?;
+    palette.0[..colors.ansi.len()].copy_from_slice(&colors.ansi);
+    terminal
+        .set_default_bg_color(Some(colors.background))?
+        .set_default_fg_color(Some(colors.foreground))?
+        .set_default_color_palette(Some(palette))?;
     Ok(())
 }
 
@@ -720,6 +746,14 @@ mod tests {
         }
     }
 
+    fn colors() -> Colors {
+        Colors {
+            background: RgbColor::default(),
+            foreground: white(),
+            ansi: crate::appearance::DARK_ANSI,
+        }
+    }
+
     #[test]
     fn renders_pty_output_into_styled_runs() {
         let script = r"printf 'hello \033[1;31mred\033[0m'; sleep 1";
@@ -728,7 +762,7 @@ mod tests {
             &["-c".into(), script.into()],
             &[],
             Path::new("/"),
-            (RgbColor::default(), white()),
+            colors(),
         )
         .unwrap();
 
@@ -757,7 +791,7 @@ mod tests {
             &["-c".into(), "echo $$".into()],
             &[],
             Path::new("/"),
-            (RgbColor::default(), white()),
+            colors(),
         )
         .unwrap();
 
@@ -791,7 +825,7 @@ mod tests {
             &["-c".into(), "trap '' HUP; sleep 100 & echo $!; wait".into()],
             &[],
             Path::new("/"),
-            (RgbColor::default(), white()),
+            colors(),
         )
         .unwrap();
 
@@ -827,7 +861,7 @@ mod tests {
             ],
             &[],
             Path::new("/"),
-            (RgbColor::default(), white()),
+            colors(),
         )
         .unwrap();
 
@@ -870,7 +904,7 @@ mod tests {
             ],
             &[],
             Path::new("/"),
-            (RgbColor::default(), white()),
+            colors(),
         )
         .unwrap();
 

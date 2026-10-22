@@ -1,4 +1,5 @@
 mod agent;
+mod appearance;
 mod reports;
 mod sessions;
 mod sidebar;
@@ -27,6 +28,7 @@ fn main() {
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
+                appearance::init(window, cx);
                 cx.new(|cx| Workspace::new(window, cx))
             })
             .expect("failed to open window");

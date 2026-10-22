@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
@@ -13,10 +13,18 @@ use notify::event::ModifyKind;
 use notify::{EventKind, RecursiveMode, Watcher as _};
 
 use crate::agent::Agent;
+use crate::appearance;
 use crate::sessions::{self, Project, Session, SessionStore};
 
 /// CLIs write sessions in bursts while they run, so rescans wait for a pause.
 const RESCAN_DELAY: Duration = Duration::from_millis(500);
+
+/// How often the ages of the sessions are brought up to date.
+const AGE_INTERVAL: Duration = Duration::from_secs(60);
+
+const LAMP_SIZE: Pixels = px(10.);
+/// The space between a chat's lamp and its title.
+const LAMP_GAP: Pixels = px(8.);
 
 #[derive(Clone)]
 pub enum SidebarEvent {
@@ -49,6 +57,8 @@ pub struct Sidebar {
     projects: Vec<Project>,
     hidden: HashSet<PathBuf>,
     new_chats: Vec<NewChat>,
+    /// The ids of the sessions, and the keys of the new chats, whose agent runs.
+    running: HashSet<String>,
     expanded: HashSet<PathBuf>,
     /// The id of the session, or the key of the new chat, that is shown.
     active: Option<String>,
@@ -58,6 +68,7 @@ pub struct Sidebar {
     targets: Arc<Mutex<Vec<PathBuf>>>,
     changes: smol::channel::Sender<Change>,
     _rescan: Task<()>,
+    _age: Task<()>,
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
@@ -133,10 +144,20 @@ impl Sidebar {
             }
         });
 
+        let age = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AGE_INTERVAL).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
+
         Self {
             projects: Vec::new(),
             hidden: HashSet::new(),
             new_chats: Vec::new(),
+            running: HashSet::new(),
             expanded: HashSet::new(),
             active: None,
             watcher,
@@ -144,6 +165,7 @@ impl Sidebar {
             targets,
             changes: changed_tx,
             _rescan: rescan,
+            _age: age,
         }
     }
 
@@ -200,6 +222,7 @@ impl Sidebar {
     pub fn set_chats(
         &mut self,
         new_chats: Vec<NewChat>,
+        running: HashSet<String>,
         active: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -209,6 +232,7 @@ impl Sidebar {
             }
         }
         self.new_chats = new_chats;
+        self.running = running;
         self.active = active;
         cx.notify();
     }
@@ -251,6 +275,12 @@ impl Sidebar {
         let path = project.path.clone();
         let new_session_path = project.path.clone();
 
+        let new_chats: Vec<_> = self
+            .new_chats
+            .iter()
+            .filter(|chat| chat.cwd == project.path)
+            .collect();
+
         v_flex()
             .child(
                 h_flex()
@@ -258,18 +288,19 @@ impl Sidebar {
                         project.path.to_string_lossy().into_owned(),
                     ))
                     .h_8()
-                    .px_2()
-                    .gap_2()
+                    .pl_1p5()
+                    .pr_1()
+                    .gap_1p5()
                     .rounded(theme.radius)
                     .cursor_pointer()
-                    .hover(|style| style.bg(theme.sidebar_accent))
+                    .hover(|style| style.bg(theme.sidebar_accent.opacity(0.6)))
                     .child(
                         Icon::new(if expanded {
-                            IconName::FolderOpen
+                            IconName::ChevronDown
                         } else {
-                            IconName::Folder
+                            IconName::ChevronRight
                         })
-                        .small()
+                        .xsmall()
                         .text_color(theme.muted_foreground),
                     )
                     .child(
@@ -278,7 +309,7 @@ impl Sidebar {
                             .min_w_0()
                             .truncate()
                             .text_sm()
-                            .font_medium()
+                            .font_semibold()
                             .child(project.name.clone()),
                     )
                     .child(
@@ -286,6 +317,7 @@ impl Sidebar {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Plus)
+                            .tooltip("Start an agent in this project")
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
                                 cx.emit(SidebarEvent::NewSession(new_session_path.clone()));
@@ -294,47 +326,52 @@ impl Sidebar {
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(&path, cx))),
             )
             .when(expanded, |this| {
-                this.children(
-                    self.new_chats
-                        .iter()
-                        .filter(|chat| chat.cwd == project.path)
-                        .map(|chat| {
-                            self.render_chat(
-                                &chat.key,
-                                "New chat".into(),
-                                chat.agent,
-                                SidebarEvent::ShowChat(chat.key.clone()),
-                                cx,
-                            )
-                        }),
-                )
-                .children(project.sessions.iter().map(|session| {
-                    self.render_chat(
-                        &session.id,
-                        session.title.clone().into(),
-                        session.agent,
-                        SidebarEvent::OpenSession(session.clone()),
-                        cx,
+                let new_chats = new_chats.into_iter().map(|chat| {
+                    (
+                        chat.key.as_str(),
+                        SharedString::from("New chat"),
+                        chat.agent,
+                        None,
+                        SidebarEvent::ShowChat(chat.key.clone()),
                     )
-                }))
+                });
+                let sessions = project.sessions.iter().map(|session| {
+                    (
+                        session.id.as_str(),
+                        SharedString::from(session.title.clone()),
+                        session.agent,
+                        Some(session.created),
+                        SidebarEvent::OpenSession(session.clone()),
+                    )
+                });
+                this.children(new_chats.chain(sessions).map(
+                    |(id, title, agent, created, on_click)| {
+                        self.render_chat(id, title, agent, created, on_click, cx)
+                    },
+                ))
             })
     }
 
+    /// A chat's lamp sits under its project's chevron, and is lit while its
+    /// agent runs.
     fn render_chat(
         &self,
         id: &str,
         title: SharedString,
         agent: Agent,
+        created: Option<SystemTime>,
         on_click: SidebarEvent,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
         let active = self.active.as_deref() == Some(id);
+        let running = self.running.contains(id);
+        let color = appearance::agent_color(agent, cx);
 
         v_flex()
             .id(SharedString::from(id.to_string()))
-            .ml_4()
-            .px_2()
+            .pl_1p5()
+            .pr_2()
             .py_1p5()
             .gap_0p5()
             .rounded(theme.radius)
@@ -347,12 +384,29 @@ impl Sidebar {
                     this.hover(|style| style.bg(theme.sidebar_accent.opacity(0.6)))
                 }
             })
-            .child(div().text_sm().truncate().child(title))
+            .child(
+                h_flex()
+                    .gap(LAMP_GAP)
+                    .child(lamp(color, running))
+                    .child(div().flex_1().min_w_0().text_sm().truncate().child(title))
+                    .children(created.map(|created| {
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(age(created))
+                    })),
+            )
             .child(
                 div()
+                    .pl(LAMP_SIZE + LAMP_GAP)
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(agent.label()),
+                    .child(if running {
+                        format!("{} is running", agent.display_name())
+                    } else {
+                        agent.display_name().to_string()
+                    }),
             )
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(on_click.clone())))
     }
@@ -373,6 +427,12 @@ impl Render for Sidebar {
                 new_projects.push(Project::new(chat.cwd.clone(), Vec::new()));
             }
         }
+        let running = match self.running.len() {
+            0 => "No agents running".to_string(),
+            1 => "1 agent running".to_string(),
+            n => format!("{n} agents running"),
+        };
+        let dark = theme.is_dark();
 
         v_flex()
             .size_full()
@@ -382,12 +442,28 @@ impl Render for Sidebar {
             .border_color(theme.sidebar_border)
             .child(
                 h_flex()
-                    .h_10()
-                    .px_4()
+                    .h_12()
+                    .flex_none()
+                    .pl_4()
+                    .pr_2()
+                    .gap_2()
+                    .justify_between()
                     .text_xs()
-                    .font_semibold()
+                    .font_medium()
                     .text_color(theme.muted_foreground)
-                    .child("Projects"),
+                    .child(running)
+                    .child(
+                        Button::new("theme")
+                            .ghost()
+                            .small()
+                            .icon(if dark { IconName::Sun } else { IconName::Moon })
+                            .tooltip(if dark {
+                                "Use light theme"
+                            } else {
+                                "Use dark theme"
+                            })
+                            .on_click(|_, window, cx| appearance::toggle(window, cx)),
+                    ),
             )
             .child(
                 v_flex()
@@ -396,8 +472,8 @@ impl Render for Sidebar {
                     .min_h_0()
                     .overflow_y_scroll()
                     .px_2()
-                    .pb_2()
-                    .gap_0p5()
+                    .pb_3()
+                    .gap_1()
                     .children(
                         new_projects
                             .iter()
@@ -405,6 +481,30 @@ impl Render for Sidebar {
                             .map(|project| self.render_project(project, cx)),
                     ),
             )
+    }
+}
+
+/// An agent's mark: a ring while its session is saved, filled while it runs.
+pub fn lamp(color: Hsla, lit: bool) -> Div {
+    div()
+        .size(LAMP_SIZE)
+        .flex_none()
+        .rounded_full()
+        .border_2()
+        .border_color(color)
+        .when(lit, |this| this.bg(color))
+}
+
+/// How long ago a session started, in its largest whole unit.
+fn age(created: SystemTime) -> String {
+    let minutes = created.elapsed().unwrap_or_default().as_secs() / 60;
+    match minutes {
+        0 => "now".to_string(),
+        1..60 => format!("{minutes}m"),
+        60..1440 => format!("{}h", minutes / 60),
+        1440..10080 => format!("{}d", minutes / 1440),
+        10080..525600 => format!("{}w", minutes / 10080),
+        _ => format!("{}y", minutes / 525600),
     }
 }
 
