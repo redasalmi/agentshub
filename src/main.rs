@@ -1,0 +1,34 @@
+mod agent;
+mod reports;
+mod sessions;
+mod sidebar;
+mod terminal;
+mod terminal_view;
+mod workspace;
+
+use gpui_kit::*;
+
+use crate::workspace::Workspace;
+
+fn main() {
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(|cx| {
+            gpui_kit::init(cx);
+            terminal_view::init(cx);
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
+
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::centered(size(px(1280.), px(800.)), cx)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Agents Hub".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| Workspace::new(window, cx))
+            })
+            .expect("failed to open window");
+        });
+}

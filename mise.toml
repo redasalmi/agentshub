@@ -1,0 +1,3 @@
+[tools]
+# libghostty-vt-sys builds Ghostty's VT library from source with Zig 0.15.
+zig = "0.15.2"
