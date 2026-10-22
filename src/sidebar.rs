@@ -15,6 +15,7 @@ use notify::{EventKind, RecursiveMode, Watcher as _};
 use crate::agent::Agent;
 use crate::appearance;
 use crate::sessions::{self, Project, Session, SessionStore};
+use crate::status::{Need, Status};
 
 /// CLIs write sessions in bursts while they run, so rescans wait for a pause.
 const RESCAN_DELAY: Duration = Duration::from_millis(500);
@@ -57,8 +58,9 @@ pub struct Sidebar {
     projects: Vec<Project>,
     hidden: HashSet<PathBuf>,
     new_chats: Vec<NewChat>,
-    /// The ids of the sessions, and the keys of the new chats, whose agent runs.
-    running: HashSet<String>,
+    /// The ids of the sessions, and the keys of the new chats, whose agent
+    /// runs, with what it reports doing, if it reports that.
+    running: HashMap<String, Option<Status>>,
     expanded: HashSet<PathBuf>,
     /// The id of the session, or the key of the new chat, that is shown.
     active: Option<String>,
@@ -157,7 +159,7 @@ impl Sidebar {
             projects: Vec::new(),
             hidden: HashSet::new(),
             new_chats: Vec::new(),
-            running: HashSet::new(),
+            running: HashMap::new(),
             expanded: HashSet::new(),
             active: None,
             watcher,
@@ -222,7 +224,7 @@ impl Sidebar {
     pub fn set_chats(
         &mut self,
         new_chats: Vec<NewChat>,
-        running: HashSet<String>,
+        running: HashMap<String, Option<Status>>,
         active: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -352,8 +354,8 @@ impl Sidebar {
             })
     }
 
-    /// A chat's lamp sits under its project's chevron, and is lit while its
-    /// agent runs.
+    /// A chat's lamp sits under its project's chevron. It's dim while its
+    /// agent runs, and lit while that agent works.
     fn render_chat(
         &self,
         id: &str,
@@ -365,8 +367,20 @@ impl Sidebar {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let active = self.active.as_deref() == Some(id);
-        let running = self.running.contains(id);
+        let running = self.running.get(id).copied();
         let color = appearance::agent_color(agent, cx);
+        let lamp_state = match running {
+            None => Lamp::Off,
+            Some(Some(Status::Working)) => Lamp::Lit,
+            Some(_) => Lamp::Dim,
+        };
+        // What needs the user stands out.
+        let activity_color = match running {
+            Some(Some(Status::Blocked(_))) => theme.warning,
+            Some(Some(Status::Done)) => theme.success,
+            Some(Some(Status::Error)) => theme.danger,
+            _ => theme.muted_foreground,
+        };
 
         v_flex()
             .id(SharedString::from(id.to_string()))
@@ -387,7 +401,7 @@ impl Sidebar {
             .child(
                 h_flex()
                     .gap(LAMP_GAP)
-                    .child(lamp(color, running))
+                    .child(lamp(color, lamp_state))
                     .child(div().flex_1().min_w_0().text_sm().truncate().child(title))
                     .children(created.map(|created| {
                         div()
@@ -401,12 +415,8 @@ impl Sidebar {
                 div()
                     .pl(LAMP_SIZE + LAMP_GAP)
                     .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(if running {
-                        format!("{} is running", agent.display_name())
-                    } else {
-                        agent.display_name().to_string()
-                    }),
+                    .text_color(activity_color)
+                    .child(activity(agent, running)),
             )
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(on_click.clone())))
     }
@@ -427,11 +437,7 @@ impl Render for Sidebar {
                 new_projects.push(Project::new(chat.cwd.clone(), Vec::new()));
             }
         }
-        let running = match self.running.len() {
-            0 => "No agents running".to_string(),
-            1 => "1 agent running".to_string(),
-            n => format!("{n} agents running"),
-        };
+        let summary = summary(self.running.values());
         let dark = theme.is_dark();
 
         v_flex()
@@ -451,7 +457,7 @@ impl Render for Sidebar {
                     .text_xs()
                     .font_medium()
                     .text_color(theme.muted_foreground)
-                    .child(running)
+                    .child(summary)
                     .child(
                         Button::new("theme")
                             .ghost()
@@ -484,15 +490,49 @@ impl Render for Sidebar {
     }
 }
 
-/// An agent's mark: a ring while its session is saved, filled while it runs.
-pub fn lamp(color: Hsla, lit: bool) -> Div {
-    div()
+#[derive(Clone, Copy)]
+pub enum Lamp {
+    /// A ring, for a saved session.
+    Off,
+    /// Half filled, for an agent that runs but doesn't work.
+    Dim,
+    /// Filled, for an agent at work.
+    Lit,
+}
+
+/// An agent's mark, in its color.
+pub fn lamp(color: Hsla, state: Lamp) -> Div {
+    let lamp = div()
         .size(LAMP_SIZE)
         .flex_none()
         .rounded_full()
         .border_2()
-        .border_color(color)
-        .when(lit, |this| this.bg(color))
+        .border_color(color);
+    match state {
+        Lamp::Off => lamp,
+        Lamp::Dim => lamp.bg(color.opacity(0.35)),
+        Lamp::Lit => lamp.bg(color),
+    }
+}
+
+/// What a chat's agent is doing, or just its name while it doesn't run.
+/// `Some(None)` is an agent that runs but hasn't said what it's doing.
+fn activity(agent: Agent, running: Option<Option<Status>>) -> String {
+    let name = agent.display_name();
+    match running {
+        None => name.to_string(),
+        Some(None) => format!("{name} is running"),
+        Some(Some(Status::Idle)) => format!("{name} is idle"),
+        Some(Some(Status::Working)) => format!("{name} is working"),
+        Some(Some(Status::Blocked(Some(Need::Permission)))) => {
+            format!("{name} needs your permission")
+        }
+        Some(Some(Status::Blocked(Some(Need::Question)))) => format!("{name} has a question"),
+        Some(Some(Status::Blocked(Some(Need::Auth)))) => format!("{name} needs you to sign in"),
+        Some(Some(Status::Blocked(None))) => format!("{name} is waiting for you"),
+        Some(Some(Status::Done)) => format!("{name} is done"),
+        Some(Some(Status::Error)) => format!("{name} stopped on an error"),
+    }
 }
 
 /// How long ago a session started, in its largest whole unit.
@@ -505,6 +545,39 @@ fn age(created: SystemTime) -> String {
         1440..10080 => format!("{}d", minutes / 1440),
         10080..525600 => format!("{}w", minutes / 10080),
         _ => format!("{}y", minutes / 525600),
+    }
+}
+
+/// How many agents work, need the user, sit idle, or haven't said.
+fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String {
+    let (mut working, mut need_you, mut idle, mut unknown) = (0, 0, 0, 0);
+    for status in running {
+        match status {
+            Some(Status::Working) => working += 1,
+            Some(Status::Blocked(_) | Status::Done | Status::Error) => need_you += 1,
+            Some(Status::Idle) => idle += 1,
+            None => unknown += 1,
+        }
+    }
+    let mut parts = Vec::new();
+    if working > 0 {
+        parts.push(format!("{working} working"));
+    }
+    match need_you {
+        0 => {}
+        1 => parts.push("1 needs you".to_string()),
+        n => parts.push(format!("{n} need you")),
+    }
+    if idle > 0 {
+        parts.push(format!("{idle} idle"));
+    }
+    if unknown > 0 {
+        parts.push(format!("{unknown} running"));
+    }
+    if parts.is_empty() {
+        "No agents running".to_string()
+    } else {
+        parts.join(" · ")
     }
 }
 
@@ -552,7 +625,8 @@ mod tests {
     use notify::EventKind;
     use notify::event::{AccessKind, CreateKind, DataChange, Flag, ModifyKind, RenameMode};
 
-    use super::{Change, changes_sessions};
+    use super::{Change, changes_sessions, summary};
+    use crate::status::Status;
 
     fn event(kind: EventKind, path: &str) -> notify::Event {
         notify::Event::new(kind).add_path(path.into())
@@ -598,5 +672,23 @@ mod tests {
             ),
             Some(Change::Structure)
         );
+    }
+
+    #[test]
+    fn sums_up_what_agents_do() {
+        let sum = |statuses: &[Option<Status>]| summary(statuses.iter());
+        assert_eq!(sum(&[]), "No agents running");
+        assert_eq!(
+            sum(&[
+                Some(Status::Working),
+                Some(Status::Done),
+                Some(Status::Idle),
+                None,
+                Some(Status::Blocked(None)),
+            ]),
+            "1 working · 2 need you · 1 idle · 1 running"
+        );
+        // A CLI that doesn't report may well be working, so it isn't idle.
+        assert_eq!(sum(&[None, None]), "2 running");
     }
 }

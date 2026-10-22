@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
@@ -13,8 +13,9 @@ use crate::agent::Agent;
 use crate::appearance;
 use crate::reports::{self, Reports};
 use crate::sessions::{self, Session};
-use crate::sidebar::{NewChat, Sidebar, SidebarEvent, lamp};
-use crate::terminal::{self, Exited, Pty, Terminal};
+use crate::sidebar::{Lamp, NewChat, Sidebar, SidebarEvent, lamp};
+use crate::status::Status;
+use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::TerminalView;
 
 const SIDEBAR_WIDTH: Pixels = px(280.);
@@ -33,7 +34,7 @@ impl SelectItem for Agent {
     fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         h_flex()
             .gap_2()
-            .child(lamp(appearance::agent_color(*self, cx), false))
+            .child(lamp(appearance::agent_color(*self, cx), Lamp::Off))
             .child(self.display_name())
     }
 }
@@ -62,7 +63,13 @@ struct Chat {
     /// The session file the CLI is in, once known. It changes when the CLI
     /// switches to another session, as on `/clear`.
     session: Option<PathBuf>,
+    /// What the CLI last reported doing, if it reports that at all.
+    status: Option<Status>,
+    /// Whether the CLI finished while another chat was shown, and hasn't been
+    /// looked at since.
+    unseen: bool,
     _exited: Subscription,
+    _status: Subscription,
 }
 
 impl Workspace {
@@ -211,8 +218,25 @@ impl Workspace {
         self.sync_sidebar(cx);
     }
 
+    fn set_status(&mut self, key: &str, status: Option<Status>, cx: &mut Context<Self>) {
+        let shown = self.active.as_deref() == Some(key);
+        let Some(chat) = self.chats.iter_mut().find(|chat| chat.key == key) else {
+            return;
+        };
+        let was_busy = matches!(chat.status, Some(Status::Working | Status::Blocked(_)));
+        chat.unseen = match status {
+            Some(Status::Done | Status::Error) => !shown,
+            // Codex goes back to idle without saying it's done. The others
+            // say so, and go back to idle when a turn is cancelled.
+            Some(Status::Idle) => chat.unseen || (chat.agent == Agent::Codex && was_busy && !shown),
+            _ => false,
+        };
+        chat.status = status;
+        self.sync_sidebar(cx);
+    }
+
     /// Lists running chats whose session isn't listed yet as new chats, and
-    /// marks the one that is shown.
+    /// marks the one that is shown and what each running one is doing.
     fn sync_sidebar(&mut self, cx: &mut Context<Self>) {
         let listed: HashMap<&Path, &str> = self
             .sidebar
@@ -221,7 +245,7 @@ impl Workspace {
             .map(|session| (session.path.as_path(), session.id.as_str()))
             .collect();
         let mut new_chats = Vec::new();
-        let mut running = HashSet::new();
+        let mut running = HashMap::new();
         let mut active = None;
         for chat in &self.chats {
             let id = match chat.session.as_deref().and_then(|path| listed.get(path)) {
@@ -241,7 +265,13 @@ impl Workspace {
                 active = Some(id.clone());
             }
             if !chat.terminal.read(cx).exited() {
-                running.insert(id);
+                // The sidebar shows a finished CLI as done until it is seen.
+                let status = match chat.status {
+                    Some(Status::Idle | Status::Done) if chat.unseen => Some(Status::Done),
+                    Some(Status::Done) => Some(Status::Idle),
+                    status => status,
+                };
+                running.insert(id, status);
             }
         }
         self.sidebar.update(cx, |sidebar, cx| {
@@ -284,6 +314,12 @@ impl Workspace {
                 cx.notify();
             }
         });
+        let status = cx.subscribe(&terminal, {
+            let key = key.clone();
+            move |this, _, StatusChanged(status): &StatusChanged, cx| {
+                this.set_status(&key, *status, cx)
+            }
+        });
         self.chats.push(Chat {
             key: key.clone(),
             agent,
@@ -291,17 +327,21 @@ impl Workspace {
             terminal,
             view,
             session,
+            status: None,
+            unseen: false,
             _exited: exited,
+            _status: status,
         });
         self.activate(key, window, cx);
     }
 
     fn activate(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
-        for chat in &self.chats {
+        for chat in &mut self.chats {
             let shown = chat.key == key;
             chat.terminal.read(cx).set_visible(shown);
             if shown {
                 chat.view.focus_handle(cx).focus(window, cx);
+                chat.unseen = false;
             }
         }
         self.active = Some(key);
@@ -351,7 +391,7 @@ impl Render for Workspace {
 fn render_empty(cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let legend_item =
-        |color, lit, label: &'static str| h_flex().gap_2().child(lamp(color, lit)).child(label);
+        |color, state, label: &'static str| h_flex().gap_2().child(lamp(color, state)).child(label);
 
     h_flex()
         .size_full()
@@ -394,7 +434,7 @@ fn render_empty(cx: &App) -> impl IntoElement {
                         .child(h_flex().gap_5().children(Agent::ALL.map(|agent| {
                             legend_item(
                                 appearance::agent_color(agent, cx),
-                                false,
+                                Lamp::Off,
                                 agent.display_name(),
                             )
                         })))
@@ -402,8 +442,9 @@ fn render_empty(cx: &App) -> impl IntoElement {
                             h_flex()
                                 .gap_5()
                                 .text_color(theme.muted_foreground)
-                                .child(legend_item(theme.muted_foreground, false, "Saved"))
-                                .child(legend_item(theme.muted_foreground, true, "Running")),
+                                .child(legend_item(theme.muted_foreground, Lamp::Off, "Saved"))
+                                .child(legend_item(theme.muted_foreground, Lamp::Dim, "Open"))
+                                .child(legend_item(theme.muted_foreground, Lamp::Lit, "Working")),
                         ),
                 ),
         )

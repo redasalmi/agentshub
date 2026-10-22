@@ -28,6 +28,8 @@ use libghostty_vt::{
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use smol::future::FutureExt as _;
 
+use crate::status::{self, Report, Status};
+
 /// Output bursts are coalesced into at most one frame per interval. The first
 /// frame after a quiet period is sent right away so typing stays instant.
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
@@ -140,6 +142,7 @@ enum Msg {
 
 enum Update {
     Frame(Frame),
+    Status(Option<Status>),
     Exited,
 }
 
@@ -316,6 +319,11 @@ pub struct Exited;
 
 impl EventEmitter<Exited> for Terminal {}
 
+/// The CLI reported what it's doing. `None` when it cleared its status.
+pub struct StatusChanged(pub Option<Status>);
+
+impl EventEmitter<StatusChanged> for Terminal {}
+
 impl Terminal {
     pub fn new(pty: Pty, cx: &mut Context<Self>) -> Self {
         let updates = pty.updates;
@@ -323,18 +331,23 @@ impl Terminal {
             while let Ok(update) = updates.recv().await {
                 // Only the newest frame matters, so skip any that queued up.
                 let mut frame = None;
+                let mut statuses = Vec::new();
                 let mut exited = false;
                 for update in
                     std::iter::once(update).chain(std::iter::from_fn(|| updates.try_recv().ok()))
                 {
                     match update {
                         Update::Frame(next) => frame = Some(next),
+                        Update::Status(status) => statuses.push(status),
                         Update::Exited => exited = true,
                     }
                 }
                 let updated = this.update(cx, |this, cx| {
                     if let Some(frame) = frame {
                         this.frame = Some(Arc::new(frame));
+                    }
+                    for status in statuses {
+                        cx.emit(StatusChanged(status));
                     }
                     if exited && !this.exited {
                         this.exited = true;
@@ -467,6 +480,7 @@ fn run(
         })?
         .on_xtversion(|_| Some("agentshub"))?;
 
+    let mut statuses = status::Scanner::default();
     let mut render_state = RenderState::new()?;
     let mut rows = RowIterator::new()?;
     let mut cells = CellIterator::new()?;
@@ -497,7 +511,22 @@ fn run(
 
         match msg {
             Some(Msg::Output(bytes)) => {
-                terminal.vt_write(&bytes);
+                // Queries are answered in the order they came: CLIs follow the
+                // status query with a device attributes query, and take that
+                // answer coming first to mean reports aren't read.
+                let mut written = 0;
+                statuses.scan(&bytes, |report, end| match report {
+                    Report::Query => {
+                        terminal.vt_write(&bytes[written..end]);
+                        written = end;
+                        input.append(&mut replies.borrow_mut());
+                        input.extend_from_slice(status::QUERY_REPLY);
+                    }
+                    Report::Status(status) => {
+                        updates.send_blocking(Update::Status(status)).ok();
+                    }
+                });
+                terminal.vt_write(&bytes[written..]);
                 input.append(&mut replies.borrow_mut());
                 dirty = true;
             }
@@ -785,6 +814,47 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn reports_status_and_answers_queries_in_order() {
+        // What the terminal answers comes back as input, made visible by `tr`.
+        let script = r"stty raw -echo
+            printf '\033]7501;state=working\033\\\033[c\033]7501;?\033\\\033[c'
+            head -c 36 | tr '\033' E; sleep 1";
+        let pty = Pty::spawn(
+            "sh",
+            &["-c".into(), script.into()],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut status, mut answers) = (None, None);
+        while status.is_none() || answers.is_none() {
+            assert!(Instant::now() < deadline, "no status, or no answers");
+            match smol::block_on(pty.updates.recv()).unwrap() {
+                Update::Status(reported) => status = Some(reported),
+                Update::Frame(frame) => {
+                    let text = frame.rows[0]
+                        .iter()
+                        .map(|run| run.text.as_str())
+                        .collect::<String>();
+                    if !text.trim().is_empty() {
+                        answers = Some(text.trim().to_string());
+                    }
+                }
+                Update::Exited => panic!("exited early"),
+            }
+        }
+        assert_eq!(status, Some(Some(Status::Working)));
+        assert_eq!(
+            answers.as_deref(),
+            Some(r"E[?62;1;6;22cE]7501;?E\E[?62;1;6;22c")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn reaps_the_child_once_it_exits() {
         let pty = Pty::spawn(
             "sh",
@@ -807,6 +877,7 @@ mod tests {
                         .collect::<String>();
                     pid = pid.or(text.trim().parse::<u32>().ok());
                 }
+                Update::Status(_) => {}
                 Update::Exited => break,
             }
         }

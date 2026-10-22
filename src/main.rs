@@ -3,6 +3,7 @@ mod appearance;
 mod reports;
 mod sessions;
 mod sidebar;
+mod status;
 mod terminal;
 mod terminal_view;
 mod workspace;
