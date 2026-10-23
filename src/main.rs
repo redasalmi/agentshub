@@ -41,6 +41,7 @@ fn main() {
     gpui_kit::application().with_assets(Assets).run(|cx| {
         gpui_kit::init(cx);
         terminal_view::init(cx);
+        workspace::init(cx);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
 
         let options = WindowOptions {

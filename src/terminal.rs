@@ -264,7 +264,7 @@ impl Pty {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                         match reaper_pid.lock().unwrap().take() {
                             #[cfg(unix)]
-                            Some(pid) => kill_group(pid),
+                            Some(pid) => kill_session(pid),
                             _ => {
                                 child.kill().ok();
                             }
@@ -314,20 +314,53 @@ pub fn wait_reaped(reaped: impl IntoIterator<Item = smol::channel::Receiver<()>>
     });
 }
 
-/// Hangs up the CLI's process group, then kills whatever is left of it once
-/// the CLI has exited or its grace period is over, so processes it started,
-/// like the native binary behind an npm launcher or anything that ignores
-/// SIGHUP, don't outlive it. The CLI leads its own session, so the group id is
-/// its pid. The CLI isn't reaped before the last signal, which keeps that id
-/// from being reused by another group in the meantime.
+/// Hangs up the CLI's session, then kills whatever is left of it once the
+/// CLI has exited or its grace period is over, so processes it started, like
+/// the native binary behind an npm launcher, a shell's jobs or anything that
+/// ignores SIGHUP, don't outlive it. The CLI leads its own session, so the
+/// session id is its pid. The CLI isn't reaped before the last signal, which
+/// keeps that id from being reused by another session in the meantime.
 #[cfg(unix)]
-fn kill_group(pid: u32) {
-    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGHUP) };
+fn kill_session(pid: u32) {
+    for group in session_groups(pid) {
+        unsafe { libc::killpg(group, libc::SIGHUP) };
+    }
     let deadline = Instant::now() + KILL_GRACE;
     while !has_exited(pid) && Instant::now() < deadline {
         thread::sleep(KILL_POLL);
     }
-    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+    for group in session_groups(pid) {
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+}
+
+/// The process groups in a session: the leader's, and on Linux, the ones
+/// shells give their jobs.
+#[cfg(unix)]
+fn session_groups(session: u32) -> Vec<libc::pid_t> {
+    let mut groups = vec![session as libc::pid_t];
+    #[cfg(target_os = "linux")]
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // The command name can hold spaces and parentheses, so the fields
+        // are counted from after its last `)`: state, ppid, pgrp, session.
+        let Some((_, fields)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace().skip(2);
+        if let (Some(Ok(group)), Some(Ok(id))) = (
+            fields.next().map(str::parse),
+            fields.next().map(str::parse::<u32>),
+        ) && id == session
+        {
+            groups.push(group);
+        }
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    groups
 }
 
 /// Whether the child has exited, leaving it to be reaped.
@@ -1741,6 +1774,44 @@ mod tests {
         pty.reaped.recv_blocking().unwrap_err();
         // The child exits on the hangup, so the grace period is cut short.
         assert!(start.elapsed() < KILL_GRACE, "{:?}", start.elapsed());
+        // Gone, or a zombie left for its new parent to reap.
+        while fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.contains(") Z "))
+        {
+            assert!(Instant::now() < deadline, "{pid} outlived the terminal");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kills_jobs_in_process_groups_of_their_own() {
+        // Job control gives the job a process group of its own, as an
+        // interactive shell does.
+        let pty = Pty::spawn(
+            "sh",
+            &[
+                "-c".into(),
+                "set -m; (trap '' HUP; exec sleep 100) & echo $!; wait".into(),
+            ],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid = loop {
+            assert!(Instant::now() < deadline, "no frame with the pid");
+            let Ok(Update::Frame(frame)) = smol::block_on(pty.updates.recv()) else {
+                continue;
+            };
+            if let Ok(pid) = row_text(&frame).trim().parse::<u32>() {
+                break pid;
+            }
+        };
+        pty.tx.send(Msg::Shutdown).unwrap();
+        pty.reaped.recv_blocking().unwrap_err();
         // Gone, or a zombie left for its new parent to reap.
         while fs::read_to_string(format!("/proc/{pid}/stat"))
             .is_ok_and(|stat| !stat.contains(") Z "))

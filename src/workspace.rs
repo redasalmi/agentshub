@@ -32,6 +32,9 @@ const SIDEBAR_WIDTH: Pixels = px(280.);
 /// The most of the window's height that a chat's earlier sessions take.
 const HISTORY_SHARE: f32 = 0.45;
 
+/// How much of the window's height a project's shell takes under its chat.
+const SHELL_SHARE: f32 = 0.35;
+
 /// Codex writes its session files in bursts, so they're looked at once it
 /// pauses.
 const CODEX_DELAY: Duration = Duration::from_millis(500);
@@ -44,6 +47,14 @@ const MAX_RUNNING: usize = 4;
 /// session's history.
 const TRANSCRIPT_GONE: &str = "This session's transcript is gone, so it couldn't be resumed. \
                                Its saved history is still available here.";
+
+actions!(workspace, [ToggleShell]);
+
+pub fn init(cx: &mut App) {
+    // Bound without a context so it reaches the workspace before a focused
+    // terminal sends it to its CLI.
+    cx.bind_keys([KeyBinding::new("ctrl-`", ToggleShell, None)]);
+}
 
 impl SelectItem for Agent {
     type Value = Agent;
@@ -107,11 +118,28 @@ pub struct Workspace {
     reading: Vec<i64>,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
+    /// The projects' shells, by folder, for quick commands next to their
+    /// chats. Nothing about them is saved, and they run until they exit or
+    /// the app quits.
+    shells: HashMap<PathBuf, Shell>,
+    /// Whether the shown chat's project shell shows under it.
+    shell_shown: bool,
+    /// Holds the focus when nothing in the workspace does, so its key
+    /// bindings still reach it.
+    focus_handle: FocusHandle,
+}
+
+struct Shell {
+    terminal: Entity<Terminal>,
+    view: Entity<TerminalView>,
+    _exited: Subscription,
 }
 
 struct Chat {
     id: i64,
     agent: Agent,
+    /// Its project's folder, which its CLI runs in.
+    cwd: PathBuf,
     /// The name of the file its CLI reports its sessions to.
     report: String,
     terminal: Option<ChatTerminal>,
@@ -295,6 +323,11 @@ impl Workspace {
                 .filter_map(|chat| chat.terminal.as_ref())
                 .map(|terminal| terminal.terminal.read(cx).shutdown())
                 .chain(this.stopping.values().map(|(reaped, _)| reaped.clone()))
+                .chain(
+                    this.shells
+                        .values()
+                        .map(|shell| shell.terminal.read(cx).shutdown()),
+                )
                 .collect();
             terminal::wait_reaped(reaped);
             for chat in &this.chats {
@@ -330,6 +363,9 @@ impl Workspace {
                     terminal.terminal.read(cx).set_colors(colors);
                 }
             }
+            for shell in this.shells.values() {
+                shell.terminal.read(cx).set_colors(colors);
+            }
         });
 
         let mut this = Self {
@@ -353,6 +389,9 @@ impl Workspace {
             broken,
             reading: Vec::new(),
             _lock: lock,
+            shells: HashMap::new(),
+            shell_shown: false,
+            focus_handle: cx.focus_handle(),
         };
         this.update_codex_watch();
         this.refresh(cx);
@@ -447,6 +486,11 @@ impl Workspace {
                         let project = projects.iter().find(|project| project.id == id);
                         for chat in project.into_iter().flat_map(|project| &project.chats) {
                             this.stop_chat(chat.id, cx);
+                        }
+                        // Dropping its terminal kills the shell.
+                        if let Some(project) = project {
+                            this.shells.remove(&project.path);
+                            this.sync_shells(cx);
                         }
                         if let Err(err) = this.db.remove_project(id) {
                             eprintln!("can't remove project {id}: {err}");
@@ -734,6 +778,7 @@ impl Workspace {
                     this.block_chat(
                         id,
                         agent,
+                        &cwd,
                         "This session is running in another chat. Start a new session to \
                          keep going here."
                             .into(),
@@ -1086,16 +1131,18 @@ impl Workspace {
             }
         };
         let started = terminal.is_ok();
-        self.push_chat(id, agent, report, terminal, session, cx);
+        self.push_chat(id, agent, cwd, report, terminal, session, cx);
         started
     }
 
     /// Adds a chat to the view, with the history of the sessions it has: with
     /// its terminal, or with why its CLI didn't start.
+    #[allow(clippy::too_many_arguments)]
     fn push_chat(
         &mut self,
         id: i64,
         agent: Agent,
+        cwd: &Path,
         report: String,
         terminal: Result<ChatTerminal, SharedString>,
         session: Option<&db::Session>,
@@ -1117,6 +1164,7 @@ impl Workspace {
         self.chats.push(Chat {
             id,
             agent,
+            cwd: cwd.to_path_buf(),
             report,
             terminal,
             message,
@@ -1145,14 +1193,21 @@ impl Workspace {
     /// Shows a chat whose CLI wasn't started, with the reason above the
     /// history. Restarting starts a new session rather than resuming the one
     /// that couldn't start.
-    fn block_chat(&mut self, id: i64, agent: Agent, message: SharedString, cx: &mut Context<Self>) {
+    fn block_chat(
+        &mut self,
+        id: i64,
+        agent: Agent,
+        cwd: &Path,
+        message: SharedString,
+        cx: &mut Context<Self>,
+    ) {
         let session = self
             .db
             .sessions(id)
             .ok()
             .and_then(|mut sessions| sessions.pop());
         let report = uuid::Uuid::new_v4().to_string();
-        self.push_chat(id, agent, report, Err(message), session.as_ref(), cx)
+        self.push_chat(id, agent, cwd, report, Err(message), session.as_ref(), cx)
             .fresh_on_restart = true;
         self.sync_sidebar(cx);
         cx.notify();
@@ -1227,6 +1282,7 @@ impl Workspace {
         if self.active == Some(id) {
             self.active = None;
         }
+        self.sync_shells(cx);
         self.sync_sidebar(cx);
         cx.notify();
         reaped
@@ -1344,9 +1400,6 @@ impl Workspace {
             let shown = chat.id == id;
             if let Some(terminal) = &chat.terminal {
                 terminal.terminal.read(cx).set_visible(shown);
-                if shown {
-                    terminal.view.focus_handle(cx).focus(window, cx);
-                }
             }
             if shown {
                 chat.unseen = false;
@@ -1354,8 +1407,108 @@ impl Workspace {
         }
         self.active = Some(id);
         self.requested = Some(id);
+        self.focus_chat(window, cx);
+        self.sync_shells(cx);
         self.sync_sidebar(cx);
         self.evict(cx);
+        cx.notify();
+    }
+
+    fn active_cwd(&self) -> Option<&Path> {
+        self.chats
+            .iter()
+            .find(|chat| Some(chat.id) == self.active)
+            .map(|chat| chat.cwd.as_path())
+    }
+
+    fn shown_shell(&self) -> Option<&Shell> {
+        self.shells
+            .get(self.active_cwd()?)
+            .filter(|_| self.shell_shown)
+    }
+
+    /// Only the shown shell builds frames.
+    fn sync_shells(&self, cx: &App) {
+        let shown = self.active_cwd().filter(|_| self.shell_shown);
+        for (cwd, shell) in &self.shells {
+            shell
+                .terminal
+                .read(cx)
+                .set_visible(Some(cwd.as_path()) == shown);
+        }
+    }
+
+    /// Focuses the shown chat's CLI, or the workspace if it has none running.
+    fn focus_chat(&self, window: &mut Window, cx: &mut App) {
+        match self
+            .chats
+            .iter()
+            .find(|chat| Some(chat.id) == self.active)
+            .and_then(|chat| chat.terminal.as_ref())
+        {
+            Some(terminal) => terminal.view.focus_handle(cx).focus(window, cx),
+            None => self.focus_handle.focus(window, cx),
+        }
+    }
+
+    /// Hides the shell when it has the focus. Otherwise shows and focuses the
+    /// shown chat's project shell, starting it if it isn't running.
+    fn toggle_shell(&mut self, _: &ToggleShell, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cwd) = self.active_cwd().map(Path::to_path_buf) else {
+            return;
+        };
+        if let Some(shell) = self.shown_shell()
+            && shell.view.focus_handle(cx).is_focused(window)
+        {
+            self.shell_shown = false;
+            self.focus_chat(window, cx);
+        } else {
+            if !self.shells.contains_key(&cwd) {
+                let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+                let colors = appearance::terminal_colors(cx);
+                let pty = match Pty::spawn(&program, &[], &[], &cwd, colors) {
+                    Ok(pty) => pty,
+                    Err(err) => {
+                        window.push_notification(format!("Couldn't start {program}: {err}"), cx);
+                        return;
+                    }
+                };
+                let terminal = cx.new(|cx| Terminal::new(pty, cx));
+                let view = cx.new(|cx| TerminalView::new(terminal.clone(), cx));
+                let exited_cwd = cwd.clone();
+                let exited =
+                    cx.subscribe_in(&terminal, window, move |this, _, _: &Exited, window, cx| {
+                        this.shell_exited(&exited_cwd, window, cx)
+                    });
+                self.shells.insert(
+                    cwd.clone(),
+                    Shell {
+                        terminal,
+                        view,
+                        _exited: exited,
+                    },
+                );
+            }
+            self.shell_shown = true;
+            self.shells[&cwd].view.focus_handle(cx).focus(window, cx);
+        }
+        self.sync_shells(cx);
+        cx.notify();
+    }
+
+    /// Closes a shell that exited, hiding the panel if it showed it.
+    fn shell_exited(&mut self, cwd: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_cwd() == Some(cwd) && self.shell_shown {
+            self.shell_shown = false;
+            if self
+                .shells
+                .get(cwd)
+                .is_some_and(|shell| shell.view.focus_handle(cx).is_focused(window))
+            {
+                self.focus_chat(window, cx);
+            }
+        }
+        self.shells.remove(cwd);
         cx.notify();
     }
 }
@@ -1370,11 +1523,15 @@ impl Render for Workspace {
             .active
             .and_then(|id| self.chats.iter().find(|chat| chat.id == id));
         let history_max = window.viewport_size().height * HISTORY_SHARE;
+        let shell_height = window.viewport_size().height * SHELL_SHARE;
+        let shell = self.shown_shell().map(|shell| shell.view.clone());
 
         h_flex()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::toggle_shell))
             // Terminal output re-renders the window many times a second; the
             // sidebar and the history only need to render again when their own
             // state changes.
@@ -1395,7 +1552,13 @@ impl Render for Workspace {
                         Some(chat) => {
                             let id = chat.id;
                             let history_max = if chat.terminal.is_none() {
-                                window.viewport_size().height - px(80.)
+                                window.viewport_size().height
+                                    - px(80.)
+                                    - if shell.is_some() {
+                                        shell_height
+                                    } else {
+                                        px(0.)
+                                    }
                             } else {
                                 history_max
                             };
@@ -1435,6 +1598,16 @@ impl Render for Workspace {
                             .children(chat.terminal.as_ref().map(|terminal| {
                                 div().flex_1().min_h_0().child(terminal.view.clone())
                             }))
+                            .when_some(shell, |this, shell| {
+                                this.child(
+                                    div()
+                                        .flex_none()
+                                        .h(shell_height)
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(shell),
+                                )
+                            })
                         }
                         None => this.child(render_empty(cx)),
                     }),
