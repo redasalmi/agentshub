@@ -6,19 +6,23 @@ use std::sync::LazyLock;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use libghostty_vt::key::{self, Key};
+use libghostty_vt::mouse;
 use libghostty_vt::render::CursorVisualStyle;
 use libghostty_vt::style::RgbColor;
+use libghostty_vt::terminal::Scrollbar;
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::terminal::{Frame, GridSize, KeyInput, Run, Terminal};
+use crate::terminal::{Frame, GridSize, KeyInput, MouseInput, Run, Terminal};
 
 const CONTEXT: &str = "Terminal";
 const FONT_FAMILY: &str = "JetBrains Mono";
 const FONT_FALLBACKS: [&str; 4] = ["DejaVu Sans Mono", "Noto Sans Mono", "Menlo", "Consolas"];
 const FONT_SIZE: Pixels = px(14.);
 const LINE_HEIGHT: f32 = 1.3;
+const SCROLLBAR_WIDTH: Pixels = px(6.);
+const MIN_THUMB_HEIGHT: Pixels = px(24.);
 
-actions!(terminal, [Paste]);
+actions!(terminal, [Copy, Paste]);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -27,6 +31,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("tab", NoAction, Some(CONTEXT)),
         KeyBinding::new("shift-tab", NoAction, Some(CONTEXT)),
         KeyBinding::new("ctrl-c", NoAction, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-c", Copy, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-v", Paste, Some(CONTEXT)),
     ]);
 }
@@ -57,6 +62,11 @@ pub struct TerminalView {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Trackpads scroll by fractions of a line.
     pending_scroll: f32,
+    /// The buttons that went down on the grid and haven't been released.
+    pressed: Vec<mouse::Button>,
+    /// While the scrollbar thumb is dragged, how far below its top it was
+    /// grabbed.
+    thumb_grab: Option<Pixels>,
     /// Text being composed in an input method, shown at the cursor until it
     /// is committed.
     marked_text: Option<String>,
@@ -71,6 +81,8 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             bounds: Rc::default(),
             pending_scroll: 0.,
+            pressed: Vec::new(),
+            thumb_grab: None,
             marked_text: None,
             _observe_terminal: observe_terminal,
         }
@@ -103,6 +115,139 @@ impl TerminalView {
                 .read(cx)
                 .scroll(-lines as isize, position.x.into(), position.y.into());
         }
+    }
+
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
+        let Some(button) = mouse_button(event.button) else {
+            return;
+        };
+        let bounds = self.bounds.get();
+        let thumb = self
+            .terminal
+            .read(cx)
+            .frame()
+            .and_then(|frame| thumb_bounds(&frame.scrollbar, bounds));
+        if let Some(thumb) =
+            thumb.filter(|_| button == mouse::Button::Left && event.position.x >= bounds.right())
+        {
+            // A click on the track jumps there, holding the thumb by its middle.
+            let y = event.position.y;
+            let grab = if (thumb.top()..thumb.bottom()).contains(&y) {
+                y - thumb.top()
+            } else {
+                thumb.size.height / 2.
+            };
+            self.thumb_grab = Some(grab);
+            self.drag_thumb(y, cx);
+        } else {
+            if !self.pressed.contains(&button) {
+                self.pressed.push(button);
+            }
+            self.mouse(
+                mouse::Action::Press,
+                Some(button),
+                event.position,
+                &event.modifiers,
+                cx,
+            );
+        }
+    }
+
+    /// Hovering, for CLIs that track every motion.
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.pressed.is_empty() && self.thumb_grab.is_none() {
+            self.mouse(
+                mouse::Action::Motion,
+                None,
+                event.position,
+                &event.modifiers,
+                cx,
+            );
+        }
+    }
+
+    /// Drags go on past the terminal's bounds, so these come from the window.
+    fn drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if event.pressed_button.is_none() {
+            // The release went elsewhere, e.g. while another workspace was shown.
+            self.thumb_grab = None;
+            for button in std::mem::take(&mut self.pressed) {
+                self.mouse(
+                    mouse::Action::Release,
+                    Some(button),
+                    event.position,
+                    &event.modifiers,
+                    cx,
+                );
+            }
+        } else if self.thumb_grab.is_some() {
+            self.drag_thumb(event.position.y, cx);
+        } else if !self.pressed.is_empty() {
+            let button = event.pressed_button.and_then(mouse_button);
+            self.mouse(
+                mouse::Action::Motion,
+                button,
+                event.position,
+                &event.modifiers,
+                cx,
+            );
+        }
+    }
+
+    fn mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        if event.button == MouseButton::Left {
+            self.thumb_grab = None;
+        }
+        let button = mouse_button(event.button);
+        if let Some(i) = self.pressed.iter().position(|&held| Some(held) == button) {
+            self.pressed.remove(i);
+            self.mouse(
+                mouse::Action::Release,
+                button,
+                event.position,
+                &event.modifiers,
+                cx,
+            );
+        }
+    }
+
+    fn mouse(
+        &self,
+        action: mouse::Action,
+        button: Option<mouse::Button>,
+        position: Point<Pixels>,
+        modifiers: &Modifiers,
+        cx: &App,
+    ) {
+        let position = position - self.bounds.get().origin;
+        self.terminal.read(cx).mouse(MouseInput {
+            action,
+            button,
+            mods: key_mods(modifiers),
+            x: position.x.into(),
+            y: position.y.into(),
+        });
+    }
+
+    fn drag_thumb(&self, y: Pixels, cx: &App) {
+        let (Some(grab), Some(frame)) = (self.thumb_grab, self.terminal.read(cx).frame()) else {
+            return;
+        };
+        let bounds = self.bounds.get();
+        let Some(thumb) = thumb_bounds(&frame.scrollbar, bounds) else {
+            return;
+        };
+        let travel = (bounds.size.height - thumb.size.height).max(px(1.));
+        let fraction = ((y - grab - bounds.top()) / travel).clamp(0., 1.);
+        let rows = frame.scrollbar.total - frame.scrollbar.len;
+        self.terminal
+            .read(cx)
+            .scroll_to((fraction * rows as f32).round() as usize);
+    }
+
+    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal.read(cx).copy();
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
@@ -237,11 +382,10 @@ impl Render for TerminalView {
             .bg(background)
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.focus_handle.focus(window, cx)),
-            )
+            .on_any_mouse_down(cx.listener(Self::mouse_down))
+            .on_mouse_move(cx.listener(Self::mouse_move))
             .child(
                 canvas(
                     move |grid_bounds, window, cx| {
@@ -258,6 +402,22 @@ impl Render for TerminalView {
                         cell
                     },
                     move |grid_bounds, cell, window, cx| {
+                        window.on_mouse_event({
+                            let view = view.clone();
+                            move |event: &MouseMoveEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Bubble {
+                                    view.update(cx, |this, cx| this.drag(event, cx));
+                                }
+                            }
+                        });
+                        window.on_mouse_event({
+                            let view = view.clone();
+                            move |event: &MouseUpEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Bubble {
+                                    view.update(cx, |this, cx| this.mouse_up(event, cx));
+                                }
+                            }
+                        });
                         window.handle_input(
                             &focus_handle,
                             ElementInputHandler::new(grid_bounds, view),
@@ -265,6 +425,12 @@ impl Render for TerminalView {
                         );
                         if let Some(frame) = frame {
                             paint_frame(&frame, grid_bounds.origin, cell, focused, window, cx);
+                            if let Some(thumb) = thumb_bounds(&frame.scrollbar, grid_bounds) {
+                                window.paint_quad(
+                                    fill(thumb, cx.theme().scrollbar_thumb)
+                                        .corner_radii(SCROLLBAR_WIDTH / 2.),
+                                );
+                            }
                             if let Some((text, cursor)) = marked_text.zip(frame.cursor.as_ref()) {
                                 let origin = grid_bounds.origin
                                     + point(
@@ -302,6 +468,22 @@ fn cell_size(window: &Window) -> Size<Pixels> {
     size(width, (FONT_SIZE * LINE_HEIGHT).round())
 }
 
+/// Where the scrollbar thumb sits, in the padding right of the grid, when
+/// there is scrollback to scroll through.
+fn thumb_bounds(scrollbar: &Scrollbar, grid: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
+    let Scrollbar { total, offset, len } = *scrollbar;
+    if total <= len {
+        return None;
+    }
+    let track = grid.size.height;
+    let height = (track * (len as f32 / total as f32)).max(MIN_THUMB_HEIGHT.min(track));
+    let top = (track - height) * (offset as f32 / (total - len) as f32);
+    Some(Bounds::new(
+        point(grid.right() + px(3.), grid.top() + top),
+        size(SCROLLBAR_WIDTH, height),
+    ))
+}
+
 /// The complete grapheme under the cursor's cell. A grapheme can span several
 /// chars, and a combining mark takes up no cell of its own.
 fn cursor_grapheme(run: &Run, col: u16) -> Option<&str> {
@@ -336,6 +518,20 @@ fn paint_frame(
                     color(bg),
                 ));
             }
+        }
+    }
+
+    let selection_color = cx.theme().selection;
+    for (row, selection) in frame.selection.iter().enumerate() {
+        if let Some(selection) = selection {
+            let cells = selection.end_x - selection.start_x + 1;
+            window.paint_quad(fill(
+                Bounds::new(
+                    cell_origin(selection.start_x, row),
+                    size(cell.width * cells as f32, cell.height),
+                ),
+                selection_color,
+            ));
         }
     }
 
@@ -469,13 +665,27 @@ fn paint_text(
         .ok();
 }
 
-fn key_input(keystroke: &Keystroke) -> Option<KeyInput> {
-    let modifiers = &keystroke.modifiers;
+fn key_mods(modifiers: &Modifiers) -> key::Mods {
     let mut mods = key::Mods::empty();
     mods.set(key::Mods::SHIFT, modifiers.shift);
     mods.set(key::Mods::CTRL, modifiers.control);
     mods.set(key::Mods::ALT, modifiers.alt);
     mods.set(key::Mods::SUPER, modifiers.platform);
+    mods
+}
+
+fn mouse_button(button: MouseButton) -> Option<mouse::Button> {
+    match button {
+        MouseButton::Left => Some(mouse::Button::Left),
+        MouseButton::Right => Some(mouse::Button::Right),
+        MouseButton::Middle => Some(mouse::Button::Middle),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+fn key_input(keystroke: &Keystroke) -> Option<KeyInput> {
+    let modifiers = &keystroke.modifiers;
+    let mut mods = key_mods(modifiers);
 
     // Ctrl and Super combos produce no text; the encoder builds their sequence.
     let mut text = keystroke

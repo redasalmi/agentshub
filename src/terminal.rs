@@ -14,15 +14,22 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use gpui_kit::{Context, EventEmitter, SharedString, Task};
+use gpui_kit::{ClipboardItem, Context, EventEmitter, SharedString, Task};
 use libghostty_vt::{
-    Terminal as VtTerminal, TerminalOptions, key, mouse, paste,
-    render::{CellIterator, CursorVisualStyle, RenderState, RowIterator},
+    Terminal as VtTerminal, TerminalOptions,
+    fmt::Format,
+    key, mouse, paste,
+    render::{CellIterator, CursorVisualStyle, RenderState, RowIterator, RowSelection},
     screen::CellWide,
+    selection::{
+        FormatOptions,
+        gesture::{self, Gesture},
+    },
     style::{RgbColor, Underline},
     terminal::{
-        ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode,
-        PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes,
+        ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, Point,
+        PointCoordinate, PrimaryDeviceAttributes, ScrollViewport, Scrollbar,
+        SecondaryDeviceAttributes,
     },
 };
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -66,11 +73,22 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(300);
 /// a few dozen bytes at most, so reserving this much up front always fits.
 const ENCODE_SPARE: usize = 64;
 
+/// How soon, and how close in pixels, a click must follow the last one to
+/// count towards a double or triple click.
+const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const REPEAT_CLICK_DISTANCE: f64 = 10.;
+
+/// How often a selection dragged past the grid's top or bottom scrolls a row.
+const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(15);
+
 /// What the UI draws: one list of styled runs per visible row.
 pub struct Frame {
     pub rows: Vec<Vec<Run>>,
+    /// The selected cells of each row.
+    pub selection: Vec<Option<RowSelection>>,
     pub cursor: Option<Cursor>,
     pub background: RgbColor,
+    pub scrollbar: Scrollbar,
 }
 
 /// Neighbouring cells of one row that share a style.
@@ -133,12 +151,25 @@ pub struct KeyInput {
     pub unshifted: char,
 }
 
+pub struct MouseInput {
+    pub action: mouse::Action,
+    /// The button pressed or released, or held during a motion.
+    pub button: Option<mouse::Button>,
+    pub mods: key::Mods,
+    /// Relative to the grid's origin.
+    pub x: f32,
+    pub y: f32,
+}
+
 enum Msg {
     Output(Vec<u8>),
     Key(KeyInput),
     Text(String),
     Paste(String),
     Scroll { lines: isize, x: f32, y: f32 },
+    ScrollTo(usize),
+    Mouse(MouseInput),
+    Copy,
     Resize(GridSize),
     Visible(bool),
     Colors(Colors),
@@ -149,6 +180,11 @@ enum Msg {
 enum Update {
     Frame(Frame),
     Status(Option<Status>),
+    /// Text for the clipboard, or for the primary selection on Linux.
+    Copy {
+        text: String,
+        primary: bool,
+    },
     Exited,
 }
 
@@ -381,6 +417,7 @@ impl Terminal {
                 // Only the newest frame matters, so skip any that queued up.
                 let mut frame = None;
                 let mut statuses = Vec::new();
+                let mut copies = Vec::new();
                 let mut exited = false;
                 for update in
                     std::iter::once(update).chain(std::iter::from_fn(|| updates.try_recv().ok()))
@@ -388,6 +425,7 @@ impl Terminal {
                     match update {
                         Update::Frame(next) => frame = Some(next),
                         Update::Status(status) => statuses.push(status),
+                        Update::Copy { text, primary } => copies.push((text, primary)),
                         Update::Exited => exited = true,
                     }
                 }
@@ -398,6 +436,15 @@ impl Terminal {
                     for status in statuses {
                         this.status = status;
                         cx.emit(StatusChanged(status));
+                    }
+                    for (text, primary) in copies {
+                        let item = ClipboardItem::new_string(text);
+                        if primary {
+                            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                            cx.write_to_primary(item);
+                        } else {
+                            cx.write_to_clipboard(item);
+                        }
                     }
                     if exited && !this.exited {
                         this.exited = true;
@@ -468,6 +515,20 @@ impl Terminal {
     /// Negative `lines` scroll up. `x`/`y` are relative to the grid's origin.
     pub fn scroll(&self, lines: isize, x: f32, y: f32) {
         self.tx.send(Msg::Scroll { lines, x, y }).ok();
+    }
+
+    /// Scrolls to `row` rows below the top of the scrollback.
+    pub fn scroll_to(&self, row: usize) {
+        self.tx.send(Msg::ScrollTo(row)).ok();
+    }
+
+    pub fn mouse(&self, input: MouseInput) {
+        self.tx.send(Msg::Mouse(input)).ok();
+    }
+
+    /// Copies the selection to the clipboard.
+    pub fn copy(&self) {
+        self.tx.send(Msg::Copy).ok();
     }
 
     /// Kills the CLI. The returned channel closes once it has been reaped,
@@ -546,6 +607,11 @@ fn run(
     let mut key_event = key::Event::new()?;
     let mut mouse_encoder = mouse::Encoder::new()?;
     let mut mouse_event = mouse::Event::new()?;
+    // The cell of the last mouse event the CLI got.
+    let mut last_cell = None;
+    let mut selecting = Selecting::new()?;
+    // Presses the CLI got, whose releases it gets too whatever Shift does.
+    let mut forwarded = Vec::new();
 
     let mut size = None;
     let mut input = Vec::new();
@@ -555,8 +621,17 @@ fn run(
     let mut last_frame = Instant::now() - FRAME_INTERVAL;
 
     loop {
-        let msg = if dirty && visible {
-            match rx.recv_timeout(FRAME_INTERVAL.saturating_sub(last_frame.elapsed())) {
+        let timeout = [
+            (dirty && visible).then(|| FRAME_INTERVAL.saturating_sub(last_frame.elapsed())),
+            selecting
+                .next_tick
+                .map(|tick| tick.saturating_duration_since(Instant::now())),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let msg = if let Some(timeout) = timeout {
+            match rx.recv_timeout(timeout) {
                 Ok(msg) => Some(msg),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -602,11 +677,13 @@ fn run(
                     .set_options_from_terminal(&terminal)
                     .encode_to_vec(&key_event, &mut input)?;
                 terminal.scroll_viewport(ScrollViewport::Bottom);
+                terminal.set_selection(None)?;
                 dirty = true;
             }
             Some(Msg::Text(text)) => {
                 input.extend_from_slice(text.as_bytes());
                 terminal.scroll_viewport(ScrollViewport::Bottom);
+                terminal.set_selection(None)?;
                 dirty = true;
             }
             Some(Msg::Paste(text)) => {
@@ -616,6 +693,7 @@ fn run(
                 let len = paste::encode(&mut data, bracketed, &mut encoded)?;
                 input.extend_from_slice(&encoded[..len]);
                 terminal.scroll_viewport(ScrollViewport::Bottom);
+                terminal.set_selection(None)?;
                 dirty = true;
             }
             Some(Msg::Scroll { lines, x, y }) => {
@@ -627,15 +705,15 @@ fn run(
                     } else {
                         mouse::Button::Five
                     };
-                    mouse_encoder
-                        .set_options_from_terminal(&terminal)
-                        .set_size(encoder_size(size));
+                    mouse_encoder.set_options_from_terminal(&terminal);
+                    let (x, y) = whole_pixel_position(size, x, y);
                     // Wheel buttons have no release, and CLIs read a release
                     // packet as a second scroll of the same button.
                     mouse_event
                         .set_action(mouse::Action::Press)
                         .set_position(mouse::Position { x, y })
-                        .set_button(Some(button));
+                        .set_button(Some(button))
+                        .set_mods(key::Mods::empty());
                     for _ in 0..lines.unsigned_abs() {
                         input.reserve(ENCODE_SPARE);
                         mouse_encoder.encode_to_vec(&mouse_event, &mut input)?;
@@ -643,6 +721,106 @@ fn run(
                 } else {
                     terminal.scroll_viewport(ScrollViewport::Delta(lines));
                     dirty = true;
+                }
+            }
+            Some(Msg::ScrollTo(row)) => {
+                terminal.scroll_viewport(ScrollViewport::Row(row));
+                dirty = true;
+            }
+            Some(Msg::Mouse(mouse_input)) => {
+                if let Some(size) = size {
+                    let (x, y) = whole_pixel_position(size, mouse_input.x, mouse_input.y);
+                    let left = mouse_input.button == Some(mouse::Button::Left);
+                    // A CLI that tracks the mouse gets it, except with Shift held,
+                    // which selects as in other terminals.
+                    let forward = !forwarded.is_empty()
+                        || (!selecting.active
+                            && !mouse_input.mods.contains(key::Mods::SHIFT)
+                            && terminal.is_mouse_tracking().unwrap_or(false));
+                    if forward {
+                        let screen = encoder_size(size);
+                        let in_grid = (0. ..screen.screen_width as f32).contains(&x)
+                            && (0. ..screen.screen_height as f32).contains(&y);
+                        // A press in the padding only focuses the terminal, a
+                        // release goes only where its press went, and hovering
+                        // the padding isn't hovering the grid's edge.
+                        let report = match mouse_input.action {
+                            mouse::Action::Press => in_grid,
+                            mouse::Action::Release => forwarded
+                                .iter()
+                                .any(|&button| Some(button) == mouse_input.button),
+                            _ => in_grid || !forwarded.is_empty(),
+                        };
+                        match mouse_input.action {
+                            mouse::Action::Press if report => {
+                                forwarded.extend(mouse_input.button);
+                                // The click is the CLI's, so the old selection is gone.
+                                terminal.set_selection(None)?;
+                                dirty = true;
+                            }
+                            mouse::Action::Release => {
+                                forwarded.retain(|&button| Some(button) != mouse_input.button)
+                            }
+                            _ => {}
+                        }
+                        // Motion is only reported when it reaches another cell,
+                        // unless the CLI asked for pixels. Ghostty's encoder
+                        // forgets the last cell whenever its options are set.
+                        let cell = viewport_cell(size, x, y);
+                        let report = report
+                            && (mouse_input.action != mouse::Action::Motion
+                                || last_cell != Some(cell)
+                                || terminal.mode(Mode::SGR_PIXELS_MOUSE)?);
+                        if report {
+                            last_cell = Some(cell);
+                            mouse_encoder
+                                .set_options_from_terminal(&terminal)
+                                .set_any_button_pressed(!forwarded.is_empty());
+                            // Drags past the grid's edges report its edge cells.
+                            mouse_event
+                                .set_action(mouse_input.action)
+                                .set_position(mouse::Position {
+                                    x: x.clamp(0., screen.screen_width as f32 - 1.),
+                                    y: y.clamp(0., screen.screen_height as f32 - 1.),
+                                })
+                                // A drag from the padding is hovering to the CLI.
+                                .set_button(mouse_input.button.filter(|button| {
+                                    mouse_input.action != mouse::Action::Motion
+                                        || forwarded.contains(button)
+                                }))
+                                .set_mods(mouse_input.mods);
+                            input.reserve(ENCODE_SPARE);
+                            mouse_encoder.encode_to_vec(&mouse_event, &mut input)?;
+                        }
+                    } else if (selecting.active
+                        && (left || mouse_input.action == mouse::Action::Motion))
+                        || (left && mouse_input.action == mouse::Action::Press)
+                    {
+                        // A failed selection isn't worth losing the CLI over.
+                        match selecting.mouse(&terminal, mouse_input.action, x, y, size) {
+                            Ok(Some(text)) => {
+                                updates
+                                    .send_blocking(Update::Copy {
+                                        text,
+                                        primary: true,
+                                    })
+                                    .ok();
+                            }
+                            Ok(None) => {}
+                            Err(err) => eprintln!("selecting failed: {err:#}"),
+                        }
+                        dirty = true;
+                    }
+                }
+            }
+            Some(Msg::Copy) => {
+                if let Some(text) = selection_text(&terminal) {
+                    updates
+                        .send_blocking(Update::Copy {
+                            text,
+                            primary: false,
+                        })
+                        .ok();
                 }
             }
             Some(Msg::Resize(new_size)) => {
@@ -658,11 +836,17 @@ fn run(
                     pixel_width: to_px(new_size.cols, new_size.cell_width),
                     pixel_height: to_px(new_size.rows, new_size.cell_height),
                 })?;
+                mouse_encoder.set_size(encoder_size(new_size));
                 size = Some(new_size);
                 dirty = true;
             }
             Some(Msg::Visible(shown)) => {
                 visible = shown;
+                // A hidden view never gets the release, so the drag ends here.
+                if !shown {
+                    selecting.active = false;
+                    selecting.next_tick = None;
+                }
                 dirty = true;
             }
             Some(Msg::Colors(colors)) => {
@@ -676,6 +860,17 @@ fn run(
             }
             Some(Msg::Shutdown) => break,
             None => {}
+        }
+
+        if let Some(size) = size
+            && selecting
+                .next_tick
+                .is_some_and(|tick| tick <= Instant::now())
+        {
+            if let Err(err) = selecting.autoscroll(&terminal, size) {
+                eprintln!("selecting failed: {err:#}");
+            }
+            dirty = true;
         }
 
         if !input.is_empty() {
@@ -724,10 +919,160 @@ fn set_colors(terminal: &mut VtTerminal<'_, '_>, colors: Colors) -> Result<()> {
     Ok(())
 }
 
+/// Turns left-button presses, drags and releases into the terminal's
+/// selection: a drag selects cells, a double click a word, a triple click a
+/// line.
+struct Selecting {
+    gesture: Gesture<'static>,
+    press: gesture::PressEvent<'static>,
+    drag: gesture::DragEvent<'static>,
+    release: gesture::ReleaseEvent<'static>,
+    tick: gesture::AutoscrollTickEvent<'static>,
+    /// The left button went down to select and hasn't been released.
+    active: bool,
+    /// Where the pointer last was, in whole pixels, maybe past the grid.
+    pointer: (f32, f32),
+    /// When to next scroll towards a pointer dragged past the grid's top or
+    /// bottom.
+    next_tick: Option<Instant>,
+    /// Presses are timed from here, which tells double clicks apart.
+    epoch: Instant,
+}
+
+impl Selecting {
+    fn new() -> Result<Self> {
+        let mut press = gesture::PressEvent::new()?;
+        // Both default to zero, which makes every click a single click.
+        press
+            .set_repeat_interval(REPEAT_CLICK_INTERVAL)?
+            .set_repeat_distance(REPEAT_CLICK_DISTANCE)?;
+        Ok(Self {
+            gesture: Gesture::new()?,
+            press,
+            drag: gesture::DragEvent::new()?,
+            release: gesture::ReleaseEvent::new()?,
+            tick: gesture::AutoscrollTickEvent::new()?,
+            active: false,
+            pointer: (0., 0.),
+            next_tick: None,
+            epoch: Instant::now(),
+        })
+    }
+
+    /// Returns the selected text once the button is released. `x` and `y`
+    /// are in whole pixels.
+    fn mouse(
+        &mut self,
+        terminal: &VtTerminal<'_, '_>,
+        action: mouse::Action,
+        x: f32,
+        y: f32,
+        size: GridSize,
+    ) -> Result<Option<String>> {
+        let grid_ref = terminal.grid_ref(Point::Viewport(viewport_cell(size, x, y)))?;
+        self.pointer = (x, y);
+        let (x, y) = (x.into(), y.into());
+        let selection = match action {
+            mouse::Action::Press => {
+                self.active = true;
+                self.press
+                    .set_position(x, y)?
+                    .set_time(self.epoch.elapsed())?
+                    .apply(&mut self.gesture, terminal, grid_ref)?
+            }
+            mouse::Action::Release => {
+                self.active = false;
+                self.next_tick = None;
+                self.release
+                    .apply(&mut self.gesture, terminal, Some(grid_ref))?;
+                return Ok(selection_text(terminal));
+            }
+            _ => {
+                let selection = self.drag.set_position(x, y)?.apply(
+                    &mut self.gesture,
+                    terminal,
+                    grid_ref,
+                    geometry(size),
+                )?;
+                self.schedule(terminal)?;
+                selection
+            }
+        };
+        terminal.set_selection(selection.as_ref())?;
+        Ok(None)
+    }
+
+    /// Scrolls a row towards the pointer past the grid's top or bottom, and
+    /// selects up to the row it brought under the pointer.
+    fn autoscroll(&mut self, terminal: &VtTerminal<'_, '_>, size: GridSize) -> Result<()> {
+        self.next_tick = None;
+        let (x, y) = self.pointer;
+        let selection = self.tick.set_position(x.into(), y.into())?.apply(
+            &mut self.gesture,
+            terminal,
+            viewport_cell(size, x, y),
+            geometry(size),
+        )?;
+        self.schedule(terminal)?;
+        // None means the press is gone, which leaves the selection be.
+        if let Some(selection) = selection {
+            terminal.set_selection(Some(&selection))?;
+        }
+        Ok(())
+    }
+
+    /// Ticks while the gesture asks to scroll, keeping a tick already due.
+    fn schedule(&mut self, terminal: &VtTerminal<'_, '_>) -> Result<()> {
+        let scrolling = self.gesture.autoscroll(terminal)? != gesture::Autoscroll::None;
+        self.next_tick = scrolling.then(|| {
+            self.next_tick
+                .unwrap_or_else(|| Instant::now() + AUTOSCROLL_INTERVAL)
+        });
+        Ok(())
+    }
+}
+
+/// The selection as plain text, laid out the way Ghostty copies it.
+fn selection_text(terminal: &VtTerminal<'_, '_>) -> Option<String> {
+    let options = FormatOptions::new()
+        .with_emit_format(Format::Plain)
+        .with_unwrap(true)
+        .with_trim(true);
+    let bytes = terminal.format_selection_alloc(None, options).ok()??;
+    Some(String::from_utf8_lossy(&bytes).into_owned()).filter(|text| !text.is_empty())
+}
+
+/// Ghostty measures the mouse in whole-pixel cells, so a position over cells
+/// of a fractional size is scaled onto cells of the truncated size.
+fn whole_pixel_position(size: GridSize, x: f32, y: f32) -> (f32, f32) {
+    (
+        x / size.cell_width * size.cell_width.trunc(),
+        y / size.cell_height * size.cell_height.trunc(),
+    )
+}
+
+/// The viewport cell at a whole-pixel position, or the nearest one when it's
+/// past the grid's edges.
+fn viewport_cell(size: GridSize, x: f32, y: f32) -> PointCoordinate {
+    PointCoordinate {
+        x: ((x / size.cell_width.trunc()) as u16).min(size.cols.saturating_sub(1)),
+        y: ((y / size.cell_height.trunc()) as u32).min(size.rows.saturating_sub(1).into()),
+    }
+}
+
+fn geometry(size: GridSize) -> gesture::Geometry {
+    gesture::Geometry {
+        columns: size.cols.into(),
+        cell_width: size.cell_width as u32,
+        padding_left: 0,
+        screen_height: size.rows as u32 * size.cell_height as u32,
+    }
+}
+
 fn encoder_size(size: GridSize) -> mouse::EncoderSize {
     mouse::EncoderSize {
-        screen_width: (size.cols as f32 * size.cell_width) as u32,
-        screen_height: (size.rows as f32 * size.cell_height) as u32,
+        screen_width: size.cols as u32 * size.cell_width as u32,
+        screen_height: size.rows as u32 * size.cell_height as u32,
         cell_width: size.cell_width as u32,
         cell_height: size.cell_height as u32,
         padding_top: 0,
@@ -757,9 +1102,11 @@ fn build_frame<'alloc>(
     };
 
     let mut frame_rows = Vec::new();
+    let mut selection = Vec::new();
     let mut text = String::new();
     let mut row_iter = rows.update(&snapshot)?;
     while let Some(row) = row_iter.next() {
+        selection.push(row.selection()?);
         let mut runs: Vec<Run> = Vec::new();
         let mut run_text = String::new();
         let mut cell_iter = cells.update(row)?;
@@ -837,8 +1184,10 @@ fn build_frame<'alloc>(
 
     Ok(Frame {
         rows: frame_rows,
+        selection,
         cursor,
         background: colors.background,
+        scrollbar: terminal.scrollbar()?,
     })
 }
 
@@ -946,6 +1295,7 @@ mod tests {
                         answers = Some(text.trim().to_string());
                     }
                 }
+                Update::Copy { .. } => {}
                 Update::Exited => panic!("exited early"),
             }
         }
@@ -954,6 +1304,340 @@ mod tests {
             answers.as_deref(),
             Some(r"E[?62;1;6;22cE]7501;?E\E[?62;1;6;22c")
         );
+    }
+
+    const GRID: GridSize = GridSize {
+        cols: 80,
+        rows: 24,
+        cell_width: 10.,
+        cell_height: 20.,
+    };
+
+    /// A left button event at `x` on the first row.
+    fn mouse(action: mouse::Action, x: f32, mods: key::Mods) -> Msg {
+        Msg::Mouse(MouseInput {
+            action,
+            button: Some(mouse::Button::Left),
+            mods,
+            x,
+            y: 5.,
+        })
+    }
+
+    fn pointer(action: mouse::Action, button: Option<mouse::Button>, x: f32, y: f32) -> Msg {
+        Msg::Mouse(MouseInput {
+            action,
+            button,
+            mods: key::Mods::empty(),
+            x,
+            y,
+        })
+    }
+
+    /// The text copied once the button is released.
+    fn wait_for_copy(pty: &Pty) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "nothing was selected");
+            if let Update::Copy { text, .. } = next_update(pty, deadline) {
+                return text;
+            }
+        }
+    }
+
+    /// The next update, failing the test once `deadline` passes without one.
+    fn next_update(pty: &Pty, deadline: Instant) -> Update {
+        let timeout = async {
+            smol::Timer::at(deadline).await;
+            None
+        };
+        smol::block_on(async { pty.updates.recv().await.ok() }.or(timeout))
+            .expect("no update in time")
+    }
+
+    /// Waits for a frame whose `row` contains `text`.
+    fn wait_for_row(pty: &Pty, row: usize, text: &str) -> Frame {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "no frame with {text:?}");
+            if let Update::Frame(frame) = next_update(pty, deadline)
+                && frame.rows[row]
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+                    .contains(text)
+            {
+                return frame;
+            }
+        }
+    }
+
+    #[test]
+    fn selects_dragged_text_and_copies_it() {
+        let pty = Pty::spawn(
+            "sh",
+            &["-c".into(), "printf 'hello world'; sleep 2".into()],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        pty.tx.send(Msg::Resize(GRID)).unwrap();
+        wait_for_row(&pty, 0, "hello world");
+
+        pty.tx
+            .send(mouse(mouse::Action::Press, 2., key::Mods::empty()))
+            .unwrap();
+        pty.tx
+            .send(mouse(mouse::Action::Motion, 48., key::Mods::empty()))
+            .unwrap();
+        pty.tx
+            .send(mouse(mouse::Action::Release, 48., key::Mods::empty()))
+            .unwrap();
+        pty.tx.send(Msg::Copy).unwrap();
+
+        let mut copies = Vec::new();
+        let mut selected = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while copies.len() < 2 || selected.is_none() {
+            assert!(Instant::now() < deadline, "{copies:?}, {selected:?}");
+            match next_update(&pty, deadline) {
+                Update::Copy { text, primary } => copies.push((text, primary)),
+                Update::Frame(frame) => {
+                    selected = selected.or(frame.selection[0].map(|row| (row.start_x, row.end_x)));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            copies,
+            [("hello".to_string(), true), ("hello".to_string(), false)]
+        );
+        assert_eq!(selected, Some((0, 4)));
+    }
+
+    #[test]
+    fn double_click_selects_a_word() {
+        let pty = Pty::spawn(
+            "sh",
+            &["-c".into(), "printf 'hello world'; sleep 2".into()],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        pty.tx.send(Msg::Resize(GRID)).unwrap();
+        wait_for_row(&pty, 0, "hello world");
+
+        for _ in 0..2 {
+            for action in [mouse::Action::Press, mouse::Action::Release] {
+                pty.tx.send(mouse(action, 72., key::Mods::empty())).unwrap();
+            }
+        }
+
+        assert_eq!(wait_for_copy(&pty), "world");
+    }
+
+    #[test]
+    fn selects_by_the_cells_drawn_when_they_are_fractional() {
+        let pty = Pty::spawn(
+            "sh",
+            &["-c".into(), "printf 'ABCDEFGHIJKLMNOP'; sleep 2".into()],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        pty.tx
+            .send(Msg::Resize(GridSize {
+                cell_width: 8.4,
+                ..GRID
+            }))
+            .unwrap();
+        wait_for_row(&pty, 0, "ABCDEFGHIJKLMNOP");
+
+        // From the left edge of K to well past the middle of L.
+        pty.tx
+            .send(mouse(mouse::Action::Press, 84.1, key::Mods::empty()))
+            .unwrap();
+        pty.tx
+            .send(mouse(mouse::Action::Motion, 99.7, key::Mods::empty()))
+            .unwrap();
+        pty.tx
+            .send(mouse(mouse::Action::Release, 99.7, key::Mods::empty()))
+            .unwrap();
+        assert_eq!(wait_for_copy(&pty), "KL");
+    }
+
+    #[test]
+    fn scrolls_while_selecting_above_the_grid() {
+        let pty = Pty::spawn(
+            "sh",
+            &["-c".into(), "seq 100; sleep 5".into()],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        pty.tx.send(Msg::Resize(GRID)).unwrap();
+        let offset = wait_for_row(&pty, 22, "100").scrollbar.offset;
+
+        // Past the end of 83, so all of it is selected.
+        let left = Some(mouse::Button::Left);
+        pty.tx
+            .send(pointer(mouse::Action::Press, left, 25., 100.))
+            .unwrap();
+        pty.tx
+            .send(pointer(mouse::Action::Motion, left, 5., -30.))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "the viewport never scrolled");
+            if let Update::Frame(frame) = next_update(&pty, deadline)
+                && frame.scrollbar.offset + 3 <= offset
+            {
+                break;
+            }
+        }
+        pty.tx
+            .send(pointer(mouse::Action::Release, left, 5., -30.))
+            .unwrap();
+        // 77 was in the scrollback when the drag began.
+        let text = wait_for_copy(&pty);
+        assert!(
+            text.contains("\n77\n") && text.ends_with("\n83"),
+            "{text:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forwards_the_mouse_to_a_cli_that_tracks_it() {
+        // What the terminal sends comes back as input, made visible by `tr`.
+        let script = r"stty raw -echo
+            printf '\033[?1000h\033[?1006hready\r\n'
+            head -c 18 | tr '\033' E; sleep 1";
+        let pty = Pty::spawn(
+            "sh",
+            &["-c".into(), script.into()],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        pty.tx.send(Msg::Resize(GRID)).unwrap();
+        wait_for_row(&pty, 0, "ready");
+
+        // Shift selects instead, so the CLI never sees this drag.
+        for (action, x) in [
+            (mouse::Action::Press, 5.),
+            (mouse::Action::Motion, 48.),
+            (mouse::Action::Release, 48.),
+        ] {
+            pty.tx.send(mouse(action, x, key::Mods::SHIFT)).unwrap();
+        }
+        assert_eq!(wait_for_copy(&pty), "ready");
+        // A press the CLI got has its release go there too, Shift or not.
+        pty.tx
+            .send(mouse(mouse::Action::Press, 25., key::Mods::empty()))
+            .unwrap();
+        pty.tx
+            .send(mouse(mouse::Action::Release, 25., key::Mods::SHIFT))
+            .unwrap();
+        let frame = wait_for_row(&pty, 1, "E[<0;3;1ME[<4;3;1m");
+        // The CLI's click drops the selection.
+        assert!(frame.selection[0].is_none());
+    }
+
+    #[test]
+    fn stops_scrolling_a_selection_once_hidden() {
+        let pty = Pty::spawn(
+            "sh",
+            &["-c".into(), "seq 100; sleep 5".into()],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        pty.tx.send(Msg::Resize(GRID)).unwrap();
+        let offset = wait_for_row(&pty, 22, "100").scrollbar.offset;
+
+        let left = Some(mouse::Button::Left);
+        pty.tx
+            .send(pointer(mouse::Action::Press, left, 25., 100.))
+            .unwrap();
+        pty.tx
+            .send(pointer(mouse::Action::Motion, left, 5., -30.))
+            .unwrap();
+        pty.tx.send(Msg::Visible(false)).unwrap();
+        thread::sleep(Duration::from_millis(250));
+        pty.tx.send(Msg::Visible(true)).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Update::Frame(frame) = next_update(&pty, deadline) {
+                assert_eq!(frame.scrollbar.offset, offset);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn keeps_clicks_in_the_padding_from_a_cli() {
+        // What the terminal sends comes back as input, made visible by `tr`.
+        let script = r"stty raw -echo
+            printf '\033[?1002h\033[?1006hready\r\n'
+            head -c 18 | tr '\033' E; sleep 1";
+        let pty = Pty::spawn(
+            "sh",
+            &["-c".into(), script.into()],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        pty.tx.send(Msg::Resize(GRID)).unwrap();
+        wait_for_row(&pty, 0, "ready");
+
+        let left = Some(mouse::Button::Left);
+        // A drag from the padding into the grid, then a click in it.
+        for (action, x, y) in [
+            (mouse::Action::Press, -5., -5.),
+            (mouse::Action::Motion, 15., 5.),
+            (mouse::Action::Release, 15., 5.),
+            (mouse::Action::Press, 25., 5.),
+            (mouse::Action::Release, 25., 5.),
+        ] {
+            pty.tx.send(pointer(action, left, x, y)).unwrap();
+        }
+        wait_for_row(&pty, 1, "E[<0;3;1ME[<0;3;1m");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reports_motion_once_per_cell() {
+        // What the terminal sends comes back as input, made visible by `tr`.
+        let script = r"stty raw -echo
+            printf '\033[?1003h\033[?1006hready\r\n'
+            head -c 30 | tr '\033' E; sleep 1";
+        let pty = Pty::spawn(
+            "sh",
+            &["-c".into(), script.into()],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        pty.tx.send(Msg::Resize(GRID)).unwrap();
+        wait_for_row(&pty, 0, "ready");
+
+        // Hovering the padding isn't hovering the first cell.
+        for (x, y) in [(2., 5.), (5., 5.), (25., 5.), (-5., -5.), (35., 5.)] {
+            pty.tx
+                .send(pointer(mouse::Action::Motion, None, x, y))
+                .unwrap();
+        }
+        wait_for_row(&pty, 1, "E[<35;1;1ME[<35;3;1ME[<35;4;1M");
     }
 
     #[cfg(target_os = "linux")]
@@ -976,7 +1660,7 @@ mod tests {
                 Update::Frame(frame) => {
                     pid = pid.or(row_text(&frame).trim().parse::<u32>().ok());
                 }
-                Update::Status(_) => {}
+                Update::Status(_) | Update::Copy { .. } => {}
                 Update::Exited => break,
             }
         }
