@@ -30,10 +30,16 @@ use smol::future::FutureExt as _;
 
 use crate::status::{self, Report, Status};
 
-/// Output bursts are coalesced into at most one frame per interval. The first
-/// frame after a quiet period is sent right away so typing stays instant.
-const FRAME_INTERVAL: Duration = Duration::from_millis(8);
+/// Output bursts are coalesced into at most one frame per interval, which is
+/// about what a display takes. The first frame after a quiet period is sent
+/// right away so typing stays instant.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const SCROLLBACK_LINES: usize = 10_000;
+
+/// How many updates may wait for the UI. Frames are dropped rather than queued
+/// past this: the next one carries everything they left out, and a stalled UI
+/// must not make the terminal thread grow memory.
+const UPDATE_QUEUE: usize = 8;
 
 /// How often the child's own exit is checked for. Short enough that an exited
 /// CLI is marked dead before anyone notices the delay.
@@ -182,7 +188,7 @@ impl Pty {
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         let (tx, rx) = mpsc::channel();
-        let (updates_tx, updates) = smol::channel::unbounded();
+        let (updates_tx, updates) = smol::channel::bounded(UPDATE_QUEUE);
 
         let output_tx = tx.clone();
         thread::spawn(move || {
@@ -377,10 +383,6 @@ impl Terminal {
         self.frame.clone()
     }
 
-    pub fn exited(&self) -> bool {
-        self.exited
-    }
-
     /// Calls `f` with the CLI's pid, unless it has been reaped. The pid can't
     /// be reaped, and so can't belong to another process, until `f` returns.
     pub fn with_pid<T>(&self, f: impl FnOnce(u32) -> Option<T>) -> Option<T> {
@@ -493,6 +495,7 @@ fn run(
     let mut input = Vec::new();
     let mut dirty = false;
     let mut visible = true;
+    let mut exiting = false;
     let mut last_frame = Instant::now() - FRAME_INTERVAL;
 
     loop {
@@ -587,14 +590,17 @@ fn run(
                 }
             }
             Some(Msg::Resize(new_size)) => {
+                let to_px = |cells: u16, size: f32| {
+                    (cells as u32 * size as u32).min(u16::MAX as u32) as u16
+                };
                 let (cell_width, cell_height) =
                     (new_size.cell_width as u32, new_size.cell_height as u32);
                 terminal.resize(new_size.cols, new_size.rows, cell_width, cell_height)?;
                 master.resize(PtySize {
                     rows: new_size.rows,
                     cols: new_size.cols,
-                    pixel_width: new_size.cols * cell_width as u16,
-                    pixel_height: new_size.rows * cell_height as u16,
+                    pixel_width: to_px(new_size.cols, new_size.cell_width),
+                    pixel_height: to_px(new_size.rows, new_size.cell_height),
                 })?;
                 size = Some(new_size);
                 dirty = true;
@@ -608,7 +614,9 @@ fn run(
                 dirty = true;
             }
             Some(Msg::Exited) => {
-                updates.send_blocking(Update::Exited).ok();
+                // What the CLI printed last is part of what it did, so it goes
+                // out before the news that it exited.
+                exiting = true;
             }
             Some(Msg::Shutdown) => break,
             None => {}
@@ -620,13 +628,30 @@ fn run(
             input.clear();
         }
 
+        if exiting {
+            if dirty && visible {
+                let frame = build_frame(&mut render_state, &mut rows, &mut cells, &terminal)?;
+                if updates.send_blocking(Update::Frame(frame)).is_err() {
+                    break;
+                }
+                dirty = false;
+                last_frame = Instant::now();
+            }
+            exiting = false;
+            updates.send_blocking(Update::Exited).ok();
+        }
+
         if dirty && visible && last_frame.elapsed() >= FRAME_INTERVAL {
             let frame = build_frame(&mut render_state, &mut rows, &mut cells, &terminal)?;
-            if updates.send_blocking(Update::Frame(frame)).is_err() {
-                break;
+            match updates.try_send(Update::Frame(frame)) {
+                Ok(()) => {
+                    dirty = false;
+                    last_frame = Instant::now();
+                }
+                // The UI is behind; the frame is built again next time round.
+                Err(smol::channel::TrySendError::Full(_)) => last_frame = Instant::now(),
+                Err(smol::channel::TrySendError::Closed(_)) => break,
             }
-            dirty = false;
-            last_frame = Instant::now();
         }
     }
 
@@ -783,6 +808,11 @@ mod tests {
         }
     }
 
+    /// The first row of a frame as text, as the tests' scripts print it.
+    fn row_text(frame: &Frame) -> String {
+        frame.rows[0].iter().map(|run| run.text.as_str()).collect()
+    }
+
     #[test]
     fn renders_pty_output_into_styled_runs() {
         let script = r"printf 'hello \033[1;31mred\033[0m'; sleep 1";
@@ -835,10 +865,7 @@ mod tests {
             match smol::block_on(pty.updates.recv()).unwrap() {
                 Update::Status(reported) => status = Some(reported),
                 Update::Frame(frame) => {
-                    let text = frame.rows[0]
-                        .iter()
-                        .map(|run| run.text.as_str())
-                        .collect::<String>();
+                    let text = row_text(&frame);
                     if !text.trim().is_empty() {
                         answers = Some(text.trim().to_string());
                     }
@@ -871,14 +898,21 @@ mod tests {
             assert!(Instant::now() < deadline, "the child never exited");
             match smol::block_on(pty.updates.recv()).unwrap() {
                 Update::Frame(frame) => {
-                    let text = frame.rows[0]
-                        .iter()
-                        .map(|run| run.text.as_str())
-                        .collect::<String>();
-                    pid = pid.or(text.trim().parse::<u32>().ok());
+                    pid = pid.or(row_text(&frame).trim().parse::<u32>().ok());
                 }
                 Update::Status(_) => {}
                 Update::Exited => break,
+            }
+        }
+        // The output may reach the terminal after the reaper noticed the exit.
+        while pid.is_none() && Instant::now() < deadline {
+            match pty.updates.try_recv() {
+                Ok(Update::Frame(frame)) => {
+                    pid = row_text(&frame).trim().parse::<u32>().ok();
+                }
+                Ok(_) => {}
+                Err(smol::channel::TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(_) => break,
             }
         }
         let pid = pid.expect("no frame with the pid");
@@ -906,11 +940,7 @@ mod tests {
             let Ok(Update::Frame(frame)) = smol::block_on(pty.updates.recv()) else {
                 continue;
             };
-            let text = frame.rows[0]
-                .iter()
-                .map(|run| run.text.as_str())
-                .collect::<String>();
-            if let Ok(pid) = text.trim().parse::<u32>() {
+            if let Ok(pid) = row_text(&frame).trim().parse::<u32>() {
                 break pid;
             }
         };
@@ -942,11 +972,7 @@ mod tests {
             let Ok(Update::Frame(frame)) = smol::block_on(pty.updates.recv()) else {
                 continue;
             };
-            let text = frame.rows[0]
-                .iter()
-                .map(|run| run.text.as_str())
-                .collect::<String>();
-            if let Ok(pid) = text.trim().parse::<u32>() {
+            if let Ok(pid) = row_text(&frame).trim().parse::<u32>() {
                 break pid;
             }
         };
@@ -985,7 +1011,7 @@ mod tests {
             let Ok(Update::Frame(frame)) = smol::block_on(pty.updates.recv()) else {
                 continue;
             };
-            if frame.rows[0].iter().any(|run| run.text.contains("ready")) {
+            if row_text(&frame).contains("ready") {
                 break;
             }
         }

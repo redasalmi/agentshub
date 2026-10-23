@@ -1,7 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
@@ -9,18 +7,13 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use notify::event::ModifyKind;
-use notify::{EventKind, RecursiveMode, Watcher as _};
 
 use crate::agent::Agent;
 use crate::appearance;
-use crate::sessions::{self, Project, Session, SessionStore};
+use crate::db::{self, Chat, Project};
 use crate::status::{Need, Status};
 
-/// CLIs write sessions in bursts while they run, so rescans wait for a pause.
-const RESCAN_DELAY: Duration = Duration::from_millis(500);
-
-/// How often the ages of the sessions are brought up to date.
+/// How often the ages of the chats are brought up to date.
 const AGE_INTERVAL: Duration = Duration::from_secs(60);
 
 const LAMP_SIZE: Pixels = px(10.);
@@ -29,47 +22,24 @@ const LAMP_GAP: Pixels = px(8.);
 
 #[derive(Clone)]
 pub enum SidebarEvent {
-    OpenSession(Session),
-    /// Show the terminal of a new chat, by its key.
-    ShowChat(String),
-    NewSession(PathBuf),
-    SessionsChanged,
-}
-
-/// What a rescan has to look at.
-#[derive(Debug, PartialEq)]
-enum Change {
-    /// Files or folders were added, removed or renamed.
-    Structure,
-    /// Files were written to.
-    Files(HashSet<PathBuf>),
-    /// Projects were expanded, so the rest of their sessions is read.
-    Expanded,
-}
-
-/// A running CLI whose session isn't listed yet, as before its first prompt.
-pub struct NewChat {
-    pub key: String,
-    pub agent: Agent,
-    pub cwd: PathBuf,
+    AddProject,
+    RemoveProject(i64),
+    /// Start a chat in a project.
+    NewChat(i64),
+    OpenChat(i64),
+    DeleteChat(i64),
+    /// Write a copy of the database where the user asks.
+    Export,
 }
 
 pub struct Sidebar {
     projects: Vec<Project>,
-    hidden: HashSet<PathBuf>,
-    new_chats: Vec<NewChat>,
-    /// The ids of the sessions, and the keys of the new chats, whose agent
-    /// runs, with what it reports doing, if it reports that.
-    running: HashMap<String, Option<Status>>,
-    expanded: HashSet<PathBuf>,
-    /// The id of the session, or the key of the new chat, that is shown.
-    active: Option<String>,
-    watcher: Option<notify::RecommendedWatcher>,
-    watches: HashMap<PathBuf, RecursiveMode>,
-    /// What the watcher looks for changes in, which moves as folders appear.
-    targets: Arc<Mutex<Vec<PathBuf>>>,
-    changes: smol::channel::Sender<Change>,
-    _rescan: Task<()>,
+    /// The chats whose agent runs, with what it reports doing, if it reports
+    /// that.
+    running: HashMap<i64, Option<Status>>,
+    collapsed: HashSet<i64>,
+    /// The chat that is shown.
+    active: Option<i64>,
     _age: Task<()>,
 }
 
@@ -77,75 +47,6 @@ impl EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Sidebar {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let targets = Arc::new(Mutex::new(Vec::new()));
-        let (changed_tx, changed) = smol::channel::unbounded();
-        let watcher = notify::recommended_watcher({
-            let targets = targets.clone();
-            let changed_tx = changed_tx.clone();
-            move |event: notify::Result<notify::Event>| {
-                let Ok(event) = event else {
-                    return;
-                };
-                if let Some(change) = changes_sessions(&event, &targets.lock().unwrap()) {
-                    changed_tx.try_send(change).ok();
-                }
-            }
-        })
-        .inspect_err(|err| eprintln!("can't watch session folders: {err}"))
-        .ok();
-
-        let rescan = cx.spawn(async move |this, cx| {
-            let mut store = SessionStore::default();
-            let mut change = Change::Structure;
-            loop {
-                let Ok(expanded) = this.update(cx, |this, _| {
-                    this.update_watches();
-                    this.expanded.clone()
-                }) else {
-                    break;
-                };
-                let (projects, hidden);
-                (store, projects, hidden) = cx
-                    .background_executor()
-                    .spawn(async move {
-                        store.load(expanded);
-                        let projects = match change {
-                            Change::Structure => store.scan(),
-                            Change::Files(paths) => store.refresh(&paths),
-                            Change::Expanded => store.projects(),
-                        };
-                        let hidden = store.hidden();
-                        (store, projects, hidden)
-                    })
-                    .await;
-                if this
-                    .update(cx, |this, cx| this.set_projects(projects, hidden, cx))
-                    .is_err()
-                {
-                    break;
-                }
-
-                let Ok(first) = changed.recv().await else {
-                    break;
-                };
-                // An expanded project shows its sessions right away.
-                if first != Change::Expanded {
-                    cx.background_executor().timer(RESCAN_DELAY).await;
-                }
-                change = std::iter::from_fn(|| changed.try_recv().ok()).fold(
-                    first,
-                    |change, next| match (change, next) {
-                        (Change::Files(mut paths), Change::Files(more)) => {
-                            paths.extend(more);
-                            Change::Files(paths)
-                        }
-                        (Change::Expanded, change) | (change, Change::Expanded) => change,
-                        _ => Change::Structure,
-                    },
-                );
-            }
-        });
-
         let age = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(AGE_INTERVAL).await;
@@ -157,138 +58,53 @@ impl Sidebar {
 
         Self {
             projects: Vec::new(),
-            hidden: HashSet::new(),
-            new_chats: Vec::new(),
             running: HashMap::new(),
-            expanded: HashSet::new(),
+            collapsed: HashSet::new(),
             active: None,
-            watcher,
-            watches: HashMap::new(),
-            targets,
-            changes: changed_tx,
-            _rescan: rescan,
             _age: age,
         }
     }
 
-    /// Watches each session folder, or while one doesn't exist yet, the
-    /// closest folder above it, so that a CLI's first session is noticed.
-    fn update_watches(&mut self) {
-        let Some(watcher) = &mut self.watcher else {
-            return;
-        };
-        let targets = sessions::watched_paths();
-        let mut wanted = HashMap::new();
-        for target in &targets {
-            if target.is_dir() {
-                wanted.insert(target.clone(), RecursiveMode::Recursive);
-            } else if let Some(dir) = target.ancestors().skip(1).find(|dir| dir.is_dir()) {
-                wanted
-                    .entry(dir.to_path_buf())
-                    .or_insert(RecursiveMode::NonRecursive);
-            }
-        }
-
-        self.watches.retain(|path, mode| {
-            let keep = wanted.get(path) == Some(mode);
-            if !keep {
-                watcher.unwatch(path).ok();
-            }
-            keep
-        });
-        for (path, mode) in wanted {
-            if self.watches.contains_key(&path) {
-                continue;
-            }
-            match watcher.watch(&path, mode) {
-                Ok(()) => {
-                    self.watches.insert(path, mode);
-                }
-                Err(err) => eprintln!("can't watch {}: {err}", path.display()),
-            }
-        }
-        *self.targets.lock().unwrap() = targets;
-    }
-
-    pub fn sessions(&self) -> impl Iterator<Item = &Session> {
-        self.projects
-            .iter()
-            .flat_map(|project| project.sessions.iter())
-    }
-
-    /// Session files that aren't listed because they aren't chats of their own.
-    pub fn hidden_sessions(&self) -> &HashSet<PathBuf> {
-        &self.hidden
+    pub fn set_projects(&mut self, projects: Vec<Project>, cx: &mut Context<Self>) {
+        self.projects = projects;
+        cx.notify();
     }
 
     pub fn set_chats(
         &mut self,
-        new_chats: Vec<NewChat>,
-        running: HashMap<String, Option<Status>>,
-        active: Option<String>,
+        running: HashMap<i64, Option<Status>>,
+        active: Option<i64>,
         cx: &mut Context<Self>,
     ) {
-        for chat in &new_chats {
-            if !self.new_chats.iter().any(|known| known.key == chat.key) {
-                self.expand(chat.cwd.clone());
-            }
-        }
-        self.new_chats = new_chats;
         self.running = running;
         self.active = active;
         cx.notify();
     }
 
-    fn set_projects(
-        &mut self,
-        projects: Vec<Project>,
-        hidden: HashSet<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.projects.is_empty()
-            && let Some(first) = projects.first()
-        {
-            self.expand(first.path.clone());
-        }
-        self.projects = projects;
-        self.hidden = hidden;
-        cx.emit(SidebarEvent::SessionsChanged);
+    /// Shows a project's chats.
+    pub fn expand(&mut self, project_id: i64, cx: &mut Context<Self>) {
+        self.collapsed.remove(&project_id);
         cx.notify();
     }
 
-    /// Collapsed projects keep their sessions, which take a few hundred bytes
-    /// each, but their files are no longer read past what lists them.
-    fn toggle_project(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
-        if !self.expanded.remove(path) {
-            self.expand(path.clone());
+    fn toggle_project(&mut self, project_id: i64, cx: &mut Context<Self>) {
+        if !self.collapsed.remove(&project_id) {
+            self.collapsed.insert(project_id);
         }
         cx.notify();
-    }
-
-    fn expand(&mut self, path: PathBuf) {
-        if self.expanded.insert(path) {
-            self.changes.try_send(Change::Expanded).ok();
-        }
     }
 
     fn render_project(&self, project: &Project, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let expanded = self.expanded.contains(&project.path);
-        let path = project.path.clone();
-        let new_session_path = project.path.clone();
-
-        let new_chats: Vec<_> = self
-            .new_chats
-            .iter()
-            .filter(|chat| chat.cwd == project.path)
-            .collect();
+        let id = project.id;
+        let expanded = !self.collapsed.contains(&id);
+        let group = SharedString::from(format!("project-{id}"));
 
         v_flex()
             .child(
                 h_flex()
-                    .id(SharedString::from(
-                        project.path.to_string_lossy().into_owned(),
-                    ))
+                    .id(group.clone())
+                    .group(group.clone())
                     .h_8()
                     .pl_1p5()
                     .pr_1()
@@ -315,60 +131,47 @@ impl Sidebar {
                             .child(project.name.clone()),
                     )
                     .child(
-                        Button::new("new-session")
+                        div()
+                            .invisible()
+                            .group_hover(group, |style| style.visible())
+                            .child(
+                                Button::new("remove-project")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Delete)
+                                    .tooltip("Remove this project")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(SidebarEvent::RemoveProject(id));
+                                    })),
+                            ),
+                    )
+                    .child(
+                        Button::new("new-chat")
                             .ghost()
                             .xsmall()
                             .icon(IconName::Plus)
                             .tooltip("Start an agent in this project")
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
-                                cx.emit(SidebarEvent::NewSession(new_session_path.clone()));
+                                cx.emit(SidebarEvent::NewChat(id));
                             })),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(&path, cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(id, cx))),
             )
             .when(expanded, |this| {
-                let new_chats = new_chats.into_iter().map(|chat| {
-                    (
-                        chat.key.as_str(),
-                        SharedString::from("New chat"),
-                        chat.agent,
-                        None,
-                        SidebarEvent::ShowChat(chat.key.clone()),
-                    )
-                });
-                let sessions = project.sessions.iter().map(|session| {
-                    (
-                        session.id.as_str(),
-                        SharedString::from(session.title.clone()),
-                        session.agent,
-                        Some(session.created),
-                        SidebarEvent::OpenSession(session.clone()),
-                    )
-                });
-                this.children(new_chats.chain(sessions).map(
-                    |(id, title, agent, created, on_click)| {
-                        self.render_chat(id, title, agent, created, on_click, cx)
-                    },
-                ))
+                this.children(project.chats.iter().map(|chat| self.render_chat(chat, cx)))
             })
     }
 
     /// A chat's lamp sits under its project's chevron. It's dim while its
     /// agent runs, and lit while that agent works.
-    fn render_chat(
-        &self,
-        id: &str,
-        title: SharedString,
-        agent: Agent,
-        created: Option<SystemTime>,
-        on_click: SidebarEvent,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
+    fn render_chat(&self, chat: &Chat, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let active = self.active.as_deref() == Some(id);
-        let running = self.running.get(id).copied();
-        let color = appearance::agent_color(agent, cx);
+        let id = chat.id;
+        let active = self.active == Some(id);
+        let running = self.running.get(&id).copied();
+        let color = appearance::agent_color(chat.agent, cx);
         let lamp_state = match running {
             None => Lamp::Off,
             Some(Some(Status::Working)) => Lamp::Lit,
@@ -381,9 +184,12 @@ impl Sidebar {
             Some(Some(Status::Error)) => theme.danger,
             _ => theme.muted_foreground,
         };
+        let group = SharedString::from(format!("chat-{id}"));
+        let title = SharedString::from(chat.title.clone().unwrap_or_else(|| "New chat".into()));
 
         v_flex()
-            .id(SharedString::from(id.to_string()))
+            .id(group.clone())
+            .group(group.clone())
             .pl_1p5()
             .pr_2()
             .py_1p5()
@@ -403,40 +209,52 @@ impl Sidebar {
                     .gap(LAMP_GAP)
                     .child(lamp(color, lamp_state))
                     .child(div().flex_1().min_w_0().text_sm().truncate().child(title))
-                    .children(created.map(|created| {
+                    .child(
                         div()
                             .flex_none()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(age(created))
-                    })),
+                            .group_hover(group.clone(), |style| style.invisible())
+                            .child(age(chat.updated_at)),
+                    ),
             )
             .child(
-                div()
+                h_flex()
                     .pl(LAMP_SIZE + LAMP_GAP)
-                    .text_xs()
-                    .text_color(activity_color)
-                    .child(activity(agent, running)),
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(activity_color)
+                            .child(activity(chat.agent, running)),
+                    )
+                    .child(
+                        div()
+                            .invisible()
+                            .group_hover(group, |style| style.visible())
+                            .child(
+                                Button::new("delete-chat")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Delete)
+                                    .tooltip("Delete this chat")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(SidebarEvent::DeleteChat(id));
+                                    })),
+                            ),
+                    ),
             )
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(on_click.clone())))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::OpenChat(id))))
     }
 }
 
 impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        // New chats in a folder without listed sessions get a project of their own.
-        let mut new_projects: Vec<Project> = Vec::new();
-        for chat in &self.new_chats {
-            let listed = self
-                .projects
-                .iter()
-                .chain(&new_projects)
-                .any(|project| project.path == chat.cwd);
-            if !listed {
-                new_projects.push(Project::new(chat.cwd.clone(), Vec::new()));
-            }
-        }
         let summary = summary(self.running.values());
         let dark = theme.is_dark();
 
@@ -481,10 +299,34 @@ impl Render for Sidebar {
                     .pb_3()
                     .gap_1()
                     .children(
-                        new_projects
+                        self.projects
                             .iter()
-                            .chain(&self.projects)
                             .map(|project| self.render_project(project, cx)),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .p_2()
+                    .gap_1()
+                    .border_t_1()
+                    .border_color(theme.sidebar_border)
+                    .child(
+                        Button::new("add-project")
+                            .ghost()
+                            .small()
+                            .flex_1()
+                            .icon(IconName::FolderOpen)
+                            .label("Add project")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::AddProject))),
+                    )
+                    .child(
+                        Button::new("export-database")
+                            .ghost()
+                            .small()
+                            .icon(IconName::HardDrive)
+                            .tooltip("Export a copy of the database")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::Export))),
                     ),
             )
     }
@@ -535,9 +377,10 @@ fn activity(agent: Agent, running: Option<Option<Status>>) -> String {
     }
 }
 
-/// How long ago a session started, in its largest whole unit.
-fn age(created: SystemTime) -> String {
-    let minutes = created.elapsed().unwrap_or_default().as_secs() / 60;
+/// How long ago something happened, given in seconds since the Unix epoch,
+/// in its largest whole unit.
+pub fn age(at: i64) -> String {
+    let minutes = (db::now() - at).max(0) / 60;
     match minutes {
         0 => "now".to_string(),
         1..60 => format!("{minutes}m"),
@@ -581,98 +424,10 @@ fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String {
     }
 }
 
-/// What a rescan has to look at after a change under a watched folder, if it
-/// can change the listed sessions at all:
-/// session files, folders moved in or out with sessions inside them, or a
-/// watched path (or a folder above it) that appeared or went away.
-fn changes_sessions(event: &notify::Event, targets: &[PathBuf]) -> Option<Change> {
-    // Events were dropped, so anything may have changed.
-    if event.need_rescan() {
-        return Some(Change::Structure);
-    }
-    let structural = matches!(
-        event.kind,
-        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
-    );
-    if !structural && !matches!(event.kind, EventKind::Modify(_)) {
-        return None;
-    }
-    let changed: HashSet<PathBuf> = event
-        .paths
-        .iter()
-        .filter(|path| {
-            targets.iter().any(|target| {
-                target.starts_with(path)
-                    || (path.starts_with(target)
-                        && (structural || path.extension().is_some_and(|ext| ext == "jsonl")))
-            })
-        })
-        .cloned()
-        .collect();
-    if changed.is_empty() {
-        None
-    } else if structural {
-        Some(Change::Structure)
-    } else {
-        Some(Change::Files(changed))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use notify::EventKind;
-    use notify::event::{AccessKind, CreateKind, DataChange, Flag, ModifyKind, RenameMode};
-
-    use super::{Change, changes_sessions, summary};
+    use super::summary;
     use crate::status::Status;
-
-    fn event(kind: EventKind, path: &str) -> notify::Event {
-        notify::Event::new(kind).add_path(path.into())
-    }
-
-    #[test]
-    fn rescans_for_session_changes_only() {
-        let targets = [PathBuf::from("/home/me/.claude/projects")];
-        let changes = |kind, path| changes_sessions(&event(kind, path), &targets);
-        let written = EventKind::Modify(ModifyKind::Data(DataChange::Any));
-        let moved = EventKind::Modify(ModifyKind::Name(RenameMode::From));
-
-        assert_eq!(
-            changes(written, "/home/me/.claude/projects/p/s.jsonl"),
-            Some(Change::Files(
-                [PathBuf::from("/home/me/.claude/projects/p/s.jsonl")].into()
-            ))
-        );
-        assert_eq!(
-            changes(written, "/home/me/.claude/projects/p/s/tool.txt"),
-            None
-        );
-        assert_eq!(
-            changes(moved, "/home/me/.claude/projects/p"),
-            Some(Change::Structure)
-        );
-        assert_eq!(
-            changes(EventKind::Create(CreateKind::Folder), "/home/me/.claude"),
-            Some(Change::Structure)
-        );
-        assert_eq!(
-            changes(
-                EventKind::Access(AccessKind::Any),
-                "/home/me/.claude/projects/p/s.jsonl"
-            ),
-            None
-        );
-        assert_eq!(changes(moved, "/home/me/other"), None);
-        assert_eq!(
-            changes_sessions(
-                &notify::Event::new(EventKind::Other).set_flag(Flag::Rescan),
-                &targets
-            ),
-            Some(Change::Structure)
-        );
-    }
 
     #[test]
     fn sums_up_what_agents_do() {

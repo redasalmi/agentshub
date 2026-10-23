@@ -1,11 +1,14 @@
 mod agent;
 mod appearance;
+mod db;
+mod history;
 mod reports;
 mod sessions;
 mod sidebar;
 mod status;
 mod terminal;
 mod terminal_view;
+mod transcript;
 mod workspace;
 
 use gpui_kit::*;

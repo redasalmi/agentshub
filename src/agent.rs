@@ -10,13 +10,17 @@ pub enum Agent {
 impl Agent {
     pub const ALL: [Agent; 3] = [Agent::Claude, Agent::Codex, Agent::Pi];
 
-    /// Short name shown under each chat in the sidebar.
+    /// Short name, which is also what the database stores.
     pub fn label(self) -> &'static str {
         match self {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Pi => "pi",
         }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|agent| agent.label() == label)
     }
 
     pub fn display_name(self) -> &'static str {

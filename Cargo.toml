@@ -2,6 +2,7 @@
 name = "agentshub"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.91"
 
 [dependencies]
 anyhow = "1"
@@ -14,6 +15,7 @@ serde_json = "1"
 smol = "2"
 unicode-segmentation = "1"
 uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Dependencies are built optimized even in dev builds: GPUI and the terminal
 # are far too slow unoptimized, and they rarely need a debugger.
@@ -23,6 +25,20 @@ opt-level = 3
 # Its build script compiles Ghostty in Zig's Debug mode whenever debug info is
 # on, which parses terminal output orders of magnitude slower.
 [profile.dev.package.libghostty-vt-sys]
+debug = false
+
+# An opt-in profile for quick loop: `cargo run --profile dev-fast`.
+# Everything it builds is unoptimized, GPUI and the terminal included, so it is
+# slower at runtime but rebuilds in a fraction of the time.
+[profile.dev-fast]
+inherits = "dev"
+
+[profile.dev-fast.package."*"]
+opt-level = 0
+
+debug = false
+
+[profile.dev-fast.package.libghostty-vt-sys]
 debug = false
 
 [profile.release]

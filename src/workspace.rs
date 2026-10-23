@@ -1,24 +1,38 @@
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use gpui_kit::component::button::{Button, ButtonVariant};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, IconName, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use notify::{RecursiveMode, Watcher as _};
 
 use crate::agent::Agent;
 use crate::appearance;
+use crate::db::{self, Db};
+use crate::history::History;
 use crate::reports::{self, Reports};
-use crate::sessions::{self, Session};
-use crate::sidebar::{Lamp, NewChat, Sidebar, SidebarEvent, lamp};
+use crate::sessions;
+use crate::sidebar::{Lamp, Sidebar, SidebarEvent, lamp};
 use crate::status::Status;
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::TerminalView;
+use crate::transcript;
 
 const SIDEBAR_WIDTH: Pixels = px(280.);
+
+/// The most of the window's height that a chat's earlier sessions take.
+const HISTORY_SHARE: f32 = 0.45;
+
+/// Codex writes its session files in bursts, so they're looked at once it
+/// pauses.
+const CODEX_DELAY: Duration = Duration::from_millis(500);
 
 impl SelectItem for Agent {
     type Value = Agent;
@@ -41,73 +55,237 @@ impl SelectItem for Agent {
 
 pub struct Workspace {
     sidebar: Entity<Sidebar>,
-    /// Open terminals, in the order they were started. Their processes keep
-    /// running while another chat is shown.
+    db: Db,
+    /// Open chats, including exited terminals and history whose CLI couldn't
+    /// start. Running processes keep running while another chat is shown.
     chats: Vec<Chat>,
-    /// The key of the chat that is shown.
-    active: Option<String>,
+    /// The chat that is shown.
+    active: Option<i64>,
+    /// The chat the user last asked to show. Opening a chat reads its last
+    /// session before starting its CLI, so a request can finish after a newer
+    /// one; only the latest one may take the view.
+    requested: Option<i64>,
+    /// The chats whose last session is being read before their CLI starts.
+    opening: HashSet<i64>,
+    /// The last Codex session lookup started. Each lookup marks the chats it
+    /// looked at with this, so an older lookup that finishes later can be
+    /// told apart from a newer one.
+    codex_lookup: u64,
     reports: Reports,
+    codex_watcher: Option<notify::RecommendedWatcher>,
+    /// What the watcher looks at: Codex's session folder, or while it doesn't
+    /// exist yet, the closest folder above it.
+    codex_watch: Option<(PathBuf, RecursiveMode)>,
     _sidebar_events: Subscription,
     _report_events: Task<()>,
+    _codex_events: Task<()>,
     _appearance: Subscription,
     _theme: Subscription,
-    new_session_select: Option<Subscription>,
+    new_chat_select: Option<Subscription>,
+    /// Why the workspace can't be used: the database didn't open, or another
+    /// Agents Hub holds the lock.
+    broken: Option<SharedString>,
+    /// The lock that keeps a second instance off the database.
+    _lock: Option<fs::File>,
 }
 
 struct Chat {
-    key: String,
+    id: i64,
     agent: Agent,
-    cwd: PathBuf,
-    terminal: Entity<Terminal>,
-    view: Entity<TerminalView>,
-    /// The session file the CLI is in, once known. It changes when the CLI
+    /// The name of the file its CLI reports its sessions to.
+    report: String,
+    terminal: Option<ChatTerminal>,
+    /// Startup failure or exit message, shown alongside the saved history.
+    message: Option<SharedString>,
+    history: Entity<History>,
+    /// The session the CLI is in, once known. It changes when the CLI
     /// switches to another session, as on `/clear`.
-    session: Option<PathBuf>,
+    session: Option<i64>,
+    /// That session's transcript.
+    transcript: Option<PathBuf>,
     /// What the CLI last reported doing, if it reports that at all.
     status: Option<Status>,
     /// Whether the CLI finished while another chat was shown, and hasn't been
     /// looked at since.
     unseen: bool,
+    /// The Codex session lookup that last looked at this chat. A lookup that
+    /// started earlier must not record its result after a newer one, or it
+    /// would move the chat back to a session it has left.
+    codex_lookup: u64,
+    /// Something about the session to show above the terminal, without a
+    /// restart button.
+    notice: Option<SharedString>,
+    /// Whether restarting starts a new session instead of resuming the last.
+    fresh_on_restart: bool,
+}
+
+struct ChatTerminal {
+    terminal: Entity<Terminal>,
+    view: Entity<TerminalView>,
+    exited: bool,
     _exited: Subscription,
     _status: Subscription,
 }
 
+impl Chat {
+    fn current_session(&self) -> Option<i64> {
+        self.terminal
+            .as_ref()
+            .filter(|terminal| !terminal.exited)
+            .and(self.session)
+    }
+}
+
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The lock comes first: a second instance must not migrate the
+        // database under the first one.
+        let lock = instance_lock();
+        if matches!(&lock, Lock::Unavailable) {
+            eprintln!("can't write the lock file; another instance would not be kept out");
+        }
+        let (db, broken) = if matches!(&lock, Lock::Contended) {
+            (
+                Db::open_in_memory().expect("SQLite opens in memory"),
+                Some("Agents Hub is already running.".into()),
+            )
+        } else {
+            match db::path().map(|path| Db::open(&path)) {
+                Some(Ok(db)) => (db, None),
+                Some(Err(err)) => {
+                    eprintln!("can't open the database: {err}");
+                    (
+                        Db::open_in_memory().expect("SQLite opens in memory"),
+                        Some(
+                            format!(
+                                "Couldn't open the database in {}, so nothing can be kept: {err}",
+                                db::path()
+                                    .and_then(|path| path
+                                        .parent()
+                                        .map(|dir| dir.display().to_string()))
+                                    .unwrap_or_default()
+                            )
+                            .into(),
+                        ),
+                    )
+                }
+                None => (
+                    Db::open_in_memory().expect("SQLite opens in memory"),
+                    Some("There is no home folder to keep the database in.".into()),
+                ),
+            }
+        };
+
         let sidebar = cx.new(Sidebar::new);
         let sidebar_events =
             cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| match event {
-                SidebarEvent::OpenSession(session) => this.open_session(session, window, cx),
-                SidebarEvent::ShowChat(key) => this.activate(key.clone(), window, cx),
-                SidebarEvent::NewSession(project) => {
-                    this.open_new_session_dialog(project.clone(), window, cx)
+                SidebarEvent::AddProject => this.add_project(window, cx),
+                SidebarEvent::RemoveProject(id) => this.confirm_remove_project(*id, window, cx),
+                SidebarEvent::NewChat(project_id) => {
+                    this.open_new_chat_dialog(*project_id, window, cx)
                 }
-                SidebarEvent::SessionsChanged => this.find_codex_sessions(cx),
+                SidebarEvent::OpenChat(id) => this.open_chat(*id, window, cx),
+                SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
+                SidebarEvent::Export => this.export_database(window, cx),
             });
 
         let (reports, reported) = Reports::new();
         let report_events = cx.spawn(async move |this, cx| {
             while let Ok(key) = reported.recv().await {
                 if this
-                    .update(cx, |this, cx| this.read_report(&key, cx))
+                    .update(cx, |this, cx| this.read_reports(&key, cx))
                     .is_err()
                 {
                     break;
                 }
             }
         });
+
+        let (codex_tx, codex_changed) = smol::channel::unbounded();
+        let codex_watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                let Ok(event) = event else {
+                    return;
+                };
+                // Look at the files only when they are written. Opening a rollout
+                // to find its session is an access, and scanning on that would
+                // schedule the next scan forever.
+                if !matches!(
+                    event.kind,
+                    notify::EventKind::Create(_) | notify::EventKind::Modify(_)
+                ) {
+                    return;
+                }
+                codex_tx.try_send(()).ok();
+            })
+            .inspect_err(|err| eprintln!("can't watch Codex's sessions: {err}"))
+            .ok();
+        let codex_events = cx.spawn(async move |this, cx| {
+            while codex_changed.recv().await.is_ok() {
+                cx.background_executor().timer(CODEX_DELAY).await;
+                while codex_changed.try_recv().is_ok() {}
+                let found = this.update(cx, |this, cx| {
+                    this.update_codex_watch();
+                    this.find_codex_sessions(cx);
+                });
+                if found.is_err() {
+                    break;
+                }
+            }
+        });
+
         // Closing the window releases the workspace before the app quits, and
         // quitting releases it too.
         cx.on_release(|this, cx| {
-            this.reports.remove();
+            // Discover Codex's last session before its process disappears.
+            // A queued watcher callback cannot run once we're released.
+            for chat in &this.chats {
+                if chat.agent == Agent::Codex
+                    && let Some(terminal) = &chat.terminal
+                    && let Some(path) = terminal
+                        .terminal
+                        .read(cx)
+                        .with_pid(sessions::codex_session_of)
+                    && let Some(agent_id) = transcript::session_id(chat.agent, &path)
+                    && let Err(err) = this
+                        .db
+                        .record_session(chat.id, chat.agent, &agent_id, &path, None)
+                {
+                    eprintln!("can't record the last Codex session: {err}");
+                }
+            }
             // The CLIs are killed on threads of their own, which the app would
             // otherwise exit before they are done with.
             let reaped: Vec<_> = this
                 .chats
                 .iter()
-                .map(|chat| chat.terminal.read(cx).shutdown())
+                .filter_map(|chat| chat.terminal.as_ref())
+                .map(|terminal| terminal.terminal.read(cx).shutdown())
                 .collect();
             terminal::wait_reaped(reaped);
+            // Final reports can be written during shutdown. Import every
+            // session synchronously: foreground tasks and Exited callbacks
+            // can no longer complete on this workspace. Concurrent imports
+            // are safe because transcript::read retries stale offsets.
+            for chat in &this.chats {
+                if let Err(err) = backup_chat(
+                    &this.db,
+                    &mut this.reports,
+                    chat.id,
+                    chat.agent,
+                    Some(&chat.report),
+                ) {
+                    eprintln!("can't back up chat {} on shutdown: {err}", chat.id);
+                }
+            }
+            for &id in &this.opening {
+                if let Ok(Some((agent, _))) = this.db.chat(id)
+                    && let Err(err) = backup_chat(&this.db, &mut this.reports, id, agent, None)
+                {
+                    eprintln!("can't back up opening chat {id}: {err}");
+                }
+            }
+            this.reports.remove();
         })
         .detach();
 
@@ -117,56 +295,195 @@ impl Workspace {
         let theme = cx.observe_global::<Theme>(|this, cx| {
             let colors = appearance::terminal_colors(cx);
             for chat in &this.chats {
-                chat.terminal.read(cx).set_colors(colors);
+                if let Some(terminal) = &chat.terminal {
+                    terminal.terminal.read(cx).set_colors(colors);
+                }
             }
         });
 
-        Self {
+        let mut this = Self {
             sidebar,
+            db,
             chats: Vec::new(),
             active: None,
+            requested: None,
+            opening: HashSet::new(),
+            codex_lookup: 0,
             reports,
+            codex_watcher,
+            codex_watch: None,
             _sidebar_events: sidebar_events,
             _report_events: report_events,
+            _codex_events: codex_events,
             _appearance: appearance,
             _theme: theme,
-            new_session_select: None,
-        }
+            new_chat_select: None,
+            broken,
+            _lock: match lock {
+                Lock::Held(file) => Some(file),
+                Lock::Contended | Lock::Unavailable => None,
+            },
+        };
+        this.update_codex_watch();
+        this.refresh(cx);
+        this
     }
 
-    fn open_session(&mut self, session: &Session, window: &mut Window, cx: &mut Context<Self>) {
-        let running = self.chats.iter().find(|chat| {
-            chat.session.as_ref() == Some(&session.path) && !chat.terminal.read(cx).exited()
+    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add project".into()),
         });
-        if let Some(chat) = running {
-            self.activate(chat.key.clone(), window, cx);
-        } else {
-            let args = session.agent.resume_args(&session.id, &session.path);
-            self.open_terminal(
-                session.agent,
-                &args,
-                &session.cwd,
-                Some(session.path.clone()),
-                window,
-                cx,
-            );
-        }
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match picked.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Err(err)) => {
+                    this.update_in(cx, |_, window, cx| {
+                        window.push_notification(format!("Couldn't pick a folder: {err}"), cx)
+                    })
+                    .ok();
+                    None
+                }
+                _ => None,
+            };
+            let Some(path) = path else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| {
+                let path = fs::canonicalize(&path).unwrap_or(path);
+                match this.db.add_project(&path) {
+                    Ok(id) => {
+                        this.refresh(cx);
+                        this.sidebar
+                            .update(cx, |sidebar, cx| sidebar.expand(id, cx));
+                    }
+                    Err(err) => window
+                        .push_notification(format!("Couldn't add {}: {err}", path.display()), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    fn open_new_session_dialog(
+    /// Copies the database where the user asks, so the history can live
+    /// outside the one file agentshub reads.
+    fn export_database(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = db::path()
+            .and_then(|path| path.parent().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let name = format!("agentshub-{}.db", date_stamp(db::now()));
+        let picked = cx.prompt_for_new_path(&dir, Some(&name));
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match picked.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Err(err)) => {
+                    this.update_in(cx, |_, window, cx| {
+                        window.push_notification(format!("Couldn't pick a file: {err}"), cx)
+                    })
+                    .ok();
+                    return;
+                }
+                _ => return,
+            };
+            this.update_in(cx, |this, window, cx| match this.db.export(&path) {
+                Ok(()) => window
+                    .push_notification(format!("Exported the database to {}", path.display()), cx),
+                Err(err) => {
+                    window.push_notification(format!("Couldn't export the database: {err}"), cx)
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn confirm_remove_project(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let this = this.clone();
+            alert
+                .confirm()
+                .title("Remove this project?")
+                .description(
+                    "Its agents are stopped, and its chats are deleted from Agents Hub. \
+                     The folder and the agents' own session files stay.",
+                )
+                .ok_text("Remove")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    this.update(cx, |this, cx| {
+                        let projects = this.db.projects().unwrap_or_default();
+                        let project = projects.iter().find(|project| project.id == id);
+                        for chat in project.into_iter().flat_map(|project| &project.chats) {
+                            this.stop_chat(chat.id, cx);
+                        }
+                        if let Err(err) = this.db.remove_project(id) {
+                            eprintln!("can't remove project {id}: {err}");
+                        }
+                        this.refresh(cx);
+                    })
+                    .ok();
+                    true
+                })
+        });
+    }
+
+    fn confirm_delete_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let this = this.clone();
+            alert
+                .confirm()
+                .title("Delete this chat?")
+                .description(
+                    "Its agent is stopped, and the chat is deleted from Agents Hub. \
+                     The agent's own session files stay.",
+                )
+                .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    this.update(cx, |this, cx| {
+                        this.stop_chat(id, cx);
+                        if let Err(err) = this.db.delete_chat(id) {
+                            eprintln!("can't delete chat {id}: {err}");
+                        }
+                        this.refresh(cx);
+                    })
+                    .ok();
+                    true
+                })
+        });
+    }
+
+    fn open_new_chat_dialog(
         &mut self,
-        project: PathBuf,
+        project_id: i64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let project = match self.db.projects() {
+            Ok(projects) => projects
+                .into_iter()
+                .find(|project| project.id == project_id),
+            Err(err) => {
+                eprintln!("can't list the projects: {err}");
+                None
+            }
+        };
+        let Some(project) = project else {
+            return;
+        };
         let select = cx.new(|cx| SelectState::new(Agent::ALL.to_vec(), None, window, cx));
-        let project_label = SharedString::from(project.to_string_lossy().into_owned());
-        self.new_session_select =
+        let project_label = SharedString::from(project.path.to_string_lossy().into_owned());
+        self.new_chat_select =
             Some(
                 cx.subscribe_in(&select, window, move |this, _, event, window, cx| {
                     if let SelectEvent::Confirm(Some(agent)) = event {
                         window.close_dialog(cx);
-                        this.open_terminal(*agent, &[], &project, None, window, cx);
+                        this.new_chat(project_id, *agent, &project.path, window, cx);
                     }
                 }),
             );
@@ -190,40 +507,392 @@ impl Workspace {
         });
     }
 
-    fn read_report(&mut self, key: &str, cx: &mut Context<Self>) {
-        let Some(chat) = self.chats.iter_mut().find(|chat| chat.key == key) else {
+    fn new_chat(
+        &mut self,
+        project_id: i64,
+        agent: Agent,
+        cwd: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = match self.db.add_chat(project_id, agent) {
+            Ok(id) => id,
+            Err(err) => {
+                window.push_notification(format!("Couldn't add the chat: {err}"), cx);
+                return;
+            }
+        };
+        // Its first session report adds its first session.
+        if self.start_chat(id, agent, cwd, None, window, cx) {
+            self.activate(id, window, cx);
+        } else {
+            self.stop_chat(id, cx);
+            self.db.delete_chat(id).ok();
+        }
+        self.refresh(cx);
+    }
+
+    /// Shows a chat, resuming its last session if its CLI doesn't run.
+    fn open_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chats.iter().any(|chat| chat.id == id) {
+            // Reading a chat's last session takes long enough for another
+            // chat to be asked for meanwhile. This is the request that a
+            // completion compares itself with.
+            self.requested = Some(id);
+            self.activate(id, window, cx);
+            return;
+        }
+        let (agent, cwd) = match self.db.chat(id) {
+            Ok(Some(chat)) => chat,
+            Ok(None) => return,
+            Err(err) => {
+                eprintln!("can't open chat {id}: {err}");
+                return;
+            }
+        };
+        // The chat exists, so this request is now the one that decides what
+        // the view shows when the read below finishes.
+        self.requested = Some(id);
+        // Clicks that arrive while the session is read would start a second
+        // CLI in the same chat.
+        if !self.opening.insert(id) {
+            return;
+        }
+
+        // The last session decides how the CLI starts, so it's read first: the
+        // CLI may have gone on without agentshub. Transcripts can be large
+        // enough that this can't happen while the window waits.
+        let db = self.db.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let read = smol::unblock(move || -> anyhow::Result<()> {
+                if let Some(last) = db.sessions(id)?.last()
+                    && last.transcript_path.exists()
+                {
+                    transcript::read(&db, last.id)?;
+                    // Opening a chat is the chat being active, which orders the
+                    // sidebar. Reading its history must not do the same.
+                    db.touch_session(last.id)?;
+                }
+                Ok(())
+            })
+            .await;
+            if let Err(err) = read {
+                eprintln!("can't read the last session of chat {id}: {err}");
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.opening.remove(&id);
+                // The chat may have been deleted, or opened elsewhere, meanwhile.
+                if this.chats.iter().any(|chat| chat.id == id) {
+                    return;
+                }
+                match this.db.chat(id) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return,
+                    Err(err) => {
+                        eprintln!("can't open chat {id}: {err}");
+                        return;
+                    }
+                }
+                let sessions = this.sessions_of(id);
+                let mut notice = None;
+                let resumed = match sessions.last() {
+                    Some(last) if last.prompted && last.transcript_path.exists() => Some(last),
+                    // Claude deletes old transcripts. What the chat kept of the
+                    // session stays in its history, and the banner says why a
+                    // new session started.
+                    Some(last) if last.prompted => {
+                        match this.db.set_missing(last.id) {
+                            Ok(true) => {
+                                this.db
+                                    .add_notice(
+                                        last.id,
+                                        "This session's transcript is gone, so it couldn't be \
+                                         resumed. Its saved history is still available here.",
+                                    )
+                                    .ok();
+                            }
+                            Ok(false) => {}
+                            Err(err) => eprintln!("can't mark session {} missing: {err}", last.id),
+                        }
+                        notice = Some(
+                            "This session's transcript is gone, so it couldn't be resumed. \
+                             Its saved history is still available here."
+                                .into(),
+                        );
+                        None
+                    }
+                    // A session without a prompt has nothing to resume.
+                    _ => None,
+                };
+                // A chat the user selected while this one was being read
+                // keeps the view. This one still starts, but in the
+                // background, so its completion can't steal focus.
+                let show = this.requested == Some(id);
+                // Two CLIs in one session would append to the same transcript,
+                // so a session another chat is running can't be resumed here.
+                if let Some(last) = resumed
+                    && this.live_elsewhere(id, last.id)
+                {
+                    this.block_chat(
+                        id,
+                        agent,
+                        "This session is running in another chat. Start a new session to \
+                         keep going here."
+                            .into(),
+                        cx,
+                    );
+                } else if this.start_chat(id, agent, &cwd, resumed, window, cx) {
+                    if let Some(notice) = notice
+                        && let Some(chat) = this.chats.iter_mut().find(|chat| chat.id == id)
+                    {
+                        chat.notice = Some(notice);
+                    }
+                }
+                if show {
+                    this.activate(id, window, cx);
+                } else {
+                    this.sync_sidebar(cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn sessions_of(&self, chat_id: i64) -> Vec<db::Session> {
+        self.db.sessions(chat_id).unwrap_or_else(|err| {
+            eprintln!("can't list the sessions of chat {chat_id}: {err}");
+            Vec::new()
+        })
+    }
+
+    fn read_reports(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some((id, agent)) = self
+            .chats
+            .iter()
+            .find(|chat| chat.report == key)
+            .map(|chat| (chat.id, chat.agent))
+        else {
             return;
         };
-        let session = self.reports.read(key);
-        if session.is_some() && chat.session != session {
-            chat.session = session;
-            self.sync_sidebar(cx);
+        let mut recorded = false;
+        for report in self.reports.read(key) {
+            let path = &report.transcript_path;
+            let Some(agent_id) = report
+                .session_id
+                .clone()
+                .or_else(|| transcript::session_id(agent, path))
+            else {
+                continue;
+            };
+            recorded |= self.record_session(id, &agent_id, path, report.reason.as_deref(), cx);
+        }
+        // Reports arrive in bursts, and each one used to reload the sidebar.
+        if recorded {
+            self.refresh(cx);
         }
     }
 
     /// Codex writes its session files as it goes, so the sessions of its
     /// terminals are looked for whenever those change.
     fn find_codex_sessions(&mut self, cx: &mut Context<Self>) {
-        let hidden = self.sidebar.read(cx).hidden_sessions();
+        // Each chat's report name identifies this terminal, not just its row:
+        // A chat can restart its terminal while the lookup runs.
+        //
+        // A lookup can take longer than the watcher's delay, so a newer one
+        // can finish first. Marking the chats a lookup looks at with its
+        // generation lets a result that has been superseded be dropped rather
+        // than move a chat back to the session it has already left.
+        let lookup = self.codex_lookup.wrapping_add(1);
+        let mut chats = Vec::new();
         for chat in &mut self.chats {
             if chat.agent != Agent::Codex {
                 continue;
             }
-            let terminal = chat.terminal.read(cx);
-            if let Some(session) = terminal.with_pid(|pid| sessions::codex_session_of(pid, hidden))
-            {
-                chat.session = Some(session);
-            }
+            let Some(terminal) = &chat.terminal else {
+                continue;
+            };
+            let Some(pid) = terminal.terminal.read(cx).with_pid(Some) else {
+                continue;
+            };
+            chat.codex_lookup = lookup;
+            chats.push((chat.id, chat.report.clone(), pid));
         }
-        self.sync_sidebar(cx);
+        if chats.is_empty() {
+            return;
+        }
+        self.codex_lookup = lookup;
+        cx.spawn(async move |this, cx| {
+            // Looking through a process's open files, and reading the first
+            // line of the newest one, doesn't belong on the window's thread.
+            let found = smol::unblock(move || {
+                chats
+                    .into_iter()
+                    .filter_map(|(id, report, pid)| {
+                        let path = sessions::codex_session_of(pid)?;
+                        let agent_id = transcript::session_id(Agent::Codex, &path)?;
+                        Some((id, report, path, agent_id))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await;
+            this.update(cx, |this, cx| {
+                let mut recorded = false;
+                for (id, report, path, agent_id) in found {
+                    // A chat with this id now is another chat, or the same
+                    // one with a newer terminal: either way the result is
+                    // about a process that has gone. The same goes for a
+                    // lookup that a newer one has already replaced.
+                    let current = this
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == id && chat.report == report)
+                        .is_some_and(|chat| {
+                            chat.codex_lookup == lookup && chat.transcript.as_ref() != Some(&path)
+                        });
+                    if !current {
+                        continue;
+                    }
+                    recorded |= this.record_session(id, &agent_id, &path, None, cx);
+                }
+                if recorded {
+                    this.refresh(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    fn set_status(&mut self, key: &str, status: Option<Status>, cx: &mut Context<Self>) {
-        let shown = self.active.as_deref() == Some(key);
-        let Some(chat) = self.chats.iter_mut().find(|chat| chat.key == key) else {
+    fn update_codex_watch(&mut self) {
+        let (Some(watcher), Some(dir)) = (&mut self.codex_watcher, sessions::codex_sessions_dir())
+        else {
             return;
         };
-        let was_busy = matches!(chat.status, Some(Status::Working | Status::Blocked(_)));
+        let wanted = if dir.is_dir() {
+            Some((dir, RecursiveMode::Recursive))
+        } else {
+            dir.ancestors()
+                .skip(1)
+                .find(|dir| dir.is_dir())
+                .map(|dir| (dir.to_path_buf(), RecursiveMode::NonRecursive))
+        };
+        if wanted == self.codex_watch {
+            return;
+        }
+        if let Some((path, _)) = self.codex_watch.take() {
+            watcher.unwatch(&path).ok();
+        }
+        if let Some((path, mode)) = wanted {
+            match watcher.watch(&path, mode) {
+                Ok(()) => self.codex_watch = Some((path, mode)),
+                Err(err) => eprintln!("can't watch {}: {err}", path.display()),
+            }
+        }
+    }
+
+    /// Records the session a chat's CLI went into, and reads the one it left.
+    /// Says whether it recorded anything.
+    fn record_session(
+        &mut self,
+        chat_id: i64,
+        agent_id: &str,
+        path: &Path,
+        reason: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self.chats.iter().position(|chat| chat.id == chat_id) else {
+            return false;
+        };
+        let (id, agent) = (self.chats[index].id, self.chats[index].agent);
+        self.chats[index].transcript = Some(path.to_path_buf());
+        match self.db.record_session(id, agent, agent_id, path, reason) {
+            Ok(recorded) => {
+                self.chats[index].session = Some(recorded.session_id);
+                if let Some(left) = recorded.left {
+                    self.read_sessions(vec![left], false, cx).detach();
+                }
+                true
+            }
+            Err(err) => {
+                eprintln!("can't record session {agent_id}: {err}");
+                false
+            }
+        }
+    }
+
+    /// Reads sessions' transcripts of a chat on a blocking thread, then shows
+    /// what changed.
+    /// Reads sessions' transcripts, marking the chats active when `touch` is
+    /// set, as a finished turn does but browsing history doesn't.
+    fn read_sessions(
+        &mut self,
+        sessions: Vec<i64>,
+        touch: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let db = self.db.clone();
+        cx.spawn(async move |this, cx| {
+            if sessions.is_empty() {
+                return;
+            }
+            // Parsing transcripts and writing them to the database blocks, so
+            // it stays off the executor's threads.
+            let changed = smol::unblock(move || {
+                let mut changed = Vec::new();
+                for id in sessions {
+                    match transcript::read(&db, id) {
+                        Ok(read) => {
+                            if touch {
+                                db.touch_session(id).ok();
+                            }
+                            if read {
+                                changed.push(id);
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("can't read session {id}: {err}");
+                        }
+                    }
+                }
+                changed
+            })
+            .await;
+            this.update(cx, |this, cx| this.refresh_after(&changed, cx))
+                .ok();
+        })
+    }
+
+    /// Lists the projects and chats again, and the earlier sessions of the
+    /// chats whose CLI runs.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_after(&[], cx);
+    }
+
+    /// The same, reloading the expanded sessions whose transcript read, in
+    /// `changed`, found something.
+    fn refresh_after(&mut self, changed: &[i64], cx: &mut Context<Self>) {
+        match self.db.projects() {
+            Ok(projects) => self
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx)),
+            Err(err) => eprintln!("can't list the projects: {err}"),
+        }
+        for chat in &self.chats {
+            let current = chat.current_session();
+            chat.history
+                .update(cx, |history, cx| history.refresh(current, changed, cx));
+        }
+    }
+
+    fn set_status(&mut self, id: i64, status: Option<Status>, cx: &mut Context<Self>) {
+        let shown = self.active == Some(id);
+        let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) else {
+            return;
+        };
+        let busy = |status| matches!(status, Some(Status::Working | Status::Blocked(_)));
+        let was_busy = busy(chat.status);
         chat.unseen = match status {
             Some(Status::Done | Status::Error) => !shown,
             // Codex goes back to idle without saying it's done. The others
@@ -232,139 +901,279 @@ impl Workspace {
             _ => false,
         };
         chat.status = status;
+        // The session is read after each turn, so the chat's title follows it.
+        if was_busy
+            && !busy(status)
+            && let Some(session) = chat.session
+        {
+            self.read_sessions(vec![session], true, cx).detach();
+        }
         self.sync_sidebar(cx);
     }
 
-    /// Lists running chats whose session isn't listed yet as new chats, and
-    /// marks the one that is shown and what each running one is doing.
+    /// Marks the chat that is shown and what each running one is doing.
     fn sync_sidebar(&mut self, cx: &mut Context<Self>) {
-        let listed: HashMap<&Path, &str> = self
-            .sidebar
-            .read(cx)
-            .sessions()
-            .map(|session| (session.path.as_path(), session.id.as_str()))
-            .collect();
-        let mut new_chats = Vec::new();
-        let mut running = HashMap::new();
-        let mut active = None;
-        for chat in &self.chats {
-            let id = match chat.session.as_deref().and_then(|path| listed.get(path)) {
-                Some(id) => id.to_string(),
-                None => {
-                    if !chat.terminal.read(cx).exited() {
-                        new_chats.push(NewChat {
-                            key: chat.key.clone(),
-                            agent: chat.agent,
-                            cwd: chat.cwd.clone(),
-                        });
-                    }
-                    chat.key.clone()
-                }
-            };
-            if self.active.as_ref() == Some(&chat.key) {
-                active = Some(id.clone());
-            }
-            if !chat.terminal.read(cx).exited() {
+        let running = self
+            .chats
+            .iter()
+            .filter(|chat| {
+                chat.terminal
+                    .as_ref()
+                    .is_some_and(|terminal| !terminal.exited)
+            })
+            .map(|chat| {
                 // The sidebar shows a finished CLI as done until it is seen.
                 let status = match chat.status {
                     Some(Status::Idle | Status::Done) if chat.unseen => Some(Status::Done),
                     Some(Status::Done) => Some(Status::Idle),
                     status => status,
                 };
-                running.insert(id, status);
-            }
-        }
-        self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_chats(new_chats, running, active, cx)
-        });
+                (chat.id, status)
+            })
+            .collect();
+        let active = self.active;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_chats(running, active, cx));
     }
 
-    fn open_terminal(
+    /// Starts a chat's CLI, resuming `session` if given. The chat stays hidden
+    /// until it is activated.
+    fn start_chat(
         &mut self,
+        id: i64,
         agent: Agent,
-        args: &[String],
         cwd: &Path,
-        session: Option<PathBuf>,
+        session: Option<&db::Session>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let key = uuid::Uuid::new_v4().to_string();
+    ) -> bool {
+        let report = uuid::Uuid::new_v4().to_string();
         let colors = appearance::terminal_colors(cx);
         let mut all_args = self.reports.args(agent);
-        all_args.extend_from_slice(args);
-        let report = self.reports.path(&key);
-        let env = [(reports::ENV, report.as_os_str())];
-        let pty = match Pty::spawn(agent.program(), &all_args, &env, cwd, colors) {
-            Ok(pty) => pty,
+        if let Some(session) = session {
+            all_args.extend(agent.resume_args(&session.agent_id, &session.transcript_path));
+        }
+        let report_path = self.reports.path(&report);
+        let env = [(reports::ENV, report_path.as_os_str())];
+        let (terminal, message) = match Pty::spawn(agent.program(), &all_args, &env, cwd, colors) {
+            Ok(pty) => {
+                let terminal = cx.new(|cx| Terminal::new(pty, cx));
+                let view = cx.new(|cx| TerminalView::new(terminal.clone(), cx));
+                // Hidden terminals don't need to build frames.
+                terminal.read(cx).set_visible(false);
+                let exited = cx.subscribe(&terminal, move |this, _, _: &Exited, cx| {
+                    this.chat_exited(id, cx)
+                });
+                let status = cx.subscribe(
+                    &terminal,
+                    move |this, _, StatusChanged(status): &StatusChanged, cx| {
+                        this.set_status(id, *status, cx)
+                    },
+                );
+                (
+                    Some(ChatTerminal {
+                        terminal,
+                        view,
+                        exited: false,
+                        _exited: exited,
+                        _status: status,
+                    }),
+                    None,
+                )
+            }
             Err(err) => {
-                window.push_notification(format!("Couldn't start {}: {err}", agent.program()), cx);
-                return;
+                let message = format!("Couldn't start {}: {err}", agent.program());
+                window.push_notification(message.clone(), cx);
+                (None, Some(SharedString::from(message)))
             }
         };
-        let terminal = cx.new(|cx| Terminal::new(pty, cx));
-        let view = cx.new(|cx| TerminalView::new(terminal.clone(), cx));
-        let exited = cx.subscribe(&terminal, {
-            let key = key.clone();
-            move |this, _, _: &Exited, cx| {
-                this.chats.retain(|chat| chat.key != key);
-                if this.active.as_ref() == Some(&key) {
-                    this.active = None;
-                }
-                this.sync_sidebar(cx);
-                cx.notify();
-            }
-        });
-        let status = cx.subscribe(&terminal, {
-            let key = key.clone();
-            move |this, _, StatusChanged(status): &StatusChanged, cx| {
-                this.set_status(&key, *status, cx)
-            }
-        });
-        self.chats.push(Chat {
-            key: key.clone(),
-            agent,
-            cwd: cwd.to_path_buf(),
-            terminal,
-            view,
-            session,
-            status: None,
-            unseen: false,
-            _exited: exited,
-            _status: status,
-        });
-        self.activate(key, window, cx);
+        let started = terminal.is_some();
+        self.push_chat(
+            id, agent, report, terminal, message, session, None, false, cx,
+        );
+        started
     }
 
-    fn activate(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Adds a chat to the view, with the history of the sessions it has.
+    fn push_chat(
+        &mut self,
+        id: i64,
+        agent: Agent,
+        report: String,
+        terminal: Option<ChatTerminal>,
+        message: Option<SharedString>,
+        session: Option<&db::Session>,
+        notice: Option<SharedString>,
+        fresh_on_restart: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // Without a running CLI, even its last session belongs in history.
+        let current = terminal
+            .as_ref()
+            .filter(|terminal| !terminal.exited)
+            .and(session.map(|session| session.id));
+        let transcript = session.map(|session| session.transcript_path.clone());
+        let db = self.db.clone();
+        let history = cx.new(|cx| {
+            let mut history = History::new(db, id);
+            history.refresh(current, &[], cx);
+            history
+        });
+        self.chats.push(Chat {
+            id,
+            agent,
+            report,
+            terminal,
+            message,
+            history,
+            session: session.map(|session| session.id),
+            transcript,
+            status: None,
+            unseen: false,
+            codex_lookup: 0,
+            notice,
+            fresh_on_restart,
+        });
+    }
+
+    /// Whether another chat's CLI is running in a session.
+    fn live_elsewhere(&self, chat_id: i64, session_id: i64) -> bool {
+        self.chats
+            .iter()
+            .any(|chat| chat.id != chat_id && chat.current_session() == Some(session_id))
+    }
+
+    /// Shows a chat whose CLI wasn't started, with the reason above the
+    /// history. Restarting starts a new session rather than resuming the one
+    /// that couldn't start.
+    fn block_chat(&mut self, id: i64, agent: Agent, message: SharedString, cx: &mut Context<Self>) {
+        let session = self
+            .db
+            .sessions(id)
+            .ok()
+            .and_then(|mut sessions| sessions.pop());
+        self.push_chat(
+            id,
+            agent,
+            uuid::Uuid::new_v4().to_string(),
+            None,
+            Some(message),
+            session.as_ref(),
+            None,
+            true,
+            cx,
+        );
+        self.sync_sidebar(cx);
+        cx.notify();
+    }
+
+    /// Restarts a chat's CLI, starting a new session when the chat couldn't
+    /// have resumed its last one.
+    fn restart(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let fresh = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .is_some_and(|chat| chat.fresh_on_restart);
+        self.stop_chat(id, cx);
+        if fresh {
+            let Ok(Some((agent, cwd))) = self.db.chat(id) else {
+                return;
+            };
+            if self.start_chat(id, agent, &cwd, None, window, cx) {
+                self.activate(id, window, cx);
+            }
+            self.refresh(cx);
+        } else {
+            self.open_chat(id, window, cx);
+        }
+    }
+
+    /// Archives the last session, retaining the terminal's exit diagnostics
+    /// until the user restarts or deletes the chat.
+    fn chat_exited(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(index) = self.chats.iter().position(|chat| chat.id == id) else {
+            return;
+        };
+        // A report can still be queued when the CLI's exit is handled. It
+        // says which session the final read follows, so it is read before the
+        // last session is imported.
+        let report = self.chats[index].report.clone();
+        self.read_reports(&report, cx);
+        let chat = &mut self.chats[index];
+        if let Some(terminal) = &mut chat.terminal {
+            terminal.exited = true;
+        }
+        chat.message = Some(
+            format!(
+                "{} exited. Its terminal output is kept below.",
+                chat.agent.display_name()
+            )
+            .into(),
+        );
+        chat.status = None;
+        let session = chat.session;
+        chat.history
+            .update(cx, |history, cx| history.refresh(None, &[], cx));
+        self.sync_sidebar(cx);
+        cx.notify();
+        self.read_sessions(session.into_iter().collect(), false, cx)
+            .detach();
+    }
+
+    fn stop_chat(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(index) = self.chats.iter().position(|chat| chat.id == id) else {
+            return;
+        };
+        let chat = self.chats.remove(index);
+        if let Some(terminal) = chat.terminal {
+            terminal.terminal.read(cx).shutdown();
+        }
+        if self.active == Some(id) {
+            self.active = None;
+        }
+        self.sync_sidebar(cx);
+        cx.notify();
+    }
+
+    fn activate(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         for chat in &mut self.chats {
-            let shown = chat.key == key;
-            chat.terminal.read(cx).set_visible(shown);
+            let shown = chat.id == id;
+            if let Some(terminal) = &chat.terminal {
+                terminal.terminal.read(cx).set_visible(shown);
+                if shown {
+                    terminal.view.focus_handle(cx).focus(window, cx);
+                }
+            }
             if shown {
-                chat.view.focus_handle(cx).focus(window, cx);
                 chat.unseen = false;
             }
         }
-        self.active = Some(key);
+        self.active = Some(id);
+        self.requested = Some(id);
         self.sync_sidebar(cx);
         cx.notify();
     }
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let active_terminal = self
+        if let Some(reason) = self.broken.clone() {
+            return render_broken(reason, cx);
+        }
+        let active = self
             .active
-            .as_ref()
-            .and_then(|key| self.chats.iter().find(|chat| &chat.key == key))
-            .map(|chat| &chat.view);
+            .and_then(|id| self.chats.iter().find(|chat| chat.id == id));
+        let history_max = window.viewport_size().height * HISTORY_SHARE;
 
         h_flex()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
             // Terminal output re-renders the window many times a second; the
-            // sidebar only needs to render again when its own state changes.
+            // sidebar and the history only need to render again when their own
+            // state changes.
             .child(
                 self.sidebar.clone().cached(
                     StyleRefinement::default()
@@ -374,21 +1183,311 @@ impl Render for Workspace {
                 ),
             )
             .child(
-                div()
+                v_flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .map(|this| match active_terminal {
-                        Some(view) => this.child(view.clone()),
+                    .map(|this| match active {
+                        Some(chat) => {
+                            let id = chat.id;
+                            let history_max = if chat.terminal.is_none() {
+                                window.viewport_size().height - px(80.)
+                            } else {
+                                history_max
+                            };
+                            this.when_some(chat.notice.clone(), |this, notice| {
+                                this.child(
+                                    div()
+                                        .flex_none()
+                                        .px_3()
+                                        .py_2()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child(notice),
+                                )
+                            })
+                            .when_some(chat.message.clone(), |this, message| {
+                                this.child(
+                                    h_flex()
+                                        .p_3()
+                                        .gap_3()
+                                        .child(div().flex_1().text_sm().child(message))
+                                        .child(
+                                            Button::new("restart-agent")
+                                                .label("Restart agent")
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.restart(id, window, cx);
+                                                    },
+                                                )),
+                                        ),
+                                )
+                            })
+                            .children(chat.history.read(cx).height(history_max).map(|height| {
+                                chat.history.clone().cached(
+                                    StyleRefinement::default().w_full().h(height).flex_none(),
+                                )
+                            }))
+                            .children(chat.terminal.as_ref().map(|terminal| {
+                                div().flex_1().min_h_0().child(terminal.view.clone())
+                            }))
+                        }
                         None => this.child(render_empty(cx)),
                     }),
             )
+            .into_any_element()
     }
 }
 
-/// What shows while no chat is open: how to open one, and how to read the
+/// Flushes queued reports and all of a chat's transcripts without scheduling
+/// work on the released workspace. Reading all sessions also covers a session
+/// switch whose earlier import has not yet run.
+fn backup_chat(
+    db: &Db,
+    reports: &mut Reports,
+    id: i64,
+    agent: Agent,
+    key: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut failure = None;
+    if let Some(key) = key {
+        for report in reports.read(key) {
+            let path = &report.transcript_path;
+            let Some(agent_id) = report
+                .session_id
+                .or_else(|| transcript::session_id(agent, path))
+            else {
+                continue;
+            };
+            if let Err(err) =
+                db.record_session(id, agent, &agent_id, path, report.reason.as_deref())
+            {
+                failure.get_or_insert(anyhow::Error::from(err));
+            }
+        }
+    }
+    for session in db.sessions(id)? {
+        if let Err(err) = transcript::read(db, session.id) {
+            failure.get_or_insert(err);
+        }
+    }
+    match failure {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backup_chat;
+    use crate::{agent::Agent, db::Db, reports::Reports, transcript};
+    use serde_json::json;
+    use std::fs;
+
+    fn message(id: &str, parent: Option<&str>, role: &str, text: &str) -> String {
+        format!(
+            "{}\n",
+            json!({
+                "type": role, "uuid": id, "parentUuid": parent,
+                "message": { "role": role, "content": [{ "type": "text", "text": text }] }
+            })
+        )
+    }
+
+    #[test]
+    fn names_exports_after_the_day() {
+        assert_eq!(super::date_stamp(0), "1970-01-01");
+        assert_eq!(super::date_stamp(1_700_000_000), "2023-11-14");
+    }
+
+    #[test]
+    fn shutdown_imports_unread_turns_and_sessions_in_queued_reports() {
+        let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agentshub.db");
+        let db = Db::open(&path).unwrap();
+        let project = db.add_project(&dir).unwrap();
+        let chat = db.add_chat(project, Agent::Claude).unwrap();
+        let first = dir.join("first.jsonl");
+        let second = dir.join("second.jsonl");
+        let prompt = message("1", None, "user", "first prompt");
+        fs::write(&first, &prompt).unwrap();
+        let session = db
+            .record_session(chat, Agent::Claude, "first", &first, Some("startup"))
+            .unwrap()
+            .session_id;
+        transcript::read(&db, session).unwrap();
+        // No status report triggers a read of the last answer.
+        fs::write(
+            &first,
+            format!(
+                "{prompt}{}",
+                message("2", Some("1"), "assistant", "last answer")
+            ),
+        )
+        .unwrap();
+        fs::write(&second, message("3", None, "user", "second prompt")).unwrap();
+        let (mut reports, _) = Reports::new();
+        // This session switch is still queued when the workspace is released.
+        fs::write(
+            reports.path("cli"),
+            format!(
+                "{}\n",
+                json!({
+                    "session_id": "second", "transcript_path": second, "source": "clear"
+                })
+            ),
+        )
+        .unwrap();
+
+        backup_chat(&db, &mut reports, chat, Agent::Claude, Some("cli")).unwrap();
+        assert!(reports.read("cli").is_empty());
+        reports.remove();
+        // The original transcripts can expire; the database still has both.
+        fs::remove_file(&first).unwrap();
+        fs::remove_file(&second).unwrap();
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        let sessions = db.sessions(chat).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|session| session.prompted));
+        assert_eq!(
+            db.items(sessions[0].id, 100).unwrap()[1].payload["text"],
+            "last answer"
+        );
+        assert_eq!(
+            db.items(sessions[1].id, 100).unwrap()[0].payload["text"],
+            "second prompt"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shutdown_continues_importing_after_one_transcript_fails() {
+        let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let db = Db::open_in_memory().unwrap();
+        let project = db.add_project(&dir).unwrap();
+        let chat = db.add_chat(project, Agent::Claude).unwrap();
+        // A directory cannot be read as a transcript.
+        db.record_session(chat, Agent::Claude, "bad", &dir, None)
+            .unwrap();
+        let good = dir.join("good.jsonl");
+        fs::write(&good, message("1", None, "user", "kept")).unwrap();
+        let session = db
+            .record_session(chat, Agent::Claude, "good", &good, None)
+            .unwrap()
+            .session_id;
+        let (mut reports, _) = Reports::new();
+
+        assert!(backup_chat(&db, &mut reports, chat, Agent::Claude, None).is_err());
+        assert_eq!(db.items(session, 100).unwrap()[0].payload["text"], "kept");
+        reports.remove();
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// What shows when the database or the instance lock stopped the workspace
+/// from opening. Nothing else is reachable, since nothing could be saved.
+fn render_broken(reason: SharedString, cx: &Context<Workspace>) -> AnyElement {
+    let theme = cx.theme();
+    h_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .p_8()
+        .bg(theme.background)
+        .text_color(theme.foreground)
+        .child(
+            v_flex()
+                .max_w(px(440.))
+                .gap_4()
+                .child(
+                    div()
+                        .text_xl()
+                        .font_semibold()
+                        .child("Agents Hub can't start"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.4))
+                        .text_color(theme.muted_foreground)
+                        .child(reason),
+                )
+                .child(
+                    Button::new("quit")
+                        .label("Quit")
+                        .on_click(|_, _, cx| cx.quit()),
+                ),
+        )
+        .into_any_element()
+}
+
+/// What taking the instance lock did.
+enum Lock {
+    /// This process holds it.
+    Held(fs::File),
+    /// Another Agents Hub holds it.
+    Contended,
+    /// No lock file could be opened; the app still starts, without the guard.
+    Unavailable,
+}
+
+/// Takes the process-wide lock, in the runtime folder when it exists, then
+/// beside the database, then in the temp folder. The kernel releases it if
+/// this process dies.
+fn instance_lock() -> Lock {
+    let name = "agentshub.lock";
+    let mut paths = Vec::new();
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        paths.push(PathBuf::from(dir).join(name));
+    }
+    if let Some(dir) = db::path().and_then(|path| path.parent().map(PathBuf::from)) {
+        paths.push(dir.join(name));
+    }
+    paths.push(std::env::temp_dir().join(name));
+
+    for path in paths {
+        let Ok(file) = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+        else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: the descriptor stays open for the life of `file`, and
+            // flock needs nothing else from it.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return Lock::Contended;
+            }
+        }
+        return Lock::Held(file);
+    }
+    Lock::Unavailable
+}
+
+/// The date an export is named after, from seconds since the epoch.
+fn date_stamp(now: i64) -> String {
+    let z = now.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// What shows while no chat is open: how to start one, and how to read the
 /// sidebar's lamps.
-fn render_empty(cx: &App) -> impl IntoElement {
+fn render_empty(cx: &Context<Workspace>) -> impl IntoElement {
     let theme = cx.theme();
     let legend_item =
         |color, state, label: &'static str| h_flex().gap_2().child(lamp(color, state)).child(label);
@@ -409,7 +1508,7 @@ fn render_empty(cx: &App) -> impl IntoElement {
                             div()
                                 .text_xl()
                                 .font_semibold()
-                                .child("Resume a session, or start a new one"),
+                                .child("Add a project, then start a chat in it"),
                         )
                         .child(
                             div()
@@ -417,11 +1516,22 @@ fn render_empty(cx: &App) -> impl IntoElement {
                                 .line_height(rems(1.4))
                                 .text_color(theme.muted_foreground)
                                 .child(
-                                    "Choose a session on the left to reopen it. To start \
-                                     Claude Code, Codex or Pi in a project, press + beside \
-                                     it. Agents keep running while you look at another \
-                                     session.",
+                                    "A project is a folder you work in. Once it's added, \
+                                     press + beside it to start Claude Code, Codex or Pi \
+                                     there. Choose a chat on the left to reopen it where it \
+                                     left off. Agents keep running while you look at \
+                                     another chat.",
                                 ),
+                        )
+                        .child(
+                            h_flex().pt_2().child(
+                                Button::new("add-first-project")
+                                    .icon(IconName::FolderOpen)
+                                    .label("Add project")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.add_project(window, cx)
+                                    })),
+                            ),
                         ),
                 )
                 .child(
