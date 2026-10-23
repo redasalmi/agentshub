@@ -34,6 +34,11 @@ const HISTORY_SHARE: f32 = 0.45;
 /// pauses.
 const CODEX_DELAY: Duration = Duration::from_millis(500);
 
+/// Said above a chat whose last session couldn't be resumed, and kept in that
+/// session's history.
+const TRANSCRIPT_GONE: &str = "This session's transcript is gone, so it couldn't be resumed. \
+                               Its saved history is still available here.";
+
 impl SelectItem for Agent {
     type Value = Agent;
 
@@ -85,6 +90,10 @@ pub struct Workspace {
     /// Why the workspace can't be used: the database didn't open, or another
     /// Agents Hub holds the lock.
     broken: Option<SharedString>,
+    /// The sessions whose transcript is being read, which shutdown reads
+    /// itself since it can't wait for them. A session is in it once per read
+    /// under way, so it stays until the last of them is done.
+    reading: Vec<i64>,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
 }
@@ -138,41 +147,15 @@ impl Chat {
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // The lock comes first: a second instance must not migrate the
-        // database under the first one.
-        let lock = instance_lock();
-        if matches!(&lock, Lock::Unavailable) {
-            eprintln!("can't write the lock file; another instance would not be kept out");
-        }
-        let (db, broken) = if matches!(&lock, Lock::Contended) {
-            (
-                Db::open_in_memory().expect("SQLite opens in memory"),
-                Some("Agents Hub is already running.".into()),
-            )
-        } else {
-            match db::path().map(|path| Db::open(&path)) {
-                Some(Ok(db)) => (db, None),
-                Some(Err(err)) => {
-                    eprintln!("can't open the database: {err}");
-                    (
-                        Db::open_in_memory().expect("SQLite opens in memory"),
-                        Some(
-                            format!(
-                                "Couldn't open the database in {}, so nothing can be kept: {err}",
-                                db::path()
-                                    .and_then(|path| path
-                                        .parent()
-                                        .map(|dir| dir.display().to_string()))
-                                    .unwrap_or_default()
-                            )
-                            .into(),
-                        ),
-                    )
-                }
-                None => (
+        let (db, lock, broken) = match db::open_locked() {
+            Ok((db, lock)) => (db, lock, None),
+            Err(err) => {
+                eprintln!("{err:#}");
+                (
                     Db::open_in_memory().expect("SQLite opens in memory"),
-                    Some("There is no home folder to keep the database in.".into()),
-                ),
+                    None,
+                    Some(format!("{err:#}").into()),
+                )
             }
         };
 
@@ -237,6 +220,21 @@ impl Workspace {
         // Closing the window releases the workspace before the app quits, and
         // quitting releases it too.
         cx.on_release(|this, cx| {
+            // Nothing can be scheduled on a released workspace, so what the
+            // CLIs wrote last is read here: the sessions in their queued
+            // reports, the ones they were in, and the reads still under way.
+            // The sessions they left before were read when they left them.
+            let mut sessions = this.reading.clone();
+            // A chat being opened reads its last session on a thread of its
+            // own, which isn't in `reading`, so it is read again here, the
+            // way `open_chat` reads it.
+            for &id in &this.opening {
+                if let Some(last) = this.sessions_of(id).pop()
+                    && last.transcript_path.exists()
+                {
+                    sessions.push(last.id);
+                }
+            }
             // Discover Codex's last session before its process disappears.
             // A queued watcher callback cannot run once we're released.
             for chat in &this.chats {
@@ -247,11 +245,16 @@ impl Workspace {
                         .read(cx)
                         .with_pid(sessions::codex_session_of)
                     && let Some(agent_id) = transcript::session_id(chat.agent, &path)
-                    && let Err(err) = this
+                {
+                    match this
                         .db
                         .record_session(chat.id, chat.agent, &agent_id, &path, None)
-                {
-                    eprintln!("can't record the last Codex session: {err}");
+                    {
+                        Ok(recorded) => {
+                            sessions.extend(recorded.left.into_iter().chain([recorded.session_id]))
+                        }
+                        Err(err) => eprintln!("can't record the last Codex session: {err}"),
+                    }
                 }
             }
             // The CLIs are killed on threads of their own, which the app would
@@ -263,26 +266,23 @@ impl Workspace {
                 .map(|terminal| terminal.terminal.read(cx).shutdown())
                 .collect();
             terminal::wait_reaped(reaped);
-            // Final reports can be written during shutdown. Import every
-            // session synchronously: foreground tasks and Exited callbacks
-            // can no longer complete on this workspace. Concurrent imports
-            // are safe because transcript::read retries stale offsets.
             for chat in &this.chats {
-                if let Err(err) = backup_chat(
+                if let Err(err) = import_chat(
                     &this.db,
                     &mut this.reports,
                     chat.id,
                     chat.agent,
-                    Some(&chat.report),
+                    &chat.report,
+                    chat.session.into_iter().collect(),
                 ) {
-                    eprintln!("can't back up chat {} on shutdown: {err}", chat.id);
+                    eprintln!("can't import chat {} on shutdown: {err}", chat.id);
                 }
             }
-            for &id in &this.opening {
-                if let Ok(Some((agent, _))) = this.db.chat(id)
-                    && let Err(err) = backup_chat(&this.db, &mut this.reports, id, agent, None)
-                {
-                    eprintln!("can't back up opening chat {id}: {err}");
+            sessions.sort_unstable();
+            sessions.dedup();
+            for id in sessions {
+                if let Err(err) = transcript::read(&this.db, id) {
+                    eprintln!("can't read session {id} on shutdown: {err}");
                 }
             }
             this.reports.remove();
@@ -319,10 +319,8 @@ impl Workspace {
             _theme: theme,
             new_chat_select: None,
             broken,
-            _lock: match lock {
-                Lock::Held(file) => Some(file),
-                Lock::Contended | Lock::Unavailable => None,
-            },
+            reading: Vec::new(),
+            _lock: lock,
         };
         this.update_codex_watch();
         this.refresh(cx);
@@ -371,10 +369,8 @@ impl Workspace {
     /// Copies the database where the user asks, so the history can live
     /// outside the one file agentshub reads.
     fn export_database(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = db::path()
-            .and_then(|path| path.parent().map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let name = format!("agentshub-{}.db", date_stamp(db::now()));
+        let dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let name = format!("agentshub-{}.db", jiff::Zoned::now().date());
         let picked = cx.prompt_for_new_path(&dir, Some(&name));
         cx.spawn_in(window, async move |this, cx| {
             let path = match picked.await {
@@ -603,22 +599,12 @@ impl Workspace {
                     Some(last) if last.prompted => {
                         match this.db.set_missing(last.id) {
                             Ok(true) => {
-                                this.db
-                                    .add_notice(
-                                        last.id,
-                                        "This session's transcript is gone, so it couldn't be \
-                                         resumed. Its saved history is still available here.",
-                                    )
-                                    .ok();
+                                this.db.add_notice(last.id, TRANSCRIPT_GONE).ok();
                             }
                             Ok(false) => {}
                             Err(err) => eprintln!("can't mark session {} missing: {err}", last.id),
                         }
-                        notice = Some(
-                            "This session's transcript is gone, so it couldn't be resumed. \
-                             Its saved history is still available here."
-                                .into(),
-                        );
+                        notice = Some(TRANSCRIPT_GONE.into());
                         None
                     }
                     // A session without a prompt has nothing to resume.
@@ -641,12 +627,11 @@ impl Workspace {
                             .into(),
                         cx,
                     );
-                } else if this.start_chat(id, agent, &cwd, resumed, window, cx) {
-                    if let Some(notice) = notice
-                        && let Some(chat) = this.chats.iter_mut().find(|chat| chat.id == id)
-                    {
-                        chat.notice = Some(notice);
-                    }
+                } else if this.start_chat(id, agent, &cwd, resumed, window, cx)
+                    && let Some(notice) = notice
+                    && let Some(chat) = this.chats.iter_mut().find(|chat| chat.id == id)
+                {
+                    chat.notice = Some(notice);
                 }
                 if show {
                     this.activate(id, window, cx);
@@ -677,16 +662,14 @@ impl Workspace {
             return;
         };
         let mut recorded = false;
-        for report in self.reports.read(key) {
-            let path = &report.transcript_path;
-            let Some(agent_id) = report
-                .session_id
-                .clone()
-                .or_else(|| transcript::session_id(agent, path))
-            else {
-                continue;
-            };
-            recorded |= self.record_session(id, &agent_id, path, report.reason.as_deref(), cx);
+        for (agent_id, report) in self.reports.read(key, agent) {
+            recorded |= self.record_session(
+                id,
+                &agent_id,
+                &report.transcript_path,
+                report.reason.as_deref(),
+                cx,
+            );
         }
         // Reports arrive in bursts, and each one used to reload the sidebar.
         if recorded {
@@ -822,10 +805,9 @@ impl Workspace {
         }
     }
 
-    /// Reads sessions' transcripts of a chat on a blocking thread, then shows
-    /// what changed.
-    /// Reads sessions' transcripts, marking the chats active when `touch` is
-    /// set, as a finished turn does but browsing history doesn't.
+    /// Reads sessions' transcripts on a blocking thread, then shows what
+    /// changed. Marks their chats active when `touch` is set, as a finished
+    /// turn does but browsing history doesn't.
     fn read_sessions(
         &mut self,
         sessions: Vec<i64>,
@@ -833,15 +815,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Task<()> {
         let db = self.db.clone();
+        self.reading.extend(&sessions);
         cx.spawn(async move |this, cx| {
             if sessions.is_empty() {
                 return;
             }
             // Parsing transcripts and writing them to the database blocks, so
             // it stays off the executor's threads.
-            let changed = smol::unblock(move || {
+            let (sessions, changed) = smol::unblock(move || {
                 let mut changed = Vec::new();
-                for id in sessions {
+                for &id in &sessions {
                     match transcript::read(&db, id) {
                         Ok(read) => {
                             if touch {
@@ -856,11 +839,18 @@ impl Workspace {
                         }
                     }
                 }
-                changed
+                (sessions, changed)
             })
             .await;
-            this.update(cx, |this, cx| this.refresh_after(&changed, cx))
-                .ok();
+            this.update(cx, |this, cx| {
+                for id in &sessions {
+                    if let Some(index) = this.reading.iter().position(|reading| reading == id) {
+                        this.reading.swap_remove(index);
+                    }
+                }
+                this.refresh_after(&changed, cx)
+            })
+            .ok();
         })
     }
 
@@ -955,7 +945,7 @@ impl Workspace {
         }
         let report_path = self.reports.path(&report);
         let env = [(reports::ENV, report_path.as_os_str())];
-        let (terminal, message) = match Pty::spawn(agent.program(), &all_args, &env, cwd, colors) {
+        let terminal = match Pty::spawn(agent.program(), &all_args, &env, cwd, colors) {
             Ok(pty) => {
                 let terminal = cx.new(|cx| Terminal::new(pty, cx));
                 let view = cx.new(|cx| TerminalView::new(terminal.clone(), cx));
@@ -970,48 +960,42 @@ impl Workspace {
                         this.set_status(id, *status, cx)
                     },
                 );
-                (
-                    Some(ChatTerminal {
-                        terminal,
-                        view,
-                        exited: false,
-                        _exited: exited,
-                        _status: status,
-                    }),
-                    None,
-                )
+                Ok(ChatTerminal {
+                    terminal,
+                    view,
+                    exited: false,
+                    _exited: exited,
+                    _status: status,
+                })
             }
             Err(err) => {
                 let message = format!("Couldn't start {}: {err}", agent.program());
                 window.push_notification(message.clone(), cx);
-                (None, Some(SharedString::from(message)))
+                Err(SharedString::from(message))
             }
         };
-        let started = terminal.is_some();
-        self.push_chat(
-            id, agent, report, terminal, message, session, None, false, cx,
-        );
+        let started = terminal.is_ok();
+        self.push_chat(id, agent, report, terminal, session, cx);
         started
     }
 
-    /// Adds a chat to the view, with the history of the sessions it has.
+    /// Adds a chat to the view, with the history of the sessions it has: with
+    /// its terminal, or with why its CLI didn't start.
     fn push_chat(
         &mut self,
         id: i64,
         agent: Agent,
         report: String,
-        terminal: Option<ChatTerminal>,
-        message: Option<SharedString>,
+        terminal: Result<ChatTerminal, SharedString>,
         session: Option<&db::Session>,
-        notice: Option<SharedString>,
-        fresh_on_restart: bool,
         cx: &mut Context<Self>,
-    ) {
+    ) -> &mut Chat {
+        let (terminal, message) = match terminal {
+            Ok(terminal) => (Some(terminal), None),
+            Err(message) => (None, Some(message)),
+        };
         // Without a running CLI, even its last session belongs in history.
-        let current = terminal
-            .as_ref()
-            .filter(|terminal| !terminal.exited)
-            .and(session.map(|session| session.id));
+        let current = terminal.as_ref().and(session.map(|session| session.id));
         let transcript = session.map(|session| session.transcript_path.clone());
         let db = self.db.clone();
         let history = cx.new(|cx| {
@@ -1031,9 +1015,10 @@ impl Workspace {
             status: None,
             unseen: false,
             codex_lookup: 0,
-            notice,
-            fresh_on_restart,
+            notice: None,
+            fresh_on_restart: false,
         });
+        self.chats.last_mut().expect("a chat was just pushed")
     }
 
     /// Whether another chat's CLI is running in a session.
@@ -1052,17 +1037,9 @@ impl Workspace {
             .sessions(id)
             .ok()
             .and_then(|mut sessions| sessions.pop());
-        self.push_chat(
-            id,
-            agent,
-            uuid::Uuid::new_v4().to_string(),
-            None,
-            Some(message),
-            session.as_ref(),
-            None,
-            true,
-            cx,
-        );
+        let report = uuid::Uuid::new_v4().to_string();
+        self.push_chat(id, agent, report, Err(message), session.as_ref(), cx)
+            .fresh_on_restart = true;
         self.sync_sidebar(cx);
         cx.notify();
     }
@@ -1239,151 +1216,37 @@ impl Render for Workspace {
     }
 }
 
-/// Flushes queued reports and all of a chat's transcripts without scheduling
-/// work on the released workspace. Reading all sessions also covers a session
-/// switch whose earlier import has not yet run.
-fn backup_chat(
+/// Records the sessions a chat's CLI reported last, and reads `sessions`
+/// along with the ones those reports moved the chat into or out of. One
+/// transcript that can't be read doesn't stop the others.
+fn import_chat(
     db: &Db,
     reports: &mut Reports,
     id: i64,
     agent: Agent,
-    key: Option<&str>,
+    key: &str,
+    mut sessions: Vec<i64>,
 ) -> anyhow::Result<()> {
     let mut failure = None;
-    if let Some(key) = key {
-        for report in reports.read(key) {
-            let path = &report.transcript_path;
-            let Some(agent_id) = report
-                .session_id
-                .or_else(|| transcript::session_id(agent, path))
-            else {
-                continue;
-            };
-            if let Err(err) =
-                db.record_session(id, agent, &agent_id, path, report.reason.as_deref())
-            {
+    for (agent_id, report) in reports.read(key, agent) {
+        let path = &report.transcript_path;
+        match db.record_session(id, agent, &agent_id, path, report.reason.as_deref()) {
+            Ok(recorded) => sessions.extend(recorded.left.into_iter().chain([recorded.session_id])),
+            Err(err) => {
                 failure.get_or_insert(anyhow::Error::from(err));
             }
         }
     }
-    for session in db.sessions(id)? {
-        if let Err(err) = transcript::read(db, session.id) {
+    sessions.sort_unstable();
+    sessions.dedup();
+    for session in sessions {
+        if let Err(err) = transcript::read(db, session) {
             failure.get_or_insert(err);
         }
     }
     match failure {
         Some(err) => Err(err),
         None => Ok(()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::backup_chat;
-    use crate::{agent::Agent, db::Db, reports::Reports, transcript};
-    use serde_json::json;
-    use std::fs;
-
-    fn message(id: &str, parent: Option<&str>, role: &str, text: &str) -> String {
-        format!(
-            "{}\n",
-            json!({
-                "type": role, "uuid": id, "parentUuid": parent,
-                "message": { "role": role, "content": [{ "type": "text", "text": text }] }
-            })
-        )
-    }
-
-    #[test]
-    fn names_exports_after_the_day() {
-        assert_eq!(super::date_stamp(0), "1970-01-01");
-        assert_eq!(super::date_stamp(1_700_000_000), "2023-11-14");
-    }
-
-    #[test]
-    fn shutdown_imports_unread_turns_and_sessions_in_queued_reports() {
-        let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("agentshub.db");
-        let db = Db::open(&path).unwrap();
-        let project = db.add_project(&dir).unwrap();
-        let chat = db.add_chat(project, Agent::Claude).unwrap();
-        let first = dir.join("first.jsonl");
-        let second = dir.join("second.jsonl");
-        let prompt = message("1", None, "user", "first prompt");
-        fs::write(&first, &prompt).unwrap();
-        let session = db
-            .record_session(chat, Agent::Claude, "first", &first, Some("startup"))
-            .unwrap()
-            .session_id;
-        transcript::read(&db, session).unwrap();
-        // No status report triggers a read of the last answer.
-        fs::write(
-            &first,
-            format!(
-                "{prompt}{}",
-                message("2", Some("1"), "assistant", "last answer")
-            ),
-        )
-        .unwrap();
-        fs::write(&second, message("3", None, "user", "second prompt")).unwrap();
-        let (mut reports, _) = Reports::new();
-        // This session switch is still queued when the workspace is released.
-        fs::write(
-            reports.path("cli"),
-            format!(
-                "{}\n",
-                json!({
-                    "session_id": "second", "transcript_path": second, "source": "clear"
-                })
-            ),
-        )
-        .unwrap();
-
-        backup_chat(&db, &mut reports, chat, Agent::Claude, Some("cli")).unwrap();
-        assert!(reports.read("cli").is_empty());
-        reports.remove();
-        // The original transcripts can expire; the database still has both.
-        fs::remove_file(&first).unwrap();
-        fs::remove_file(&second).unwrap();
-        drop(db);
-        let db = Db::open(&path).unwrap();
-        let sessions = db.sessions(chat).unwrap();
-        assert_eq!(sessions.len(), 2);
-        assert!(sessions.iter().all(|session| session.prompted));
-        assert_eq!(
-            db.items(sessions[0].id, 100).unwrap()[1].payload["text"],
-            "last answer"
-        );
-        assert_eq!(
-            db.items(sessions[1].id, 100).unwrap()[0].payload["text"],
-            "second prompt"
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn shutdown_continues_importing_after_one_transcript_fails() {
-        let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        let db = Db::open_in_memory().unwrap();
-        let project = db.add_project(&dir).unwrap();
-        let chat = db.add_chat(project, Agent::Claude).unwrap();
-        // A directory cannot be read as a transcript.
-        db.record_session(chat, Agent::Claude, "bad", &dir, None)
-            .unwrap();
-        let good = dir.join("good.jsonl");
-        fs::write(&good, message("1", None, "user", "kept")).unwrap();
-        let session = db
-            .record_session(chat, Agent::Claude, "good", &good, None)
-            .unwrap()
-            .session_id;
-        let (mut reports, _) = Reports::new();
-
-        assert!(backup_chat(&db, &mut reports, chat, Agent::Claude, None).is_err());
-        assert_eq!(db.items(session, 100).unwrap()[0].payload["text"], "kept");
-        reports.remove();
-        fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -1422,67 +1285,6 @@ fn render_broken(reason: SharedString, cx: &Context<Workspace>) -> AnyElement {
                 ),
         )
         .into_any_element()
-}
-
-/// What taking the instance lock did.
-enum Lock {
-    /// This process holds it.
-    Held(fs::File),
-    /// Another Agents Hub holds it.
-    Contended,
-    /// No lock file could be opened; the app still starts, without the guard.
-    Unavailable,
-}
-
-/// Takes the process-wide lock, in the runtime folder when it exists, then
-/// beside the database, then in the temp folder. The kernel releases it if
-/// this process dies.
-fn instance_lock() -> Lock {
-    let name = "agentshub.lock";
-    let mut paths = Vec::new();
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        paths.push(PathBuf::from(dir).join(name));
-    }
-    if let Some(dir) = db::path().and_then(|path| path.parent().map(PathBuf::from)) {
-        paths.push(dir.join(name));
-    }
-    paths.push(std::env::temp_dir().join(name));
-
-    for path in paths {
-        let Ok(file) = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(path)
-        else {
-            continue;
-        };
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd as _;
-            // SAFETY: the descriptor stays open for the life of `file`, and
-            // flock needs nothing else from it.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                return Lock::Contended;
-            }
-        }
-        return Lock::Held(file);
-    }
-    Lock::Unavailable
-}
-
-/// The date an export is named after, from seconds since the epoch.
-fn date_stamp(now: i64) -> String {
-    let z = now.div_euclid(86_400) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
 }
 
 /// What shows while no chat is open: how to start one, and how to read the
@@ -1558,4 +1360,111 @@ fn render_empty(cx: &Context<Workspace>) -> impl IntoElement {
                         ),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::import_chat;
+    use crate::{agent::Agent, db::Db, reports::Reports, transcript};
+    use serde_json::json;
+    use std::fs;
+
+    fn message(id: &str, parent: Option<&str>, role: &str, text: &str) -> String {
+        format!(
+            "{}\n",
+            json!({
+                "type": role, "uuid": id, "parentUuid": parent,
+                "message": { "role": role, "content": [{ "type": "text", "text": text }] }
+            })
+        )
+    }
+
+    #[test]
+    fn shutdown_imports_unread_turns_and_sessions_in_queued_reports() {
+        let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agentshub.db");
+        let db = Db::open(&path).unwrap();
+        let project = db.add_project(&dir).unwrap();
+        let chat = db.add_chat(project, Agent::Claude).unwrap();
+        let first = dir.join("first.jsonl");
+        let second = dir.join("second.jsonl");
+        let prompt = message("1", None, "user", "first prompt");
+        fs::write(&first, &prompt).unwrap();
+        let session = db
+            .record_session(chat, Agent::Claude, "first", &first, Some("startup"))
+            .unwrap()
+            .session_id;
+        transcript::read(&db, session).unwrap();
+        // No status report triggers a read of the last answer.
+        fs::write(
+            &first,
+            format!(
+                "{prompt}{}",
+                message("2", Some("1"), "assistant", "last answer")
+            ),
+        )
+        .unwrap();
+        fs::write(&second, message("3", None, "user", "second prompt")).unwrap();
+        let (mut reports, _) = Reports::new();
+        // This session switch is still queued when the workspace is released.
+        fs::write(
+            reports.path("cli"),
+            format!(
+                "{}\n",
+                json!({
+                    "session_id": "second", "transcript_path": second, "source": "clear"
+                })
+            ),
+        )
+        .unwrap();
+
+        import_chat(&db, &mut reports, chat, Agent::Claude, "cli", Vec::new()).unwrap();
+        assert!(reports.read("cli", Agent::Claude).is_empty());
+        reports.remove();
+        // The original transcripts can expire; the database still has both.
+        fs::remove_file(&first).unwrap();
+        fs::remove_file(&second).unwrap();
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        let sessions = db.sessions(chat).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|session| session.prompted));
+        assert_eq!(
+            db.items(sessions[0].id, 100).unwrap()[1].payload["text"],
+            "last answer"
+        );
+        assert_eq!(
+            db.items(sessions[1].id, 100).unwrap()[0].payload["text"],
+            "second prompt"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shutdown_continues_importing_after_one_transcript_fails() {
+        let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let db = Db::open_in_memory().unwrap();
+        let project = db.add_project(&dir).unwrap();
+        let chat = db.add_chat(project, Agent::Claude).unwrap();
+        // A directory cannot be read as a transcript.
+        let bad = db
+            .record_session(chat, Agent::Claude, "bad", &dir, None)
+            .unwrap()
+            .session_id;
+        let good = dir.join("good.jsonl");
+        fs::write(&good, message("1", None, "user", "kept")).unwrap();
+        let session = db
+            .record_session(chat, Agent::Claude, "good", &good, None)
+            .unwrap()
+            .session_id;
+        let (mut reports, _) = Reports::new();
+
+        let sessions = vec![bad, session];
+        assert!(import_chat(&db, &mut reports, chat, Agent::Claude, "cli", sessions).is_err());
+        assert_eq!(db.items(session, 100).unwrap()[0].payload["text"], "kept");
+        reports.remove();
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

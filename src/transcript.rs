@@ -15,10 +15,15 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::agent::Agent;
-use crate::db::{Db, Saved};
+use crate::db::Db;
 use crate::sessions;
 
 const TITLE_CHARS: usize = 80;
+
+/// The version of what a read keeps. Raising it reads every transcript that
+/// still exists again from its start, so that a change to what is kept reaches
+/// the sessions read before it.
+pub const PARSER: i64 = 1;
 
 /// How much of a tool's output is kept at each end.
 const OUTPUT_KEEP: usize = 2048;
@@ -93,12 +98,10 @@ pub struct Read {
     /// Every line read, with its parent, kept or not. The database walks it to
     /// find the kept ancestor a new item hangs off.
     pub parents: HashMap<String, Option<String>>,
-    /// The ids of the lines read, in order. The last one is `leaf`, unless
-    /// the transcript replayed an older line after a new one.
+    /// The ids of the lines read, in order. The newest of them that isn't a
+    /// replay of an older line is the one the session's branch ends on, even
+    /// if it kept no item, such as a branch summary.
     pub(crate) lines: Vec<String>,
-    /// The last entry read, whose branch the session ended on. It can be a
-    /// line that kept no item, such as a branch summary.
-    pub leaf: Option<String>,
     /// The first prompt's text, if it had any to title the session with.
     pub prompt: Option<String>,
     /// Whether the user prompted the session at all, even with only an image.
@@ -113,30 +116,29 @@ pub struct Read {
 /// Reads the lines added to a session's transcript since the last read, and
 /// says whether the history shows anything new.
 pub fn read(db: &Db, session_id: i64) -> anyhow::Result<bool> {
-    loop {
-        let Some(transcript) = db.transcript(session_id)? else {
-            return Ok(false);
-        };
-        match Read::file(
-            transcript.agent,
-            &transcript.agent_id,
-            &transcript.path,
-            transcript.offset,
-        ) {
-            Ok(read) => match db.save_read_state(session_id, transcript.offset, &read)? {
-                // This read started where another one did, but the other one
-                // saved first. Read from where it stopped, so the lines only
-                // this read saw aren't lost.
-                Saved::Stale => continue,
-                saved => return Ok(saved.changed()),
-            },
-            // Its items stay.
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                db.set_missing(session_id)?;
-                return Ok(false);
-            }
-            Err(err) => return Err(err.into()),
+    let _reading = db.lock_reads();
+    let Some(transcript) = db.transcript(session_id)? else {
+        return Ok(false);
+    };
+    // What an older parser kept is replaced, from the start of the file.
+    let outdated = transcript.parser < PARSER;
+    let offset = if outdated { 0 } else { transcript.offset };
+    match Read::file(
+        transcript.agent,
+        &transcript.agent_id,
+        &transcript.path,
+        offset,
+    ) {
+        Ok(mut read) => {
+            read.reset |= outdated && transcript.offset > 0;
+            Ok(db.save_read_state(session_id, &read)?)
         }
+        // Its items stay.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            db.set_missing(session_id)?;
+            Ok(false)
+        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -188,10 +190,8 @@ impl Read {
             BufReader::new(&file).read_until(b'\n', &mut line)?;
             // Only a title is taken from the line read again, not the branch
             // the session ended on.
-            let leaf = read.leaf.take();
             let lines = read.lines.len();
             read.line(agent, &line);
-            read.leaf = leaf;
             read.lines.truncate(lines);
         }
 
@@ -393,7 +393,6 @@ impl Read {
         self.parents
             .insert(id.to_string(), parent.map(String::from));
         if items.is_empty() {
-            self.leaf = Some(id.to_string());
             return;
         }
         let mut parent = parent.map(String::from);
@@ -407,7 +406,6 @@ impl Read {
             self.push(Some(source_id.clone()), parent, kind, at, payload);
             parent = Some(source_id);
         }
-        self.leaf = Some(id.to_string());
     }
 
     fn push(
@@ -531,33 +529,9 @@ fn cut(text: String) -> (String, bool) {
 /// Seconds since the Unix epoch of an RFC 3339 time, such as
 /// `2026-10-11T21:15:07.585Z`.
 fn parse_time(text: &str) -> Option<i64> {
-    let (date, time) = text.split_once('T')?;
-    let mut date = date.splitn(3, '-').map(|part| part.parse::<i64>().ok());
-    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
-    let number = |range: std::ops::Range<usize>| time.get(range)?.parse::<i64>().ok();
-    let seconds = number(0..2)? * 3600 + number(3..5)? * 60 + number(6..8)?;
-    let zone = time[8..].trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
-    let offset = match zone.split_at_checked(1) {
-        Some(("+" | "-", rest)) => {
-            let (hours, minutes) = rest.split_once(':')?;
-            let offset = hours.parse::<i64>().ok()? * 3600 + minutes.parse::<i64>().ok()? * 60;
-            if zone.starts_with('-') {
-                -offset
-            } else {
-                offset
-            }
-        }
-        _ => 0,
-    };
-
-    // Days since the epoch, from Howard Hinnant's `days_from_civil`.
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    let days = era * 146_097 + day_of_era - 719_468;
-    Some(days * 86_400 + seconds - offset)
+    text.parse::<jiff::Timestamp>()
+        .ok()
+        .map(|time| time.as_second())
 }
 
 /// Context the CLIs inject as user messages, which is not something the user
@@ -1038,7 +1012,6 @@ mod tests {
         // It has no text to title the session with, but it is still prompted.
         assert_eq!(title(&db, session), None);
         let chat = db.projects().unwrap()[0].chats[0].id;
-        assert!(db.has_prompts(chat).unwrap());
         assert!(db.sessions(chat).unwrap()[0].prompted);
         fs::remove_dir_all(dir).unwrap();
     }

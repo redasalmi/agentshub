@@ -1,9 +1,9 @@
 //! agentshub's own projects and chats, the agent sessions each chat went
 //! through, and a trimmed copy of those sessions (see `transcript`), in SQLite.
 //!
-//! Writes go through one connection, which the transcript reads on the
-//! background executor hold for the length of their transaction. Reads have a
-//! connection of their own, so that the UI doesn't wait on those writes.
+//! Writes go through one connection, and reads have a connection of their own,
+//! so that the UI doesn't wait on a transcript read's transaction. Transcript
+//! reads run one at a time (see `Db::lock_reads`).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -20,8 +20,7 @@ use crate::transcript::{self, Kind};
 
 /// Each migration takes the database from the version before it, as counted
 /// by `PRAGMA user_version`, to the next.
-const MIGRATIONS: [&str; 4] = [
-    r#"
+const MIGRATIONS: [&str; 1] = [r#"
 CREATE TABLE projects (
     id         INTEGER PRIMARY KEY,
     path       TEXT NOT NULL UNIQUE,
@@ -29,11 +28,12 @@ CREATE TABLE projects (
     created_at INTEGER NOT NULL
 );
 
+-- Chat and session ids are never reused: a deferred open or a transcript read
+-- that started before a deletion must not find a row created afterwards.
 CREATE TABLE chats (
-    id         INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects ON DELETE CASCADE,
     agent      TEXT NOT NULL,
-    title      TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -49,90 +49,69 @@ CREATE TABLE sessions (
     custom_title    TEXT,
     generated_title TEXT,
     prompt          TEXT,
+    -- Whether it has a prompt, which an image-only one has without a title.
+    prompted        INTEGER NOT NULL DEFAULT 0,
     started_at      INTEGER NOT NULL,
+    -- How far its transcript was read, and by which version of the parser.
     read_offset     INTEGER NOT NULL DEFAULT 0,
+    parser_version  INTEGER NOT NULL DEFAULT 0,
+    -- The last item of the branch the session ended on. Not a foreign key,
+    -- like the other ids of items (see `items`).
+    leaf_item_id    INTEGER,
     missing         INTEGER NOT NULL DEFAULT 0,
     UNIQUE (agent, agent_id)
 );
 
 -- The sessions of a chat, in order. The last one is resumed.
 CREATE TABLE chat_sessions (
-    chat_id    INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
-    session_id INTEGER NOT NULL REFERENCES sessions ON DELETE CASCADE,
-    position   INTEGER NOT NULL,
-    reason     TEXT,
+    chat_id        INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
+    session_id     INTEGER NOT NULL REFERENCES sessions ON DELETE CASCADE,
+    position       INTEGER NOT NULL,
+    -- Where it first entered the chat, which its position loses when the chat
+    -- resumes it again. It orders the sessions a chat is titled after.
+    first_position INTEGER NOT NULL,
+    -- Why the chat went into it, and why it left it for another one.
+    reason         TEXT,
+    ended_reason   TEXT,
     PRIMARY KEY (chat_id, session_id),
     UNIQUE (chat_id, position)
 );
 CREATE INDEX chat_sessions_session ON chat_sessions (session_id);
 
 -- The trimmed copy of each session.
+--
+-- Items are only deleted a whole session at a time, so the ids that point at
+-- them aren't foreign keys: a cascade down a long branch goes deeper than
+-- SQLite allows, and every deleted item would scan for the rows naming it.
 CREATE TABLE items (
-    id         INTEGER PRIMARY KEY,
-    session_id INTEGER NOT NULL REFERENCES sessions ON DELETE CASCADE,
-    source_id  TEXT,
-    parent_id  TEXT,
-    kind       TEXT NOT NULL,
-    at         INTEGER,
-    payload    TEXT NOT NULL,
+    id             INTEGER PRIMARY KEY,
+    session_id     INTEGER NOT NULL REFERENCES sessions ON DELETE CASCADE,
+    source_id      TEXT,
+    -- The nearest kept item above its transcript line.
+    parent_item_id INTEGER,
+    kind           TEXT NOT NULL,
+    -- A tool call's id, which its output arrives with on a later line.
+    call_id        TEXT,
+    at             INTEGER,
+    payload        TEXT NOT NULL,
     UNIQUE (session_id, source_id)
 );
 CREATE INDEX items_session ON items (session_id, id);
+CREATE INDEX items_tool_call ON items (session_id, call_id) WHERE call_id IS NOT NULL;
 
--- Transcript lines that aren't kept but sit in a branch between kept ones,
--- so that a branch can be followed back through them.
-CREATE TABLE links (
+-- Transcript lines that kept no item, each with the item it hangs off. A later
+-- message often has one of these lines as its parent, so a read has to know
+-- where they sit even though they aren't shown.
+CREATE TABLE lines (
     session_id INTEGER NOT NULL REFERENCES sessions ON DELETE CASCADE,
     source_id  TEXT NOT NULL,
-    parent_id  TEXT,
+    item_id    INTEGER,
     PRIMARY KEY (session_id, source_id)
 ) WITHOUT ROWID;
-"#,
-    r#"
--- Why the chat left a session. Its own reason says why it went into it.
-ALTER TABLE chat_sessions ADD COLUMN ended_reason TEXT;
+"#];
 
--- Tool outputs are matched to their call by the call's id in the payload, so
--- each one only looks at the session's other tool calls.
-CREATE INDEX items_tool_call ON items (session_id, json_extract(payload, '$.id'))
-    WHERE kind = 'tool';
-"#,
-    r#"
--- Whether a session has a prompt, which an image-only prompt has without a
--- title. `prompt` stays the first prompt text, for the title.
-ALTER TABLE sessions ADD COLUMN prompted INTEGER NOT NULL DEFAULT 0;
-UPDATE sessions SET prompted = (prompt IS NOT NULL OR EXISTS (
-    SELECT 1 FROM items WHERE items.session_id = sessions.id AND items.kind = 'user'
-));
-
--- The last entry of the transcript, which can be one that isn't displayed.
-ALTER TABLE sessions ADD COLUMN leaf TEXT;
-
--- Where a session first entered a chat, which its position loses when the
--- chat resumes it again. It orders the sessions a chat is titled after.
-ALTER TABLE chat_sessions ADD COLUMN first_position INTEGER;
-UPDATE chat_sessions SET first_position = position;
-
--- Session ids must not be reused: a transcript read that started before its
--- chat was deleted must not find the session of a chat created afterwards.
-CREATE TABLE sequences (
-    name  TEXT PRIMARY KEY,
-    value INTEGER NOT NULL
-);
-INSERT INTO sequences (name, value)
-VALUES ('session', COALESCE((SELECT MAX(id) FROM sessions), 0));
-"#,
-    r#"
--- Deferred chat opens must never find a replacement for a deleted chat.
-INSERT INTO sequences (name, value)
-VALUES ('chat', COALESCE((SELECT MAX(id) FROM chats), 0));
-"#,
-];
-
-/// The schema version this build writes. The last step isn't SQL: it walks the
-/// line-level ancestry the first four keep, resolves it into item ids, and
-/// drops it, so a branch can be followed with a single indexed walk.
-const SCHEMA: i64 = 5;
+/// The schema version this build writes.
+const SCHEMA: i64 = MIGRATIONS.len() as i64;
 
 const TITLE: &str = "COALESCE(s.custom_title, s.generated_title, s.prompt)";
 
@@ -143,6 +122,58 @@ pub fn path() -> Option<PathBuf> {
         None => std::env::home_dir()?.join(".local/share"),
     };
     Some(data.join("agentshub").join("agentshub.db"))
+}
+
+/// Opens the database where it lives, once this process holds the lock that
+/// keeps a second Agents Hub off it, and returns that lock with it. The error
+/// says why Agents Hub can't be used.
+pub fn open_locked() -> anyhow::Result<(Db, Option<fs::File>)> {
+    // The lock comes first: a second instance must not migrate the database
+    // under the first one.
+    let lock = instance_lock()?;
+    let path = path().context("There is no home folder to keep the database in.")?;
+    let dir = path.parent().unwrap_or(&path).display().to_string();
+    let db = Db::open(&path)
+        .with_context(|| format!("Couldn't open the database in {dir}, so nothing can be kept"))?;
+    Ok((db, lock))
+}
+
+/// Takes the process-wide lock, in the runtime folder when it exists, then
+/// beside the database, then in the temp folder. The kernel releases it if
+/// this process dies. Without any of them, Agents Hub still starts, unguarded.
+fn instance_lock() -> anyhow::Result<Option<fs::File>> {
+    let name = "agentshub.lock";
+    let mut paths = Vec::new();
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        paths.push(PathBuf::from(dir).join(name));
+    }
+    if let Some(dir) = path().and_then(|path| path.parent().map(PathBuf::from)) {
+        paths.push(dir.join(name));
+    }
+    paths.push(std::env::temp_dir().join(name));
+
+    for path in paths {
+        let Ok(file) = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+        else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: the descriptor stays open for the life of `file`, and
+            // flock needs nothing else from it.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                bail!("Agents Hub is already running.");
+            }
+        }
+        return Ok(Some(file));
+    }
+    eprintln!("can't write the lock file; another instance would not be kept out");
+    Ok(None)
 }
 
 /// Seconds since the Unix epoch, which is how the database keeps time.
@@ -178,9 +209,8 @@ pub struct Session {
     pub prompted: bool,
     pub started_at: i64,
     pub missing: bool,
-    /// Why the chat went into it: `startup`, `clear`, `new`, `resume`, `fork`.
-    pub reason: Option<String>,
-    /// Why the chat left it for another session.
+    /// Why the chat left it for another session: `clear`, `new`, `resume`,
+    /// `fork`.
     pub ended: Option<String>,
 }
 
@@ -190,6 +220,8 @@ pub struct Transcript {
     pub agent_id: String,
     pub path: PathBuf,
     pub offset: u64,
+    /// The version of the parser that read it up to `offset`.
+    pub parser: i64,
 }
 
 /// What recording a reported session changed.
@@ -206,42 +238,31 @@ pub struct Item {
     pub payload: Value,
 }
 
-/// What saving a transcript read did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Saved {
-    /// The session was deleted while its transcript was being parsed.
-    Gone,
-    /// Another read saved first, from the same offset.
-    Stale,
-    /// Saved, but nothing the history shows changed.
-    Unchanged,
-    /// Saved, and the history changed.
-    Changed,
-}
-
-impl Saved {
-    /// Whether the read was saved and added anything the history shows.
-    pub fn changed(self) -> bool {
-        self == Saved::Changed
-    }
-}
-
 #[derive(Clone)]
 pub struct Db {
     write: Arc<Mutex<Connection>>,
     /// Reads get their own connection. In memory, there is only one.
     read: Option<Arc<Mutex<Connection>>>,
+    reads: Arc<Mutex<()>>,
+    /// The folder the database is in, which exports stay out of. None in
+    /// memory.
+    dir: Option<PathBuf>,
 }
 
 impl Db {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(dir) = path.parent() {
-            create_dir(dir).with_context(|| format!("can't create {} first", dir.display()))?;
+            fs::create_dir_all(dir)
+                .with_context(|| format!("can't create {} first", dir.display()))?;
+            // The transcripts in it are as private as the reports are. The
+            // folder covers what SQLite keeps beside the database, such as
+            // its write-ahead log, and the backups. It may predate this, so
+            // it is set every time.
+            restrict(dir, 0o700);
         }
         let conn =
             Connection::open(path).with_context(|| format!("can't open {}", path.display()))?;
-        // The transcripts in it are as private as the reports are.
-        restrict(path);
+        restrict(path, 0o600);
         Self::init(conn, Some(path))
     }
 
@@ -271,12 +292,6 @@ impl Db {
             tx.pragma_update(None, "user_version", done as i64 + 1)?;
             tx.commit()?;
         }
-        if version < SCHEMA {
-            let tx = conn.transaction()?;
-            resolve_ancestry(&tx)?;
-            tx.pragma_update(None, "user_version", SCHEMA)?;
-            tx.commit()?;
-        }
         let read = match path {
             Some(path) => {
                 let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -289,6 +304,8 @@ impl Db {
         Ok(Self {
             write: Arc::new(Mutex::new(conn)),
             read,
+            reads: Arc::default(),
+            dir: path.and_then(|path| fs::canonicalize(path.parent()?).ok()),
         })
     }
 
@@ -300,6 +317,13 @@ impl Db {
         lock(self.read.as_ref().unwrap_or(&self.write))
     }
 
+    /// Held for the length of a transcript read, so that reads run one at a
+    /// time: two that started from the same offset would each save what they
+    /// found. A read that waited starts from where the one before stopped.
+    pub fn lock_reads(&self) -> MutexGuard<'_, ()> {
+        lock(&self.reads)
+    }
+
     /// The projects, in the order they were added, newest first, with their
     /// chats.
     pub fn projects(&self) -> Result<Vec<Project>> {
@@ -307,11 +331,11 @@ impl Db {
         let mut chats: HashMap<i64, Vec<Chat>> = HashMap::new();
         // A chat is titled after the first of its sessions that has a title.
         let mut stmt = conn.prepare(&format!(
-            "SELECT c.id, c.project_id, c.agent, c.updated_at, COALESCE(c.title, (
+            "SELECT c.id, c.project_id, c.agent, c.updated_at, (
                 SELECT {TITLE} FROM chat_sessions cs JOIN sessions s ON s.id = cs.session_id
                 WHERE cs.chat_id = c.id AND {TITLE} IS NOT NULL
-                ORDER BY COALESCE(cs.first_position, cs.position) LIMIT 1
-            ))
+                ORDER BY cs.first_position LIMIT 1
+            )
             FROM chats c ORDER BY c.updated_at DESC, c.id DESC"
         ))?;
         let rows = stmt.query_map([], |row| {
@@ -366,23 +390,13 @@ impl Db {
     }
 
     pub fn add_chat(&self, project_id: i64, agent: Agent) -> Result<i64> {
-        let now = now();
-        let mut conn = self.write();
-        let tx = conn.transaction()?;
-        let id: i64 = tx.query_row(
-            "UPDATE sequences
-             SET value = MAX(value, COALESCE((SELECT MAX(id) FROM chats), 0)) + 1
-             WHERE name = 'chat' RETURNING value",
-            [],
-            |row| row.get(0),
+        let conn = self.write();
+        conn.execute(
+            "INSERT INTO chats (project_id, agent, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)",
+            params![project_id, agent.label(), now()],
         )?;
-        tx.execute(
-            "INSERT INTO chats (id, project_id, agent, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![id, project_id, agent.label(), now],
-        )?;
-        tx.commit()?;
-        Ok(id)
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn delete_chat(&self, id: i64) -> Result<()> {
@@ -423,7 +437,7 @@ impl Db {
         let conn = self.read();
         let mut stmt = conn.prepare(&format!(
             "SELECT s.id, s.agent_id, s.transcript_path, {TITLE}, s.prompted,
-                    s.started_at, s.missing, cs.reason, cs.ended_reason
+                    s.started_at, s.missing, cs.ended_reason
              FROM chat_sessions cs JOIN sessions s ON s.id = cs.session_id
              WHERE cs.chat_id = ?1 ORDER BY cs.position"
         ))?;
@@ -436,8 +450,7 @@ impl Db {
                 prompted: row.get(4)?,
                 started_at: row.get(5)?,
                 missing: row.get(6)?,
-                reason: row.get(7)?,
-                ended: row.get(8)?,
+                ended: row.get(7)?,
             })
         })?
         .collect()
@@ -457,15 +470,8 @@ impl Db {
         let mut conn = self.write();
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO sessions (id, agent, agent_id, transcript_path, started_at)
-             VALUES (
-                 COALESCE(
-                     (SELECT MAX(value, COALESCE((SELECT MAX(id) FROM sessions), 0)) + 1
-                      FROM sequences WHERE name = 'session'),
-                     (SELECT COALESCE(MAX(id), 0) + 1 FROM sessions)
-                 ),
-                 ?1, ?2, ?3, ?4
-             )
+            "INSERT INTO sessions (agent, agent_id, transcript_path, started_at)
+             VALUES (?1, ?2, ?3, ?4)
              -- A session can be reported at a new path, as when Pi imports a
              -- transcript under another name. Later reads must follow it.
              ON CONFLICT (agent, agent_id)
@@ -476,14 +482,6 @@ impl Db {
                 transcript_path.to_string_lossy(),
                 now()
             ],
-        )?;
-        // Keep the sequence ahead of every id, including ones an older
-        // database allocated before it existed.
-        tx.execute(
-            "UPDATE sequences
-             SET value = MAX(value, COALESCE((SELECT MAX(id) FROM sessions), 0))
-             WHERE name = 'session'",
-            [],
         )?;
         let session_id: i64 = tx.query_row(
             "SELECT id FROM sessions WHERE agent = ?1 AND agent_id = ?2",
@@ -511,14 +509,11 @@ impl Db {
                 left: None,
             });
         }
+        // Positions only grow, so a session's first one is where it first
+        // entered the chat.
         tx.execute(
-            "INSERT INTO chat_sessions
-                 (chat_id, session_id, position, reason, ended_reason, first_position)
-             VALUES (
-                 ?1, ?2, ?3, ?4, NULL,
-                 COALESCE((SELECT MAX(first_position) + 1 FROM chat_sessions
-                           WHERE chat_id = ?1), 0)
-             )
+            "INSERT INTO chat_sessions (chat_id, session_id, position, first_position, reason)
+             VALUES (?1, ?2, ?3, ?3, ?4)
              ON CONFLICT (chat_id, session_id)
              DO UPDATE SET position = excluded.position, reason = excluded.reason,
                            ended_reason = NULL",
@@ -543,23 +538,11 @@ impl Db {
         })
     }
 
-    /// Whether any of a chat's sessions has a prompt.
-    #[cfg(test)]
-    pub fn has_prompts(&self, chat_id: i64) -> Result<bool> {
-        self.read().query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM chat_sessions cs JOIN sessions s ON s.id = cs.session_id
-                WHERE cs.chat_id = ?1 AND s.prompted
-            )",
-            [chat_id],
-            |row| row.get(0),
-        )
-    }
-
     pub fn transcript(&self, session_id: i64) -> Result<Option<Transcript>> {
         self.read()
             .query_row(
-                "SELECT agent, agent_id, transcript_path, read_offset FROM sessions WHERE id = ?1",
+                "SELECT agent, agent_id, transcript_path, read_offset, parser_version
+                 FROM sessions WHERE id = ?1",
                 [session_id],
                 |row| {
                     Ok(Transcript {
@@ -567,38 +550,29 @@ impl Db {
                         agent_id: row.get(1)?,
                         path: PathBuf::from(row.get::<_, String>(2)?),
                         offset: row.get::<_, i64>(3)? as u64,
+                        parser: row.get(4)?,
                     })
                 },
             )
             .optional()
     }
 
-    /// Saves a read, saying whether another read got there first. A caller
-    /// that does is expected to read again from the committed offset, so that
-    /// messages another read captured fewer of aren't lost.
-    pub(crate) fn save_read_state(
-        &self,
-        session_id: i64,
-        from: u64,
-        read: &transcript::Read,
-    ) -> Result<Saved> {
+    /// Saves a read, and says whether the history shows anything new. The
+    /// session can be gone, deleted with its chat while its transcript was
+    /// being parsed; then nothing is saved.
+    pub(crate) fn save_read_state(&self, session_id: i64, read: &transcript::Read) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction()?;
-        // The session can be gone, deleted with its chat while its transcript
-        // was being parsed.
-        let stored: Option<(i64, Option<i64>)> = tx
+        let stored_leaf: Option<Option<i64>> = tx
             .query_row(
-                "SELECT read_offset, leaf_item_id FROM sessions WHERE id = ?1",
+                "SELECT leaf_item_id FROM sessions WHERE id = ?1",
                 [session_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .optional()?;
-        let Some((offset, stored_leaf)) = stored else {
-            return Ok(Saved::Gone);
+        let Some(stored_leaf) = stored_leaf else {
+            return Ok(false);
         };
-        if offset as u64 != from {
-            return Ok(Saved::Stale);
-        }
         let mut changed = false;
         if read.reset {
             // A notice is agentshub's own, and outlives the transcript it is
@@ -641,21 +615,24 @@ impl Db {
         // isn't a new leaf: the session stayed on the branch it was already
         // on, so its leaf must not move back to that line.
         let mut fresh_lines = HashSet::new();
-        let mut last_fresh_item = None;
         let mut insert = tx.prepare(
-            "INSERT INTO items (session_id, source_id, parent_item_id, kind, at, payload)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
+            "INSERT INTO items (session_id, source_id, parent_item_id, kind, call_id, at, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT DO NOTHING",
         )?;
         for item in &read.items {
             let parent_item = item
                 .parent_id
                 .as_deref()
                 .and_then(|parent| ancestor(&kept, &read.parents, parent));
+            let call_id = item.payload["id"]
+                .as_str()
+                .filter(|_| item.kind == Kind::Tool);
             let inserted = insert.execute(params![
                 session_id,
                 item.source_id,
                 parent_item,
                 item.kind.as_str(),
+                call_id,
                 item.at,
                 item.payload.to_string()
             ])?;
@@ -664,7 +641,6 @@ impl Db {
                 if let Some(source_id) = &item.source_id {
                     kept.insert(source_id.clone(), tx.last_insert_rowid());
                     fresh_lines.insert(source_id.clone());
-                    last_fresh_item = Some(source_id.clone());
                 }
             }
         }
@@ -672,8 +648,7 @@ impl Db {
         let mut complete = tx.prepare(
             "UPDATE items SET payload = json_set(payload,
                 '$.output', ?3, '$.truncated', json(?4), '$.error', json(?5))
-             WHERE session_id = ?1 AND kind = 'tool'
-               AND json_extract(payload, '$.id') = ?2",
+             WHERE session_id = ?1 AND call_id = ?2",
         )?;
         for output in &read.outputs {
             changed |= complete.execute(params![
@@ -718,21 +693,6 @@ impl Db {
                 newest = Some(id.clone());
             }
         }
-        if read.lines.is_empty() {
-            // A read built by hand rather than parsed, as tests do, has no
-            // line order of its own. A fresh line that is the leaf is a branch
-            // change; otherwise the last fresh item is the newest.
-            let leaf_is_fresh = read.leaf.as_deref().is_some_and(|leaf| {
-                read.parents.contains_key(leaf)
-                    && !kept.contains_key(leaf)
-                    && !fresh_lines.contains(leaf)
-            });
-            newest = if leaf_is_fresh {
-                read.leaf.clone()
-            } else {
-                last_fresh_item
-            };
-        }
         let update_leaf = read.reset || newest.is_some();
         let leaf = newest
             .as_deref()
@@ -767,9 +727,10 @@ impl Db {
                  prompt = COALESCE(prompt, ?2),
                  prompted = MAX(prompted, ?3),
                  read_offset = ?4,
+                 parser_version = ?5,
                  missing = 0,
                  leaf_item_id = CASE
-                     WHEN ?5 THEN ?6
+                     WHEN ?6 THEN ?7
                      ELSE leaf_item_id
                  END
              WHERE id = ?1",
@@ -778,16 +739,13 @@ impl Db {
                 read.prompt,
                 read.prompted,
                 read.offset as i64,
+                transcript::PARSER,
                 update_leaf,
                 leaf,
             ],
         )?;
         tx.commit()?;
-        Ok(if changed {
-            Saved::Changed
-        } else {
-            Saved::Unchanged
-        })
+        Ok(changed)
     }
 
     /// Marks a session's transcript as gone, and says whether it wasn't yet.
@@ -824,15 +782,15 @@ impl Db {
         Ok(())
     }
 
-    /// Writes a consistent copy of the database with SQLite's own `VACUUM
-    /// INTO`, which leaves the original alone.
+    /// Writes a consistent copy of the database, outside its own folder:
+    /// replacing a file there could replace the database or its write-ahead
+    /// log.
     pub fn export(&self, path: &Path) -> anyhow::Result<()> {
-        let conn = self.write();
-        fs::remove_file(path).ok();
-        conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])
-            .with_context(|| format!("can't write {}", path.display()))?;
-        restrict(path);
-        Ok(())
+        let target = path.parent().and_then(|dir| fs::canonicalize(dir).ok());
+        if self.dir.is_some() && target == self.dir {
+            bail!("choose a folder other than the one the database is in");
+        }
+        vacuum_into(&self.write(), path)
     }
 
     /// A session's last `limit` items, in conversation order. Of a session
@@ -894,35 +852,19 @@ fn set_pragmas(conn: &Connection) -> Result<()> {
     )
 }
 
-fn create_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
-    builder.create(path)
-}
-
 /// Keeps the transcripts in the database to its user.
 #[cfg(unix)]
-fn restrict(path: &Path) {
+fn restrict(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt as _;
-    if let Ok(metadata) = fs::metadata(path) {
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o600);
-        fs::set_permissions(path, permissions).ok();
-    }
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).ok();
 }
 
 #[cfg(not(unix))]
-fn restrict(_: &Path) {}
+fn restrict(_: &Path, _: u32) {}
 
-/// A panic while holding the connection shouldn't take every later query with
-/// it.
-fn lock(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
-    conn.lock().unwrap_or_else(|err| err.into_inner())
+/// A panic while holding the lock shouldn't take every later query with it.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
 
 /// Rows only hold agents this version wrote, and one from a newer version is
@@ -1010,109 +952,16 @@ fn item_row(row: &rusqlite::Row<'_>) -> Result<Option<Item>> {
 /// recovered anywhere else.
 fn backup(conn: &Connection, path: &Path, version: i64) -> anyhow::Result<()> {
     let backup = PathBuf::from(format!("{}.v{version}.bak", path.display()));
-    fs::remove_file(&backup).ok();
-    conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
-        .with_context(|| format!("can't back up the database to {}", backup.display()))?;
-    restrict(&backup);
-    Ok(())
+    vacuum_into(conn, &backup).context("can't back up the database")
 }
 
-/// Schema 5: each item keeps the id of its nearest kept ancestor, each session
-/// the item its branch ends on, and each line that kept no item the ancestor it
-/// hangs off. A branch then follows item ids instead of walking the line tree,
-/// which a later read can still hang off.
-fn resolve_ancestry(tx: &rusqlite::Transaction<'_>) -> Result<()> {
-    tx.execute_batch(
-        "ALTER TABLE items ADD COLUMN parent_item_id INTEGER
-             REFERENCES items (id) ON DELETE CASCADE;
-         ALTER TABLE sessions ADD COLUMN leaf_item_id INTEGER
-             REFERENCES items (id) ON DELETE SET NULL;
-         CREATE TABLE lines (
-             session_id INTEGER NOT NULL REFERENCES sessions ON DELETE CASCADE,
-             source_id  TEXT NOT NULL,
-             item_id    INTEGER REFERENCES items (id) ON DELETE CASCADE,
-             PRIMARY KEY (session_id, source_id)
-         ) WITHOUT ROWID;",
-    )?;
-    let sessions: Vec<(i64, Option<String>)> = {
-        let mut stmt = tx.prepare("SELECT id, leaf FROM sessions")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<Result<Vec<_>>>()?
-    };
-    for (session_id, leaf) in sessions {
-        let mut parents: HashMap<String, Option<String>> = HashMap::new();
-        let mut dropped: Vec<String> = Vec::new();
-        {
-            let mut stmt =
-                tx.prepare("SELECT source_id, parent_id FROM links WHERE session_id = ?1")?;
-            for row in stmt.query_map([session_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-            })? {
-                let (id, parent) = row?;
-                parents.insert(id.clone(), parent);
-                dropped.push(id);
-            }
-        }
-        let items: Vec<(i64, Option<String>, Option<String>)> = {
-            let mut stmt = tx.prepare(
-                "SELECT id, source_id, parent_id FROM items
-                 WHERE session_id = ?1 ORDER BY id",
-            )?;
-            let rows = stmt.query_map([session_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
-            rows.collect::<Result<Vec<_>>>()?
-        };
-        // A line that kept items owns its ancestry, which takes precedence
-        // over its link, as it did when the branch was shown.
-        let mut kept: HashMap<String, i64> = HashMap::new();
-        for (id, source_id, parent_id) in &items {
-            if let Some(source_id) = source_id {
-                kept.insert(source_id.clone(), *id);
-                parents.insert(source_id.clone(), parent_id.clone());
-            }
-        }
-        for (id, _, parent_id) in &items {
-            let parent = parent_id
-                .as_deref()
-                .and_then(|parent| ancestor(&kept, &parents, parent));
-            tx.execute(
-                "UPDATE items SET parent_item_id = ?2 WHERE id = ?1",
-                params![id, parent],
-            )?;
-        }
-        for source_id in dropped {
-            let item = ancestor(&kept, &parents, &source_id);
-            tx.execute(
-                "INSERT INTO lines (session_id, source_id, item_id) VALUES (?1, ?2, ?3)",
-                params![session_id, source_id, item],
-            )?;
-        }
-        if let Some(leaf) = leaf
-            && let Some(leaf) = ancestor(&kept, &parents, &leaf)
-        {
-            tx.execute(
-                "UPDATE sessions SET leaf_item_id = ?2 WHERE id = ?1",
-                params![session_id, leaf],
-            )?;
-        }
-    }
-    // Databases from before the leaf was kept end on their last item. Codex
-    // has no line ids to branch on, so its sessions keep the linear fallback.
-    tx.execute_batch(
-        "UPDATE sessions SET leaf_item_id = (
-             SELECT MAX(i.id) FROM items i
-             WHERE i.session_id = sessions.id AND i.kind <> 'notice'
-         )
-         WHERE leaf_item_id IS NULL
-           AND EXISTS (
-               SELECT 1 FROM items i
-               WHERE i.session_id = sessions.id AND i.source_id IS NOT NULL
-           );
-         DROP TABLE links;
-         ALTER TABLE items DROP COLUMN parent_id;
-         ALTER TABLE sessions DROP COLUMN leaf;",
-    )?;
+/// Writes a consistent copy of the database over `path` with SQLite's own
+/// `VACUUM INTO`, which leaves the original alone.
+fn vacuum_into(conn: &Connection, path: &Path) -> anyhow::Result<()> {
+    fs::remove_file(path).ok();
+    conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])
+        .with_context(|| format!("can't write {}", path.display()))?;
+    restrict(path, 0o600);
     Ok(())
 }
 
@@ -1136,12 +985,40 @@ mod tests {
         .unwrap()
     }
 
+    /// A chat's sessions, and why it left each one.
     fn order(db: &Db, chat: i64) -> Vec<(String, Option<String>)> {
         db.sessions(chat)
             .unwrap()
             .into_iter()
-            .map(|session| (session.agent_id, session.reason))
+            .map(|session| (session.agent_id, session.ended))
             .collect()
+    }
+
+    /// The texts of the items a session shows.
+    fn texts(db: &Db, session: i64) -> Vec<String> {
+        db.items(session, 100)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.payload["text"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn item(source_id: &str, parent_id: Option<&str>, text: &str) -> transcript::Item {
+        transcript::Item {
+            source_id: Some(source_id.into()),
+            parent_id: parent_id.map(String::from),
+            kind: Kind::User,
+            at: None,
+            payload: json!({ "text": text }),
+        }
+    }
+
+    /// Adds a line that kept `item` to a read, in the order it was read.
+    fn push(read: &mut transcript::Read, item: transcript::Item) {
+        let id = item.source_id.clone().unwrap();
+        read.parents.insert(id.clone(), item.parent_id.clone());
+        read.lines.push(id);
+        read.items.push(item);
     }
 
     fn temp_dir() -> PathBuf {
@@ -1150,49 +1027,30 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn upgrades_a_database_from_the_first_schema() {
-        let dir = temp_dir();
-        let path = dir.join("agentshub.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(MIGRATIONS[0]).unwrap();
-            conn.pragma_update(None, "user_version", 1i64).unwrap();
-        }
-
-        let db = Db::open(&path).unwrap();
-        let chat = chat(&db);
-        record(&db, chat, "a", "startup");
-        record(&db, chat, "b", "clear");
-        let ended: Vec<Option<String>> = db
-            .sessions(chat)
-            .unwrap()
-            .into_iter()
-            .map(|session| session.ended)
-            .collect();
-        assert_eq!(ended, [Some("clear".into()), None]);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
     /// Builds the items of one read, each line one item, chained.
-    fn chain(first: usize, last: usize, prefix: &str, parent: Option<&str>) -> transcript::Read {
+    fn chain(first: usize, last: usize) -> transcript::Read {
         let mut read = transcript::Read::default();
-        let mut parent = parent.map(String::from);
+        let mut parent: Option<String> = None;
         for id in first..=last {
             let id = id.to_string();
-            read.items.push(transcript::Item {
-                source_id: Some(id.clone()),
-                parent_id: parent.clone(),
-                kind: Kind::User,
-                at: None,
-                payload: json!({ "text": format!("{prefix}{id}") }),
-            });
-            read.parents.insert(id.clone(), parent.clone());
-            read.lines.push(id.clone());
+            push(&mut read, item(&id, parent.as_deref(), &id));
             parent = Some(id);
         }
-        read.leaf = parent;
         read
+    }
+
+    #[test]
+    fn keeps_the_database_folder_to_its_user() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp_dir();
+        let data = dir.join("agentshub");
+        fs::create_dir(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+
+        Db::open(&data.join("agentshub.db")).unwrap();
+        let mode = fs::metadata(&data).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1204,41 +1062,39 @@ mod tests {
         // A kept line, then a line that keeps no item, which the read ends on.
         let mut read = transcript::Read::default();
         read.offset = 20;
-        read.items.push(transcript::Item {
-            source_id: Some("1".into()),
-            parent_id: None,
-            kind: Kind::User,
-            at: None,
-            payload: json!({ "text": "first" }),
-        });
-        read.parents.insert("1".into(), None);
+        push(&mut read, item("1", None, "first"));
         read.parents.insert("2".into(), Some("1".into()));
-        read.lines.extend(["1".into(), "2".into()]);
-        read.leaf = Some("2".into());
-        assert!(db.save_read_state(session, 0, &read).unwrap().changed());
+        read.lines.push("2".into());
+        assert!(db.save_read_state(session, &read).unwrap());
 
         // The next message's parent is that dropped line.
         let mut read = transcript::Read::default();
         read.offset = 40;
-        read.items.push(transcript::Item {
-            source_id: Some("3".into()),
-            parent_id: Some("2".into()),
-            kind: Kind::User,
-            at: None,
-            payload: json!({ "text": "second" }),
-        });
-        read.parents.insert("3".into(), Some("2".into()));
-        read.lines.push("3".into());
-        read.leaf = Some("3".into());
-        assert!(db.save_read_state(session, 20, &read).unwrap().changed());
+        push(&mut read, item("3", Some("2"), "second"));
+        assert!(db.save_read_state(session, &read).unwrap());
 
-        let texts: Vec<String> = db
-            .items(session, 100)
-            .unwrap()
-            .into_iter()
-            .map(|item| item.payload["text"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(texts, ["first", "second"]);
+        assert_eq!(texts(&db, session), ["first", "second"]);
+    }
+
+    #[test]
+    fn rereads_and_deletes_a_session_with_a_long_branch() {
+        let db = Db::open_in_memory().unwrap();
+        let chat = chat(&db);
+        let session = record(&db, chat, "a", "startup").session_id;
+        // Each item hangs off the one before it, deeper than SQLite lets a
+        // cascade go.
+        let mut read = chain(1, 1500);
+        read.offset = 10;
+        db.save_read_state(session, &read).unwrap();
+
+        let mut reread = chain(1, 1500);
+        reread.reset = true;
+        reread.offset = 10;
+        assert!(db.save_read_state(session, &reread).unwrap());
+        assert_eq!(db.items(session, 2000).unwrap().len(), 1500);
+
+        db.delete_chat(chat).unwrap();
+        assert!(db.transcript(session).unwrap().is_none());
     }
 
     #[test]
@@ -1246,9 +1102,9 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let chat = chat(&db);
         let session = record(&db, chat, "a", "startup").session_id;
-        let mut read = chain(1, 5, "", None);
+        let mut read = chain(1, 5);
         read.offset = 10;
-        db.save_read_state(session, 0, &read).unwrap();
+        db.save_read_state(session, &read).unwrap();
 
         let texts = |limit| -> Vec<String> {
             db.items(session, limit)
@@ -1268,12 +1124,30 @@ mod tests {
         let db = Db::open(&path).unwrap();
         let chat = chat(&db);
         record(&db, chat, "a", "startup");
-        let copy = dir.join("copy.db");
+        let elsewhere = temp_dir();
+        let copy = elsewhere.join("copy.db");
 
         db.export(&copy).unwrap();
         let exported = Db::open(&copy).unwrap();
         assert_eq!(exported.projects().unwrap().len(), 1);
         assert_eq!(exported.sessions(chat).unwrap().len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(elsewhere).unwrap();
+    }
+
+    #[test]
+    fn does_not_export_over_the_database() {
+        let dir = temp_dir();
+        let path = dir.join("agentshub.db");
+        let db = Db::open(&path).unwrap();
+        let chat = chat(&db);
+
+        assert!(db.export(&path).is_err());
+        assert!(db.export(&dir.join("copy.db")).is_err());
+        // The database is still there, and still takes writes.
+        record(&db, chat, "a", "startup");
+        drop(db);
+        assert_eq!(Db::open(&path).unwrap().sessions(chat).unwrap().len(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1316,53 +1190,6 @@ mod tests {
     }
 
     #[test]
-    fn seeds_the_chat_sequence_from_existing_chats_during_upgrade() {
-        let dir = temp_dir();
-        let path = dir.join("agentshub.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            for migration in &MIGRATIONS[..3] {
-                conn.execute_batch(migration).unwrap();
-            }
-            conn.execute_batch(
-                "INSERT INTO projects VALUES (1, '/home/me/project', 'project', 0);
-                 INSERT INTO chats VALUES (42, 1, 'claude', NULL, 0, 0);
-                 PRAGMA user_version = 3;",
-            )
-            .unwrap();
-        }
-        let db = Db::open(&path).unwrap();
-        db.delete_chat(42).unwrap();
-        assert!(db.add_chat(1, Agent::Claude).unwrap() > 42);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn finds_tool_outputs_through_their_index() {
-        let db = Db::open_in_memory().unwrap();
-        let conn = db.write();
-        let mut stmt = conn
-            .prepare(
-                "EXPLAIN QUERY PLAN UPDATE items SET payload = json_set(payload,
-                    '$.output', ?3, '$.truncated', json(?4), '$.error', json(?5))
-                 WHERE session_id = ?1 AND kind = 'tool'
-                   AND json_extract(payload, '$.id') = ?2",
-            )
-            .unwrap();
-        let plan: Vec<String> = stmt
-            .query_map(params![1i64, "call", "out", "false", "false"], |row| {
-                row.get::<_, String>(3)
-            })
-            .unwrap()
-            .map(|line| line.unwrap())
-            .collect();
-        assert!(
-            plan.iter().any(|line| line.contains("items_tool_call")),
-            "{plan:?}"
-        );
-    }
-
-    #[test]
     fn adds_each_folder_once() {
         let db = Db::open_in_memory().unwrap();
         let first = db.add_project(Path::new("/home/me/project")).unwrap();
@@ -1388,26 +1215,18 @@ mod tests {
         assert_eq!(record(&db, chat, "a", "compact"), a);
         let b = record(&db, chat, "b", "clear");
         assert_eq!(b.left, Some(a.session_id));
-        record(&db, chat, "c", "new");
+        let c = record(&db, chat, "c", "new");
         // `/resume` goes back to the first one.
-        assert_eq!(record(&db, chat, "a", "resume").left, Some(3));
+        assert_eq!(record(&db, chat, "a", "resume").left, Some(c.session_id));
         assert_eq!(
             order(&db, chat),
             [
-                ("b".into(), Some("clear".into())),
-                ("c".into(), Some("new".into())),
-                ("a".into(), Some("resume".into())),
+                ("b".into(), Some("new".into())),
+                ("c".into(), Some("resume".into())),
+                // Re-entering a session forgets why the chat left it.
+                ("a".into(), None),
             ]
         );
-        // A session says why the chat left it, and re-entering it forgets
-        // that.
-        let ended: Vec<Option<String>> = db
-            .sessions(chat)
-            .unwrap()
-            .into_iter()
-            .map(|session| session.ended)
-            .collect();
-        assert_eq!(ended, [Some("new".into()), Some("resume".into()), None]);
     }
 
     #[test]
@@ -1428,88 +1247,21 @@ mod tests {
     }
 
     #[test]
-    fn a_read_that_loses_the_offset_race_is_stale() {
-        let db = Db::open_in_memory().unwrap();
-        let chat = chat(&db);
-        let session = record(&db, chat, "a", "startup").session_id;
-
-        let item = |source_id: &str, parent_id: Option<&str>, text: &str| transcript::Item {
-            source_id: Some(source_id.into()),
-            parent_id: parent_id.map(String::from),
-            kind: Kind::User,
-            at: None,
-            payload: json!({ "text": text }),
-        };
-
-        // A short read commits first.
-        let mut short = transcript::Read::default();
-        short.offset = 10;
-        short.items.push(item("1", None, "first"));
-        short.leaf = Some("1".into());
-        short.prompt = Some("first".into());
-        short.prompted = true;
-        assert_eq!(
-            db.save_read_state(session, 0, &short).unwrap(),
-            Saved::Changed
-        );
-
-        // A longer read started at the same offset, but must not discard what
-        // it saw after the short one's end.
-        let mut long = transcript::Read::default();
-        long.offset = 30;
-        long.items.push(item("1", None, "first"));
-        long.items.push(item("2", Some("1"), "second"));
-        long.leaf = Some("2".into());
-        assert_eq!(db.save_read_state(session, 0, &long).unwrap(), Saved::Stale);
-
-        // Reading again from the committed offset keeps the second message.
-        let mut retry = transcript::Read::default();
-        retry.offset = 30;
-        retry.items.push(item("2", Some("1"), "second"));
-        retry.leaf = Some("2".into());
-        assert_eq!(
-            db.save_read_state(session, short.offset, &retry).unwrap(),
-            Saved::Changed
-        );
-        let texts: Vec<String> = db
-            .items(session, 100)
-            .unwrap()
-            .into_iter()
-            .map(|item| item.payload["text"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(texts, ["first", "second"]);
-    }
-
-    #[test]
     fn a_replayed_line_does_not_move_the_leaf_back() {
         let db = Db::open_in_memory().unwrap();
         let chat = chat(&db);
         let session = record(&db, chat, "a", "startup").session_id;
-        let item = |source_id: &str, parent_id: Option<&str>, text: &str| transcript::Item {
-            source_id: Some(source_id.into()),
-            parent_id: parent_id.map(String::from),
-            kind: Kind::User,
-            at: None,
-            payload: json!({ "text": text }),
-        };
 
         // The newest line is the second message, and the last line is a
         // replay of the first one.
         let mut read = transcript::Read::default();
         read.offset = 30;
-        read.items.push(item("1", None, "first"));
-        read.items.push(item("2", Some("1"), "second"));
-        read.items.push(item("1", None, "first"));
-        read.leaf = Some("1".into());
-        assert!(db.save_read_state(session, 0, &read).unwrap().changed());
+        push(&mut read, item("1", None, "first"));
+        push(&mut read, item("2", Some("1"), "second"));
+        push(&mut read, item("1", None, "first"));
+        assert!(db.save_read_state(session, &read).unwrap());
 
-        let texts: Vec<String> = db
-            .items(session, 100)
-            .unwrap()
-            .into_iter()
-            .map(|item| item.payload["text"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(texts, ["first", "second"]);
+        assert_eq!(texts(&db, session), ["first", "second"]);
     }
 
     #[test]
@@ -1517,41 +1269,21 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let chat = chat(&db);
         let session = record(&db, chat, "a", "startup").session_id;
-        let item = |source_id: &str, parent_id: Option<&str>, text: &str| transcript::Item {
-            source_id: Some(source_id.into()),
-            parent_id: parent_id.map(String::from),
-            kind: Kind::User,
-            at: None,
-            payload: json!({ "text": text }),
-        };
 
         let mut read = transcript::Read::default();
         read.offset = 10;
-        read.items.push(item("a", None, "first"));
-        read.items.push(item("b", Some("a"), "abandoned"));
-        read.leaf = Some("b".into());
-        assert_eq!(
-            db.save_read_state(session, 0, &read).unwrap(),
-            Saved::Changed
-        );
+        push(&mut read, item("a", None, "first"));
+        push(&mut read, item("b", Some("a"), "abandoned"));
+        assert!(db.save_read_state(session, &read).unwrap());
 
         // Pi's `/tree` appends only a branch summary, which moves the leaf
         // back and hides the abandoned branch.
         let mut read = transcript::Read::default();
         read.offset = 20;
         read.parents.insert("s".into(), Some("a".into()));
-        read.leaf = Some("s".into());
-        assert_eq!(
-            db.save_read_state(session, 10, &read).unwrap(),
-            Saved::Changed
-        );
-        let texts: Vec<String> = db
-            .items(session, 100)
-            .unwrap()
-            .into_iter()
-            .map(|item| item.payload["text"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(texts, ["first"]);
+        read.lines.push("s".into());
+        assert!(db.save_read_state(session, &read).unwrap());
+        assert_eq!(texts(&db, session), ["first"]);
     }
 
     #[test]
@@ -1568,10 +1300,7 @@ mod tests {
         assert!(db.transcript(shared).unwrap().is_some());
         assert!(db.transcript(own).unwrap().is_none());
         assert!(db.items(own, 100).unwrap().is_empty());
-        assert_eq!(
-            order(&db, second),
-            [("shared".into(), Some("resume".into()))]
-        );
+        assert_eq!(order(&db, second), [("shared".into(), None)]);
 
         db.remove_project(db.projects().unwrap()[0].id).unwrap();
         assert!(db.transcript(shared).unwrap().is_none());
@@ -1580,13 +1309,10 @@ mod tests {
 
     /// Saves a first prompt for a session that has not been read.
     fn save_prompt_for_title_test(db: &Db, session: i64, prompt: &str) {
-        let transcript = db.transcript(session).unwrap().unwrap();
         let mut read = transcript::Read::default();
         read.prompt = Some(prompt.into());
         read.prompted = true;
-        read.offset = transcript.offset;
-        db.save_read_state(session, transcript.offset, &read)
-            .unwrap();
+        db.save_read_state(session, &read).unwrap();
     }
 
     #[test]
@@ -1605,17 +1331,11 @@ mod tests {
         let mut stale = transcript::Read::default();
         stale.prompt = Some("deleted".into());
         stale.prompted = true;
-        stale.items.push(transcript::Item {
-            source_id: Some("1".into()),
-            parent_id: None,
-            kind: Kind::User,
-            at: None,
-            payload: json!({ "text": "deleted" }),
-        });
-        assert!(!db.save_read_state(old, 0, &stale).unwrap().changed());
+        push(&mut stale, item("1", None, "deleted"));
+        assert!(!db.save_read_state(old, &stale).unwrap());
         assert!(db.items(new, 100).unwrap().is_empty());
         assert_eq!(db.transcript(new).unwrap().unwrap().offset, 0);
-        assert!(!db.has_prompts(second).unwrap());
+        assert!(db.sessions(second).unwrap().iter().all(|s| !s.prompted));
     }
 
     #[test]
@@ -1637,5 +1357,28 @@ mod tests {
             .find(|chat| chat.id == second)
             .and_then(|chat| chat.title.as_deref());
         assert_eq!(title, Some("the second chat's title"));
+    }
+
+    #[test]
+    fn a_newer_parser_reads_a_transcript_again() {
+        let dir = temp_dir();
+        let path = dir.join("abc.jsonl");
+        let line = json!({"type": "user", "uuid": "1", "message": {"content": "first"}});
+        fs::write(&path, format!("{line}\n")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+        let chat = chat(&db);
+        let session = db
+            .record_session(chat, Agent::Claude, "abc", &path, Some("startup"))
+            .unwrap()
+            .session_id;
+        transcript::read(&db, session).unwrap();
+
+        // An older parser read the whole file, but kept nothing of it.
+        db.write()
+            .execute_batch("DELETE FROM items; UPDATE sessions SET parser_version = 0;")
+            .unwrap();
+        assert!(transcript::read(&db, session).unwrap());
+        assert_eq!(texts(&db, session), ["first"]);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

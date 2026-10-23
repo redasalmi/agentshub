@@ -1,6 +1,6 @@
 # Projects and chats
 
-Status: implemented (schema 5).
+Status: implemented (schema 1).
 
 ## Goal
 
@@ -60,7 +60,9 @@ deletes the last session of a chat, reopening the chat starts a new session
 
 The database lives at `$XDG_DATA_HOME/agentshub/agentshub.db`
 (`~/.local/share/agentshub/agentshub.db` by default). The folder is `0700` and
-the file `0600`. It is **plaintext**: those permissions keep other local users
+the file `0600`. The folder's mode is set every time the database opens, since
+it may predate agentshub, and it covers what SQLite keeps beside the database,
+such as its write-ahead log, and the backups. It is **plaintext**: those permissions keep other local users
 out, not backups, sync folders or an unlocked machine, and paths such as a
 project's folder are in it too. Encrypting the disk is the operating system's
 job; agentshub does not hold a key.
@@ -71,10 +73,9 @@ from a newer version is refused. Before an existing database is migrated, a
 copy is written beside it as `agentshub.db.v<old schema>.bak`; a migration
 rewrites conversations that can't be recovered anywhere else.
 
-Writes go through one connection, which a transcript read holds for the length
-of its transaction. Reads have a second, read-only connection, so that the
-window doesn't wait on those writes. Crate: `rusqlite` with the `bundled`
-feature.
+Writes go through one connection. Reads have a second, read-only connection,
+so that the window doesn't wait on a transcript read's transaction. Crate:
+`rusqlite` with the `bundled` feature.
 
 Only one Agents Hub runs at a time: it holds `flock` on
 `$XDG_RUNTIME_DIR/agentshub.lock` before opening the database. A second instance
@@ -89,10 +90,9 @@ CREATE TABLE projects (
 );
 
 CREATE TABLE chats (
-    id         INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects ON DELETE CASCADE,
     agent      TEXT NOT NULL,          -- claude | codex | pi
-    title      TEXT,                   -- set by a rename, which doesn't exist yet
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL        -- orders the chats in the sidebar
 );
@@ -109,7 +109,8 @@ CREATE TABLE sessions (
     prompted        INTEGER NOT NULL DEFAULT 0,  -- it may hold only an image
     started_at      INTEGER NOT NULL,
     read_offset     INTEGER NOT NULL DEFAULT 0,  -- bytes read so far
-    leaf_item_id    INTEGER REFERENCES items (id) ON DELETE SET NULL,
+    parser_version  INTEGER NOT NULL DEFAULT 0,  -- the parser that read them
+    leaf_item_id    INTEGER,
     missing         INTEGER NOT NULL DEFAULT 0,  -- the transcript is gone
     UNIQUE (agent, agent_id)
 );
@@ -119,7 +120,7 @@ CREATE TABLE chat_sessions (
     chat_id        INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
     session_id     INTEGER NOT NULL REFERENCES sessions ON DELETE CASCADE,
     position       INTEGER NOT NULL,
-    first_position INTEGER,            -- where it first entered the chat
+    first_position INTEGER NOT NULL,   -- where it first entered the chat
     reason         TEXT,               -- startup | clear | new | resume | fork
     ended_reason   TEXT,               -- why the chat left it, for the list above
     PRIMARY KEY (chat_id, session_id),
@@ -131,16 +132,15 @@ CREATE TABLE items (
     id             INTEGER PRIMARY KEY,
     session_id     INTEGER NOT NULL REFERENCES sessions ON DELETE CASCADE,
     source_id      TEXT,               -- the line's id in the transcript, if any
-    parent_item_id INTEGER REFERENCES items (id) ON DELETE CASCADE,
+    parent_item_id INTEGER,
     kind           TEXT NOT NULL,      -- user | assistant | reasoning | tool | compaction | notice
+    call_id        TEXT,               -- a tool call's id, which its output is matched to
     at             INTEGER,
     payload        TEXT NOT NULL,      -- JSON, depends on kind
     UNIQUE (session_id, source_id)
 );
 CREATE INDEX items_session ON items (session_id, id);
--- A tool's output is matched to its call by the call's id in the payload.
-CREATE INDEX items_tool_call ON items (session_id, json_extract(payload, '$.id'))
-    WHERE kind = 'tool';
+CREATE INDEX items_tool_call ON items (session_id, call_id) WHERE call_id IS NOT NULL;
 
 -- Transcript lines that kept no item, each with the item it hangs off. A later
 -- message often has one of these lines as its parent, so a read has to know
@@ -148,15 +148,9 @@ CREATE INDEX items_tool_call ON items (session_id, json_extract(payload, '$.id')
 CREATE TABLE lines (
     session_id INTEGER NOT NULL REFERENCES sessions ON DELETE CASCADE,
     source_id  TEXT NOT NULL,
-    item_id    INTEGER REFERENCES items (id) ON DELETE CASCADE,
+    item_id    INTEGER,
     PRIMARY KEY (session_id, source_id)
 ) WITHOUT ROWID;
-
--- Ids that must not be reused when a row is deleted and another created.
-CREATE TABLE sequences (
-    name  TEXT PRIMARY KEY,
-    value INTEGER NOT NULL
-);
 ```
 
 The three titles are kept apart because each can change on its own in a later
@@ -166,17 +160,22 @@ one back.
 Sessions have their own table because `/resume` can bring a session into a
 second chat. It is read once, and both chats show it.
 
-The `sequences` table keeps a deleted chat's or session's id from being handed
-to a new row: a transcript read that started before the deletion must not find
-the new session instead.
+Chats and sessions are `AUTOINCREMENT`, so a deleted one's id is never handed
+to a new row: a deferred open or a transcript read that started before the
+deletion must not find the new row instead.
+
+The ids that point at items (`leaf_item_id`, `parent_item_id`, `lines.item_id`)
+aren't foreign keys. Items are only deleted a whole session at a time, which
+clears all three anyway, and a cascade down a branch of more than 1000 items
+goes deeper than SQLite allows, so deleting a long session would fail.
 
 Payloads by kind:
 
 - `user`, `assistant`, `reasoning`: `{ "text": "..." }`
 - `tool`: `{ "id": "...", "name": "...", "input": ..., "output": "...", "truncated": bool, "error": bool }`.
   A tool's output arrives on a later line than the call. It is matched by the
-  call id (`tool_use_id` for Claude, `call_id` for Codex, `toolCallId` for Pi)
-  and written onto the call's row.
+  call id (`tool_use_id` for Claude, `call_id` for Codex, `toolCallId` for Pi),
+  which the call's row also keeps in `call_id`, and written onto that row.
 - `compaction`: `{}`
 - `notice`: `{ "text": "..." }`, for things agentshub says, like a missing
   transcript
@@ -189,7 +188,8 @@ Two ways to keep a copy:
   database;
 - on demand, from the sidebar's export button, which asks where to write and
   runs SQLite's `VACUUM INTO`, so the copy is consistent even while a CLI
-  writes.
+  writes. It refuses the database's own folder, where replacing a file could
+  replace the database or its write-ahead log.
 
 The history is never pruned: sessions stay until their chat or project is
 deleted, even when their transcript is long gone. The file plateaus near its
@@ -204,7 +204,7 @@ by deletions. Export is the escape hatch, not a retention policy.
   (`cat >> "$AGENTSHUB_REPORT"`), which carries `session_id`,
   `transcript_path` and `source` (`startup`, `resume`, `clear`, `compact`,
   `fork`).
-- Pi: the extension appends `{ transcript_path, reason, previous }` on
+- Pi: the extension appends `{ transcript_path, reason }` on
   `session_start`, where `reason` is `startup`, `reload`, `new`, `resume` or
   `fork`.
 - Codex: unchanged. Its session is found from the files it keeps open
@@ -242,6 +242,17 @@ complete line, on a blocking thread of its own, in one transaction per read. A
 line still being written is read next time. This is the same pattern
 `SessionFile::read` used to use.
 
+Reads run one at a time, behind a lock the database holds: two that started
+from the same offset would each save what they found. A read that waited
+starts from where the one before it stopped, so asking for a read that is
+already under way costs little.
+
+What a read keeps can change as the CLIs' formats do, and no raw transcript is
+kept to read again. Each session records the parser version that read it
+(`transcript::PARSER`). Raising that version reads every transcript that still
+exists again from its start, replacing what the older parser kept; a
+transcript that is gone keeps its items.
+
 A session is read:
 
 - when its row is expanded in the history, for the first time since the chat
@@ -249,7 +260,10 @@ A session is read:
 - when the chat switches away from it,
 - when the chat's CLI exits,
 - on workspace shutdown, after stopping the CLIs and draining their final
-  session reports, before removing the report files,
+  session reports, before removing the report files: the sessions the CLIs
+  were in, the ones those reports moved them into or out of, Codex's last
+  session, and the reads still under way. Sessions left earlier were read
+  when they were left,
 - when the chat is opened, for its last session only, since that decides how
   the CLI starts,
 - when the live session's agent finishes a turn, so the chat's title in the
@@ -404,16 +418,16 @@ which says Agents Hub is already running.
 
 - `Cargo.toml`: `rusqlite` (`bundled`), and the `dev-fast` profile for quick
   loops.
-- `src/db.rs`: opening, migrations (including the resolved-ancestry backfill),
-  the queries, backups and export.
+- `src/db.rs`: the instance lock, opening, migrations, the queries, backups and
+  export.
 - `src/transcript.rs`: reading the three transcript formats into items,
   incrementally, with ancestry resolved as it saves.
 - `src/history.rs`: the earlier sessions list, reading a session when its row
   is expanded, and paging.
 - `src/reports.rs`: append-only reports, read incrementally, with the session's
   reason; falls back to the temp folder when the runtime folder can't be used.
-- `src/workspace.rs`: chats keyed by their database id; the instance lock, the
-  broken-database window, the live-session conflict, notices; opening resumes
+- `src/workspace.rs`: chats keyed by their database id; the broken-database
+  window, the live-session conflict, notices; opening resumes
   the last session. Codex chats still look for their session when its folder
   changes.
 - `src/sidebar.rs`: lists projects and chats from the database, and the add
@@ -431,7 +445,8 @@ The work was built in these steps, each leaving the app working:
 3. Session tracking with append-only reports.
 4. Transcripts for the three agents, with branches.
 5. The history view.
-6. Missing transcripts, cleanup, and schema 5's resolved ancestry.
+6. Missing transcripts and cleanup. The schema was squashed into one migration
+   before release, since no database outside development used the steps.
 
 ## Tests
 
@@ -444,9 +459,8 @@ In the style of the existing tests:
   spread over several lines.
 - `db.rs`: an in-memory database. Session ordering (append, already last, move
   to end), deleting a chat deletes its unshared sessions only, paging, a read
-  hanging off a line an earlier read dropped, export, and upgrading a schema-1
-  database. Migration 5 was also run against a copy of a real database before
-  release.
+  hanging off a line an earlier read dropped, export, ids that aren't reused,
+  the folder's mode, and a newer parser reading a transcript again.
 
 ## Open questions
 

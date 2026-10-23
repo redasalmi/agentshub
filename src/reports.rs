@@ -13,6 +13,7 @@ use notify::{RecursiveMode, Watcher as _};
 use serde_json::Value;
 
 use crate::agent::Agent;
+use crate::transcript;
 
 pub const ENV: &str = "AGENTSHUB_REPORT";
 
@@ -25,7 +26,7 @@ export default function (pi) {
   pi.on("session_start", (event, ctx) => {
     const file = ctx.sessionManager.getSessionFile();
     if (process.env.AGENTSHUB_REPORT && file) {
-      const report = { transcript_path: file, reason: event.reason, previous: event.previousSessionFile };
+      const report = { transcript_path: file, reason: event.reason };
       appendFileSync(process.env.AGENTSHUB_REPORT, JSON.stringify(report) + "\n");
     }
   });
@@ -138,8 +139,9 @@ impl Reports {
         self.dir.join(key)
     }
 
-    /// The sessions the CLI in a terminal reported since the last read.
-    pub fn read(&mut self, key: &str) -> Vec<Report> {
+    /// The sessions the CLI in a terminal reported since the last read, each
+    /// with the CLI's id for it.
+    pub fn read(&mut self, key: &str, agent: Agent) -> Vec<(String, Report)> {
         let path = self.path(key);
         let offset = self.read.entry(key.to_string()).or_default();
         let mut bytes = Vec::new();
@@ -153,6 +155,15 @@ impl Reports {
         let (reports, len) = parse(&bytes);
         *offset += len as u64;
         reports
+            .into_iter()
+            .filter_map(|report| {
+                let agent_id = report
+                    .session_id
+                    .clone()
+                    .or_else(|| transcript::session_id(agent, &report.transcript_path))?;
+                Some((agent_id, report))
+            })
+            .collect()
     }
 
     pub fn remove(&self) {

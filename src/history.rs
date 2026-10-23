@@ -78,13 +78,12 @@ impl History {
         };
         self.sessions = sessions
             .iter()
-            .enumerate()
-            .filter(|(_, session)| session.prompted && Some(session.id) != current)
-            .map(|(index, session)| Earlier {
+            .filter(|session| session.prompted && Some(session.id) != current)
+            .map(|session| Earlier {
                 id: session.id,
                 title: session.title.clone().unwrap_or_default().into(),
                 started_at: session.started_at,
-                ended: ended(session, sessions.get(index + 1)).into(),
+                ended: ended(session).into(),
             })
             .collect();
         self.expanded
@@ -426,15 +425,9 @@ fn chevron(expanded: bool, cx: &App) -> Icon {
     .text_color(cx.theme().muted_foreground)
 }
 
-/// How a session ended, from why the chat left it for another one. Rows from
-/// before the database kept that say nothing, so the next session's reason
-/// stands in, as it always did.
-fn ended(session: &Session, next: Option<&Session>) -> String {
-    let reason = session
-        .ended
-        .as_deref()
-        .or_else(|| next.and_then(|next| next.reason.as_deref()));
-    let ended = match reason {
+/// How a session ended, from why the chat left it for another one.
+fn ended(session: &Session) -> String {
+    let ended = match session.ended.as_deref() {
         Some("clear") => "Cleared",
         Some("new") => "Replaced by /new",
         Some("resume") => "Replaced by /resume",
