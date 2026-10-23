@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
@@ -27,6 +28,11 @@ pub enum SidebarEvent {
     /// Start a chat in a project.
     NewChat(i64),
     OpenChat(i64),
+    /// Ask for a chat's new title, starting from its current one.
+    RenameChat(i64, SharedString),
+    PinChat(i64, bool),
+    /// Move a chat to where another one is.
+    MoveChat(i64, i64),
     DeleteChat(i64),
     /// Write a copy of the database where the user asks.
     Export,
@@ -186,6 +192,15 @@ impl Sidebar {
         };
         let group = SharedString::from(format!("chat-{id}"));
         let title = SharedString::from(chat.title.clone().unwrap_or_else(|| "New chat".into()));
+        let current_title = SharedString::from(chat.title.clone().unwrap_or_default());
+        let pinned = chat.pinned;
+        let order_group = (chat.project_id, pinned);
+        let dragged = DraggedChat {
+            id,
+            group: order_group,
+            title: title.clone(),
+        };
+        let drop_color = theme.drop_target;
 
         v_flex()
             .id(group.clone())
@@ -209,6 +224,13 @@ impl Sidebar {
                     .gap(LAMP_GAP)
                     .child(lamp(color, lamp_state))
                     .child(div().flex_1().min_w_0().text_sm().truncate().child(title))
+                    .when(pinned, |this| {
+                        this.child(
+                            Icon::new(ExtraIcon::Pin)
+                                .xsmall()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
                     .child(
                         div()
                             .flex_none()
@@ -232,9 +254,42 @@ impl Sidebar {
                             .child(activity(chat.agent, running)),
                     )
                     .child(
-                        div()
+                        h_flex()
                             .invisible()
                             .group_hover(group, |style| style.visible())
+                            .child(
+                                Button::new("pin-chat")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(if pinned {
+                                        ExtraIcon::PinOff
+                                    } else {
+                                        ExtraIcon::Pin
+                                    })
+                                    .tooltip(if pinned {
+                                        "Unpin this chat"
+                                    } else {
+                                        "Pin this chat to the top"
+                                    })
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(SidebarEvent::PinChat(id, !pinned));
+                                    })),
+                            )
+                            .child(
+                                Button::new("rename-chat")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(ExtraIcon::Pencil)
+                                    .tooltip("Rename this chat")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(SidebarEvent::RenameChat(
+                                            id,
+                                            current_title.clone(),
+                                        ));
+                                    })),
+                            )
                             .child(
                                 Button::new("delete-chat")
                                     .ghost()
@@ -248,7 +303,48 @@ impl Sidebar {
                             ),
                     ),
             )
+            // Chats are reordered by dropping one on another of the same
+            // project, pinned or not as it is.
+            .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+            .drag_over::<DraggedChat>(move |style, dragged, _, _| {
+                if dragged.group == order_group && dragged.id != id {
+                    style.bg(drop_color)
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |_, dragged: &DraggedChat, _, cx| {
+                if dragged.group == order_group && dragged.id != id {
+                    cx.emit(SidebarEvent::MoveChat(dragged.id, id));
+                }
+            }))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::OpenChat(id))))
+    }
+}
+
+/// A chat being dragged, and what follows the pointer meanwhile.
+#[derive(Clone)]
+struct DraggedChat {
+    id: i64,
+    /// Its project, and whether it is pinned.
+    group: (i64, bool),
+    title: SharedString,
+}
+
+impl Render for DraggedChat {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .max_w(px(240.))
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .bg(theme.sidebar_accent)
+            .text_color(theme.sidebar_accent_foreground)
+            .text_sm()
+            .truncate()
+            .shadow_md()
+            .child(self.title.clone())
     }
 }
 

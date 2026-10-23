@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui_kit::component::button::{Button, ButtonVariant};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
@@ -168,6 +170,21 @@ impl Workspace {
                     this.open_new_chat_dialog(*project_id, window, cx)
                 }
                 SidebarEvent::OpenChat(id) => this.open_chat(*id, window, cx),
+                SidebarEvent::RenameChat(id, title) => {
+                    this.open_rename_dialog(*id, title.clone(), window, cx)
+                }
+                SidebarEvent::PinChat(id, pinned) => {
+                    if let Err(err) = this.db.set_pinned(*id, *pinned) {
+                        eprintln!("can't pin chat {id}: {err}");
+                    }
+                    this.refresh(cx);
+                }
+                SidebarEvent::MoveChat(id, to) => {
+                    if let Err(err) = this.db.move_chat(*id, *to) {
+                        eprintln!("can't move chat {id}: {err}");
+                    }
+                    this.refresh(cx);
+                }
                 SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
                 SidebarEvent::Export => this.export_database(window, cx),
             });
@@ -449,6 +466,65 @@ impl Workspace {
                         this.refresh(cx);
                     })
                     .ok();
+                    true
+                })
+        });
+    }
+
+    fn open_rename_dialog(
+        &mut self,
+        id: i64,
+        title: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(title.clone())
+                .placeholder("Its agent's title")
+        });
+        let this = cx.entity().downgrade();
+        let initial_focus = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if initial_focus.replace(false) {
+                input.focus_handle(cx).focus(window, cx);
+                input.update(cx, |input, cx| input.select_all(window, cx));
+            }
+            let (this, input, title) = (this.clone(), input.clone(), title.clone());
+            dialog
+                .title("Rename this chat")
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Leave it empty to title it after its agent's sessions."),
+                        )
+                        .child(Input::new(&input)),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().trigger(|button| button.label("Cancel")))
+                        .child(
+                            DialogAction::new()
+                                .child(Button::new("rename").primary().label("Rename")),
+                        ),
+                )
+                // Enter in the input confirms too.
+                .on_ok(move |_, _, cx| {
+                    let value = input.read(cx).value();
+                    // An untouched title stays the agent's, and follows it.
+                    if value != title {
+                        this.update(cx, |this, cx| {
+                            if let Err(err) = this.db.rename_chat(id, &value) {
+                                eprintln!("can't rename chat {id}: {err}");
+                            }
+                            this.refresh(cx);
+                        })
+                        .ok();
+                    }
                     true
                 })
         });

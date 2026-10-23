@@ -1,6 +1,6 @@
 # Projects and chats
 
-Status: implemented (schema 1).
+Status: implemented (schema 2).
 
 ## Goal
 
@@ -94,7 +94,10 @@ CREATE TABLE chats (
     project_id INTEGER NOT NULL REFERENCES projects ON DELETE CASCADE,
     agent      TEXT NOT NULL,          -- claude | codex | pi
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL        -- orders the chats in the sidebar
+    updated_at INTEGER NOT NULL,       -- the age shown in the sidebar
+    title      TEXT,                   -- the user's, over its sessions' title
+    pinned     INTEGER NOT NULL DEFAULT 0,
+    position   INTEGER NOT NULL DEFAULT 0 -- the order within pinned or not
 );
 
 -- One row per agent session, shared by the chats it appears in.
@@ -232,8 +235,9 @@ For each session reported:
 Sessions without a single prompt (a `/clear` right after starting) aren't
 shown.
 
-Recording a session, and reading one that the chat is using right now, moves
-the chat to the top of the sidebar; reading history does not.
+Recording a session, and reading one that the chat is using right now, updates
+the age the sidebar shows for the chat; reading history does not. It doesn't
+move the chat: the sidebar keeps the order the user gave.
 
 ## Reading transcripts
 
@@ -397,10 +401,16 @@ which says Agents Hub is already running.
 
 ## Interface
 
-- **Sidebar**: projects from the database with their chats under them, newest
-  first, each with its agent's lamp and status as before. Its footer has
-  "Add project" and an export button. Projects can be removed, and chats
-  deleted.
+- **Sidebar**: projects from the database with their chats under them, each
+  with its agent's lamp and status as before. Its footer has "Add project" and
+  an export button. Projects can be removed, and chats deleted.
+  - A new chat goes to the top of its project's unpinned chats.
+  - Pinned chats sit above the others. Pinning or unpinning a chat puts it at
+    the top of its new group.
+  - Dropping a chat on another of the same project and group moves it to that
+    chat's place.
+  - Renaming a chat gives it its own title; an empty one titles it after its
+    sessions again.
 - **Chat**: the terminal, optionally with a notice banner above it, and the
   earlier sessions above that when there are any:
   - One row per earlier session: title, start time, and how it ended
@@ -465,8 +475,6 @@ In the style of the existing tests:
 ## Open questions
 
 - How should Codex rollbacks show? Undo isn't handled yet.
-- Should a chat be renameable? It is titled after its first titled session
-  until then.
 - Should existing CLI sessions be importable into chats? Out of scope; an
   existing install starts empty.
 - Should search across chats exist? SQLite makes it a later migration (FTS5

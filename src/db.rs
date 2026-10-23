@@ -20,7 +20,8 @@ use crate::transcript::{self, Kind};
 
 /// Each migration takes the database from the version before it, as counted
 /// by `PRAGMA user_version`, to the next.
-const MIGRATIONS: [&str; 1] = [r#"
+const MIGRATIONS: [&str; 2] = [
+    r#"
 CREATE TABLE projects (
     id         INTEGER PRIMARY KEY,
     path       TEXT NOT NULL UNIQUE,
@@ -108,12 +109,29 @@ CREATE TABLE lines (
     item_id    INTEGER,
     PRIMARY KEY (session_id, source_id)
 ) WITHOUT ROWID;
-"#];
+"#,
+    r#"
+-- The title the user gave a chat, and where it sits in its project. Pinned
+-- chats come first, and each of the two groups keeps its own order.
+ALTER TABLE chats ADD COLUMN title TEXT;
+ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE chats ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+-- The chats keep the order they were shown in, most recently used first.
+UPDATE chats SET position = (
+    SELECT COUNT(*) FROM chats o
+    WHERE o.project_id = chats.project_id
+      AND (o.updated_at, o.id) > (chats.updated_at, chats.id)
+);
+"#,
+];
 
 /// The schema version this build writes.
 const SCHEMA: i64 = MIGRATIONS.len() as i64;
 
 const TITLE: &str = "COALESCE(s.custom_title, s.generated_title, s.prompt)";
+
+/// The order of a project's chats.
+const CHAT_ORDER: &str = "pinned DESC, position, id DESC";
 
 /// Where the database lives: `$XDG_DATA_HOME/agentshub/agentshub.db`.
 pub fn path() -> Option<PathBuf> {
@@ -187,7 +205,7 @@ pub struct Project {
     pub id: i64,
     pub path: PathBuf,
     pub name: String,
-    /// Newest first.
+    /// Pinned first, then in the order the user gave them.
     pub chats: Vec<Chat>,
 }
 
@@ -196,6 +214,7 @@ pub struct Chat {
     pub project_id: i64,
     pub agent: Agent,
     pub title: Option<String>,
+    pub pinned: bool,
     pub updated_at: i64,
 }
 
@@ -329,14 +348,15 @@ impl Db {
     pub fn projects(&self) -> Result<Vec<Project>> {
         let conn = self.read();
         let mut chats: HashMap<i64, Vec<Chat>> = HashMap::new();
-        // A chat is titled after the first of its sessions that has a title.
+        // A chat the user didn't title is titled after the first of its
+        // sessions that has a title.
         let mut stmt = conn.prepare(&format!(
-            "SELECT c.id, c.project_id, c.agent, c.updated_at, (
+            "SELECT c.id, c.project_id, c.agent, c.updated_at, c.pinned, COALESCE(c.title, (
                 SELECT {TITLE} FROM chat_sessions cs JOIN sessions s ON s.id = cs.session_id
                 WHERE cs.chat_id = c.id AND {TITLE} IS NOT NULL
                 ORDER BY cs.first_position LIMIT 1
-            )
-            FROM chats c ORDER BY c.updated_at DESC, c.id DESC"
+            ))
+            FROM chats c ORDER BY {CHAT_ORDER}"
         ))?;
         let rows = stmt.query_map([], |row| {
             Ok(Chat {
@@ -344,7 +364,8 @@ impl Db {
                 project_id: row.get(1)?,
                 agent: agent(&row.get::<_, String>(2)?)?,
                 updated_at: row.get(3)?,
-                title: row.get(4)?,
+                pinned: row.get(4)?,
+                title: row.get(5)?,
             })
         })?;
         for chat in rows {
@@ -389,14 +410,69 @@ impl Db {
         self.delete_where("DELETE FROM projects WHERE id = ?1", id)
     }
 
+    /// Adds a chat at the top of its project's unpinned chats.
     pub fn add_chat(&self, project_id: i64, agent: Agent) -> Result<i64> {
         let conn = self.write();
         conn.execute(
-            "INSERT INTO chats (project_id, agent, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?3)",
+            "INSERT INTO chats (project_id, agent, created_at, updated_at, position)
+             VALUES (?1, ?2, ?3, ?3,
+                     (SELECT COALESCE(MIN(position), 0) - 1 FROM chats WHERE project_id = ?1))",
             params![project_id, agent.label(), now()],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Titles a chat, or with an empty title, titles it after its sessions
+    /// again.
+    pub fn rename_chat(&self, id: i64, title: &str) -> Result<()> {
+        let title = title.trim();
+        self.write().execute(
+            "UPDATE chats SET title = ?2 WHERE id = ?1",
+            params![id, (!title.is_empty()).then_some(title)],
+        )?;
+        Ok(())
+    }
+
+    /// Pins or unpins a chat, which goes to the top of its new group.
+    pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<()> {
+        self.write().execute(
+            "UPDATE chats SET pinned = ?2, position = (
+                SELECT MIN(position) - 1 FROM chats o WHERE o.project_id = chats.project_id
+             )
+             WHERE id = ?1",
+            params![id, pinned],
+        )?;
+        Ok(())
+    }
+
+    /// Moves a chat to where `to` is, among the chats of its project that are
+    /// pinned as it is. Nothing moves when `to` isn't one of them.
+    pub fn move_chat(&self, id: i64, to: i64) -> Result<()> {
+        let mut conn = self.write();
+        let tx = conn.transaction()?;
+        let mut ids = tx
+            .prepare(&format!(
+                "SELECT id FROM chats
+                 WHERE (project_id, pinned) = (SELECT project_id, pinned FROM chats WHERE id = ?1)
+                 ORDER BY {CHAT_ORDER}"
+            ))?
+            .query_map([to], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>>>()?;
+        let (Some(from), Some(index)) = (
+            ids.iter().position(|&other| other == id),
+            ids.iter().position(|&other| other == to),
+        ) else {
+            return Ok(());
+        };
+        ids.remove(from);
+        ids.insert(index, id);
+        for (position, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE chats SET position = ?2 WHERE id = ?1",
+                params![id, position as i64],
+            )?;
+        }
+        tx.commit()
     }
 
     pub fn delete_chat(&self, id: i64) -> Result<()> {
@@ -1336,6 +1412,75 @@ mod tests {
         assert!(db.items(new, 100).unwrap().is_empty());
         assert_eq!(db.transcript(new).unwrap().unwrap().offset, 0);
         assert!(db.sessions(second).unwrap().iter().all(|s| !s.prompted));
+    }
+
+    /// The ids of the first project's chats, in order.
+    fn chat_order(db: &Db) -> Vec<i64> {
+        db.projects().unwrap()[0]
+            .chats
+            .iter()
+            .map(|chat| chat.id)
+            .collect()
+    }
+
+    #[test]
+    fn pins_and_moves_chats_within_their_group() {
+        let db = Db::open_in_memory().unwrap();
+        let [a, b, c, d] = [(); 4].map(|_| chat(&db));
+        assert_eq!(chat_order(&db), [d, c, b, a]);
+
+        // A chat takes the place of the one it is moved to, up or down.
+        db.move_chat(d, b).unwrap();
+        assert_eq!(chat_order(&db), [c, b, d, a]);
+        db.move_chat(a, c).unwrap();
+        assert_eq!(chat_order(&db), [a, c, b, d]);
+
+        db.set_pinned(b, true).unwrap();
+        db.set_pinned(d, true).unwrap();
+        assert_eq!(chat_order(&db), [d, b, a, c]);
+        db.move_chat(b, d).unwrap();
+        assert_eq!(chat_order(&db), [b, d, a, c]);
+        // Pinned and unpinned chats don't move into each other's group.
+        db.move_chat(a, d).unwrap();
+        assert_eq!(chat_order(&db), [b, d, a, c]);
+
+        let e = chat(&db);
+        assert_eq!(chat_order(&db), [b, d, e, a, c]);
+        db.set_pinned(b, false).unwrap();
+        assert_eq!(chat_order(&db), [d, b, e, a, c]);
+    }
+
+    #[test]
+    fn a_chat_keeps_the_title_it_was_given() {
+        let db = Db::open_in_memory().unwrap();
+        let id = chat(&db);
+        let session = record(&db, id, "s", "startup").session_id;
+        save_prompt_for_title_test(&db, session, "from the session");
+        let title = |db: &Db| db.projects().unwrap()[0].chats[0].title.clone();
+
+        db.rename_chat(id, "  mine ").unwrap();
+        assert_eq!(title(&db).as_deref(), Some("mine"));
+        db.rename_chat(id, " ").unwrap();
+        assert_eq!(title(&db).as_deref(), Some("from the session"));
+    }
+
+    #[test]
+    fn migrating_keeps_the_order_chats_were_shown_in() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version = 1;
+             INSERT INTO projects VALUES (1, '/p', 'p', 0), (2, '/q', 'q', 0);
+             INSERT INTO chats (id, project_id, agent, created_at, updated_at) VALUES
+                 (1, 1, 'claude', 0, 5), (2, 1, 'claude', 0, 9), (3, 1, 'claude', 0, 5),
+                 (4, 2, 'claude', 0, 1);",
+        )
+        .unwrap();
+        let db = Db::init(conn, None).unwrap();
+        let projects = db.projects().unwrap();
+        let order = |project: &Project| project.chats.iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(order(&projects[0]), [4]);
+        assert_eq!(order(&projects[1]), [2, 3, 1]);
     }
 
     #[test]
