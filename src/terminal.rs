@@ -4,7 +4,7 @@
 //! owns it. PTY output, key encoding, scrolling and resizes all go through
 //! that thread, and the UI only ever receives owned `Frame` snapshots.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -318,7 +318,50 @@ pub struct Terminal {
     pid: Arc<Mutex<Option<u32>>>,
     stop: mpsc::Sender<()>,
     reaped: smol::channel::Receiver<()>,
+    input: Cell<Input>,
+    status: Option<Status>,
     _updates: Task<()>,
+}
+
+/// What the user last typed into the CLI. A draft lives only in the CLI, so the
+/// CLI can't be stopped without losing it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Input {
+    /// Nothing since the CLI started.
+    Untouched,
+    /// Keys that may have left a draft. Any key counts, since one that types
+    /// nothing can still bring text back, as history and yank do.
+    Draft,
+    /// A draft and then Enter while the CLI was at rest, at this many seconds
+    /// since the Unix epoch.
+    Entered(i64),
+}
+
+impl Input {
+    /// Enter while the CLI works can queue the draft behind prompts queued
+    /// before it, which reach the transcript after it, so the draft stays one
+    /// until it's entered at rest, when nothing is queued.
+    fn key(self, enter: bool, at_rest: bool, now: i64) -> Self {
+        match (self, enter) {
+            (Input::Draft, true) if at_rest => Input::Entered(now),
+            (input, true) => input,
+            (_, false) => Input::Draft,
+        }
+    }
+
+    /// Whether what was typed has been sent, given when the session's last
+    /// prompt was. Enter doesn't always send it, as after a trailing backslash
+    /// in pi, and the CLI can start working without it, as pi does when it
+    /// compacts; only the prompt reaching the transcript shows it was sent.
+    /// shortcut: transcript times are in seconds, so a draft entered in the
+    /// same second as the prompt before it counts as sent.
+    pub fn sent(self, last_prompt: impl FnOnce() -> Option<i64>) -> bool {
+        match self {
+            Input::Untouched => true,
+            Input::Draft => false,
+            Input::Entered(at) => last_prompt().is_some_and(|prompt| prompt >= at),
+        }
+    }
 }
 
 pub struct Exited;
@@ -353,6 +396,7 @@ impl Terminal {
                         this.frame = Some(Arc::new(frame));
                     }
                     for status in statuses {
+                        this.status = status;
                         cx.emit(StatusChanged(status));
                     }
                     if exited && !this.exited {
@@ -375,6 +419,8 @@ impl Terminal {
             pid: pty.pid,
             stop: pty.stop,
             reaped: pty.reaped,
+            input: Cell::new(Input::Untouched),
+            status: None,
             _updates: task,
         }
     }
@@ -396,16 +442,26 @@ impl Terminal {
         }
     }
 
+    pub fn input(&self) -> Input {
+        self.input.get()
+    }
+
     pub fn key(&self, input: KeyInput) {
+        let enter = input.key == key::Key::Enter && input.mods.is_empty();
+        let at_rest = matches!(self.status, Some(Status::Idle | Status::Done));
+        let now = jiff::Timestamp::now().as_second();
+        self.input.set(self.input.get().key(enter, at_rest, now));
         self.tx.send(Msg::Key(input)).ok();
     }
 
     /// Text typed through an input method, sent as is.
     pub fn text(&self, text: String) {
+        self.input.set(Input::Draft);
         self.tx.send(Msg::Text(text)).ok();
     }
 
     pub fn paste(&self, text: String) {
+        self.input.set(Input::Draft);
         self.tx.send(Msg::Paste(text)).ok();
     }
 
@@ -811,6 +867,26 @@ mod tests {
     /// The first row of a frame as text, as the tests' scripts print it.
     fn row_text(frame: &Frame) -> String {
         frame.rows[0].iter().map(|run| run.text.as_str()).collect()
+    }
+
+    #[test]
+    fn keeps_a_draft_until_its_prompt_is_in_the_transcript() {
+        assert!(Input::Untouched.sent(|| None));
+        assert!(Input::Untouched.key(true, true, 10).sent(|| None));
+        // Keys that type nothing can bring text back, like Up and Ctrl+Y.
+        assert!(!Input::Untouched.key(false, true, 10).sent(|| Some(10)));
+        // Entered while the CLI works, a prompt queued before it can reach
+        // the transcript later.
+        assert_eq!(Input::Draft.key(true, false, 12), Input::Draft);
+        let entered = Input::Draft.key(true, true, 12);
+        assert!(entered.sent(|| Some(12)));
+        // Enter after a trailing backslash in pi, or on a menu, sends nothing,
+        // whatever the CLI does next.
+        assert!(!entered.sent(|| Some(11)));
+        assert!(!entered.sent(|| None));
+        // A second Enter on what was sent adds nothing to lose.
+        assert_eq!(entered.key(true, true, 20), entered);
+        assert_eq!(entered.key(false, true, 20), Input::Draft);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -36,6 +36,10 @@ const HISTORY_SHARE: f32 = 0.45;
 /// pauses.
 const CODEX_DELAY: Duration = Duration::from_millis(500);
 
+/// The most CLIs kept running. Past it, the chats shown longest ago stop once
+/// they're at rest, and opening one again resumes its session.
+const MAX_RUNNING: usize = 4;
+
 /// Said above a chat whose last session couldn't be resumed, and kept in that
 /// session's history.
 const TRANSCRIPT_GONE: &str = "This session's transcript is gone, so it couldn't be resumed. \
@@ -64,7 +68,8 @@ pub struct Workspace {
     sidebar: Entity<Sidebar>,
     db: Db,
     /// Open chats, including exited terminals and history whose CLI couldn't
-    /// start. Running processes keep running while another chat is shown.
+    /// start, the one shown longest ago first. Running processes keep running
+    /// while another chat is shown, up to `MAX_RUNNING`.
     chats: Vec<Chat>,
     /// The chat that is shown.
     active: Option<i64>,
@@ -74,6 +79,10 @@ pub struct Workspace {
     requested: Option<i64>,
     /// The chats whose last session is being read before their CLI starts.
     opening: HashSet<i64>,
+    /// The chats whose CLI was stopped to free what it held, until it has been
+    /// reaped, with the session it was in. Until then the CLI may still write
+    /// to that session, so nothing else may run in it.
+    stopping: HashMap<i64, (smol::channel::Receiver<()>, Option<i64>)>,
     /// The last Codex session lookup started. Each lookup marks the chats it
     /// looked at with this, so an older lookup that finishes later can be
     /// told apart from a newer one.
@@ -139,11 +148,14 @@ struct ChatTerminal {
 }
 
 impl Chat {
-    fn current_session(&self) -> Option<i64> {
+    fn running(&self) -> bool {
         self.terminal
             .as_ref()
-            .filter(|terminal| !terminal.exited)
-            .and(self.session)
+            .is_some_and(|terminal| !terminal.exited)
+    }
+
+    fn current_session(&self) -> Option<i64> {
+        self.session.filter(|_| self.running())
     }
 }
 
@@ -242,6 +254,7 @@ impl Workspace {
             // reports, the ones they were in, and the reads still under way.
             // The sessions they left before were read when they left them.
             let mut sessions = this.reading.clone();
+            sessions.extend(this.stopping.values().filter_map(|(_, session)| *session));
             // A chat being opened reads its last session on a thread of its
             // own, which isn't in `reading`, so it is read again here, the
             // way `open_chat` reads it.
@@ -281,6 +294,7 @@ impl Workspace {
                 .iter()
                 .filter_map(|chat| chat.terminal.as_ref())
                 .map(|terminal| terminal.terminal.read(cx).shutdown())
+                .chain(this.stopping.values().map(|(reaped, _)| reaped.clone()))
                 .collect();
             terminal::wait_reaped(reaped);
             for chat in &this.chats {
@@ -325,6 +339,7 @@ impl Workspace {
             active: None,
             requested: None,
             opening: HashSet::new(),
+            stopping: HashMap::new(),
             codex_lookup: 0,
             reports,
             codex_watcher,
@@ -622,6 +637,27 @@ impl Workspace {
                 return;
             }
         };
+        // A CLI that was stopped to free what it held opens again once it's
+        // gone, so the two never run in one session.
+        if let Some((reaped, _)) = self
+            .stopping
+            .get(&id)
+            .filter(|(reaped, _)| !reaped.is_closed())
+        {
+            let reaped = reaped.clone();
+            self.requested = Some(id);
+            cx.spawn_in(window, async move |this, cx| {
+                reaped.recv().await.ok();
+                this.update_in(cx, |this, window, cx| {
+                    if this.requested == Some(id) {
+                        this.open_chat(id, window, cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         // The chat exists, so this request is now the one that decides what
         // the view shows when the read below finishes.
         self.requested = Some(id);
@@ -924,7 +960,9 @@ impl Workspace {
                         this.reading.swap_remove(index);
                     }
                 }
-                this.refresh_after(&changed, cx)
+                this.refresh_after(&changed, cx);
+                // A prompt read just now can show a chat's draft was sent.
+                this.evict(cx);
             })
             .ok();
         })
@@ -975,6 +1013,7 @@ impl Workspace {
             self.read_sessions(vec![session], true, cx).detach();
         }
         self.sync_sidebar(cx);
+        self.evict(cx);
     }
 
     /// Marks the chat that is shown and what each running one is doing.
@@ -982,11 +1021,7 @@ impl Workspace {
         let running = self
             .chats
             .iter()
-            .filter(|chat| {
-                chat.terminal
-                    .as_ref()
-                    .is_some_and(|terminal| !terminal.exited)
-            })
+            .filter(|chat| chat.running())
             .map(|chat| {
                 // The sidebar shows a finished CLI as done until it is seen.
                 let status = match chat.status {
@@ -1102,6 +1137,9 @@ impl Workspace {
         self.chats
             .iter()
             .any(|chat| chat.id != chat_id && chat.current_session() == Some(session_id))
+            || self.stopping.iter().any(|(&id, (reaped, session))| {
+                id != chat_id && *session == Some(session_id) && !reaped.is_closed()
+            })
     }
 
     /// Shows a chat whose CLI wasn't started, with the reason above the
@@ -1174,22 +1212,134 @@ impl Workspace {
             .detach();
     }
 
-    fn stop_chat(&mut self, id: i64, cx: &mut Context<Self>) {
-        let Some(index) = self.chats.iter().position(|chat| chat.id == id) else {
-            return;
-        };
+    /// Kills the chat's CLI, if it has one, and closes the chat. The channel
+    /// closes once the CLI has been reaped.
+    fn stop_chat(
+        &mut self,
+        id: i64,
+        cx: &mut Context<Self>,
+    ) -> Option<smol::channel::Receiver<()>> {
+        let index = self.chats.iter().position(|chat| chat.id == id)?;
         let chat = self.chats.remove(index);
-        if let Some(terminal) = chat.terminal {
-            terminal.terminal.read(cx).shutdown();
-        }
+        let reaped = chat
+            .terminal
+            .map(|terminal| terminal.terminal.read(cx).shutdown());
         if self.active == Some(id) {
             self.active = None;
         }
         self.sync_sidebar(cx);
         cx.notify();
+        reaped
+    }
+
+    /// Whether a chat's CLI can be stopped without losing anything the user
+    /// would miss: it's at rest, not shown, has nothing unseen, holds no draft,
+    /// and can resume its session. One that never said what it's doing keeps
+    /// running.
+    fn idle(&self, chat: &Chat, cx: &App) -> bool {
+        let last_prompt = || match chat.session {
+            Some(session) => self.db.last_prompt(session),
+            None => Ok((false, None)),
+        };
+        self.active != Some(chat.id)
+            && !chat.unseen
+            && matches!(chat.status, Some(Status::Idle | Status::Done))
+            && chat.terminal.as_ref().is_some_and(|terminal| {
+                !terminal.exited
+                    && terminal
+                        .terminal
+                        .read(cx)
+                        .input()
+                        .sent(|| last_prompt().ok().and_then(|(_, at)| at))
+            })
+            // Without its transcript, a session with a prompt can't be resumed,
+            // and the CLI holds the only copy of it. Claude deletes transcripts
+            // that went untouched for 30 days.
+            && (chat.transcript.as_ref().is_some_and(|path| path.exists())
+                || matches!(last_prompt(), Ok((false, _))))
+    }
+
+    /// Stops the CLIs of the idle chats shown longest ago while more than
+    /// `MAX_RUNNING` run.
+    fn evict(&mut self, cx: &mut Context<Self>) {
+        let running = self.chats.iter().filter(|chat| chat.running()).count();
+        let evicted: Vec<_> = self
+            .chats
+            .iter()
+            .filter(|chat| self.idle(chat, cx))
+            .take(running.saturating_sub(MAX_RUNNING))
+            .map(|chat| chat.id)
+            .collect();
+        for id in evicted {
+            self.suspend(id, cx);
+        }
+    }
+
+    /// Stops a chat's CLI after recording the session it's in, which opening
+    /// the chat again resumes, and reads that session once the CLI is gone.
+    fn suspend(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(chat) = self.chats.iter().find(|chat| chat.id == id) else {
+            return;
+        };
+        let report = chat.report.clone();
+        // Codex doesn't report its sessions, so the one it's in is looked for
+        // among its open files before it goes. That's a few reads under /proc,
+        // which a chat stopping now and then can afford on this thread.
+        let codex = chat
+            .terminal
+            .as_ref()
+            .filter(|_| chat.agent == Agent::Codex)
+            .and_then(|terminal| {
+                terminal
+                    .terminal
+                    .read(cx)
+                    .with_pid(sessions::codex_session_of)
+            })
+            .and_then(|path| Some((transcript::session_id(Agent::Codex, &path)?, path)));
+        // A queued report can say the CLI went into another session.
+        self.read_reports(&report, cx);
+        if let Some((agent_id, path)) = codex {
+            self.record_session(id, &agent_id, &path, None, cx);
+        }
+        let Some(session) = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .map(|chat| chat.session)
+        else {
+            return;
+        };
+        let Some(reaped) = self.stop_chat(id, cx) else {
+            return;
+        };
+        self.stopping.insert(id, (reaped.clone(), session));
+        cx.spawn(async move |this, cx| {
+            // What the CLI writes as it exits is part of the session.
+            reaped.recv().await.ok();
+            this.update(cx, |this, cx| {
+                // The chat may have been opened and stopped again since.
+                if this
+                    .stopping
+                    .get(&id)
+                    .is_some_and(|(stopping, _)| stopping.same_channel(&reaped))
+                {
+                    this.stopping.remove(&id);
+                }
+                this.read_sessions(session.into_iter().collect(), false, cx)
+                    .detach();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn activate(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        // The chats stay in the order they were last shown in, which is the
+        // order idle ones are stopped in.
+        if let Some(index) = self.chats.iter().position(|chat| chat.id == id) {
+            let chat = self.chats.remove(index);
+            self.chats.push(chat);
+        }
         for chat in &mut self.chats {
             let shown = chat.id == id;
             if let Some(terminal) = &chat.terminal {
@@ -1205,6 +1355,7 @@ impl Workspace {
         self.active = Some(id);
         self.requested = Some(id);
         self.sync_sidebar(cx);
+        self.evict(cx);
         cx.notify();
     }
 }

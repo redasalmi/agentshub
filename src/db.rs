@@ -858,6 +858,18 @@ impl Db {
         Ok(())
     }
 
+    /// Whether a session was prompted, and when its last prompt with a time
+    /// was sent, in seconds since the Unix epoch.
+    pub fn last_prompt(&self, session_id: i64) -> Result<(bool, Option<i64>)> {
+        self.read().query_row(
+            "SELECT prompted,
+                    (SELECT MAX(at) FROM items WHERE session_id = ?1 AND kind = 'user')
+             FROM sessions WHERE id = ?1",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
     /// Writes a consistent copy of the database, outside its own folder:
     /// replacing a file there could replace the database or its write-ahead
     /// log.
@@ -1412,6 +1424,19 @@ mod tests {
         assert!(db.items(new, 100).unwrap().is_empty());
         assert_eq!(db.transcript(new).unwrap().unwrap().offset, 0);
         assert!(db.sessions(second).unwrap().iter().all(|s| !s.prompted));
+    }
+
+    #[test]
+    fn a_prompt_without_a_time_still_counts_as_prompted() {
+        let db = Db::open_in_memory().unwrap();
+        let session = record(&db, chat(&db), "a", "startup").session_id;
+        assert_eq!(db.last_prompt(session).unwrap(), (false, None));
+
+        let mut read = transcript::Read::default();
+        read.prompted = true;
+        push(&mut read, item("1", None, "hello"));
+        db.save_read_state(session, &read).unwrap();
+        assert_eq!(db.last_prompt(session).unwrap(), (true, None));
     }
 
     /// The ids of the first project's chats, in order.
