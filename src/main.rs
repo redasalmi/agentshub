@@ -29,6 +29,9 @@ fn main() {
                     title: Some("Agents Hub".into()),
                     ..Default::default()
                 }),
+                // Wayland has no per-window icon: the compositor looks up
+                // agentshub.desktop by this id and uses its Icon=.
+                app_id: Some("agentshub".into()),
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| {

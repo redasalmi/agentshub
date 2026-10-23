@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Agents Hub
+Exec=agentshub
+Icon=agentshub
+Terminal=false
+Categories=Development;
+StartupWMClass=agentshub
