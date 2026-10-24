@@ -173,7 +173,7 @@ enum Msg {
     Resize(GridSize),
     Visible(bool),
     Colors(Colors),
-    Exited,
+    Exited(bool),
     Shutdown,
 }
 
@@ -185,7 +185,7 @@ enum Update {
         text: String,
         primary: bool,
     },
-    Exited,
+    Exited(bool),
 }
 
 /// A started CLI process, before it is attached to the UI.
@@ -252,12 +252,15 @@ impl Pty {
         thread::spawn(move || {
             let _reaped_tx = reaped_tx;
             let mut child = child;
-            loop {
+            let success = loop {
                 {
                     let mut pid = reaper_pid.lock().unwrap();
-                    if !matches!(child.try_wait(), Ok(None)) {
-                        *pid = None;
-                        break;
+                    match child.try_wait() {
+                        Ok(None) => {}
+                        status => {
+                            *pid = None;
+                            break matches!(status, Ok(Some(status)) if status.success());
+                        }
                     }
                 }
                 match stop_rx.recv_timeout(EXIT_POLL) {
@@ -270,12 +273,12 @@ impl Pty {
                             }
                         }
                         child.wait().ok();
-                        break;
+                        break false;
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
-            }
-            exit_tx.send(Msg::Exited).ok();
+            };
+            exit_tx.send(Msg::Exited(success)).ok();
         });
 
         let failed_tx = updates_tx.clone();
@@ -284,7 +287,7 @@ impl Pty {
             if let Err(err) = run(rx, pair.master, writer, colors, updates_tx) {
                 eprintln!("terminal thread failed: {err:#}");
                 // The CLI gets killed below and nothing reports it anymore.
-                failed_tx.send_blocking(Update::Exited).ok();
+                failed_tx.send_blocking(Update::Exited(false)).ok();
             }
             run_stop_tx.send(()).ok();
         });
@@ -433,7 +436,11 @@ impl Input {
     }
 }
 
-pub struct Exited;
+pub struct Exited {
+    /// Whether the CLI exited with status 0, rather than failing or being
+    /// killed.
+    pub success: bool,
+}
 
 impl EventEmitter<Exited> for Terminal {}
 
@@ -451,7 +458,7 @@ impl Terminal {
                 let mut frame = None;
                 let mut statuses = Vec::new();
                 let mut copies = Vec::new();
-                let mut exited = false;
+                let mut exited = None;
                 for update in
                     std::iter::once(update).chain(std::iter::from_fn(|| updates.try_recv().ok()))
                 {
@@ -459,7 +466,7 @@ impl Terminal {
                         Update::Frame(next) => frame = Some(next),
                         Update::Status(status) => statuses.push(status),
                         Update::Copy { text, primary } => copies.push((text, primary)),
-                        Update::Exited => exited = true,
+                        Update::Exited(success) => exited = Some(success),
                     }
                 }
                 let updated = this.update(cx, |this, cx| {
@@ -479,9 +486,11 @@ impl Terminal {
                             cx.write_to_clipboard(item);
                         }
                     }
-                    if exited && !this.exited {
+                    if let Some(success) = exited
+                        && !this.exited
+                    {
                         this.exited = true;
-                        cx.emit(Exited);
+                        cx.emit(Exited { success });
                     }
                     cx.notify();
                 });
@@ -650,7 +659,7 @@ fn run(
     let mut input = Vec::new();
     let mut dirty = false;
     let mut visible = true;
-    let mut exiting = false;
+    let mut exiting = None;
     let mut last_frame = Instant::now() - FRAME_INTERVAL;
 
     loop {
@@ -886,10 +895,10 @@ fn run(
                 set_colors(&mut terminal, colors)?;
                 dirty = true;
             }
-            Some(Msg::Exited) => {
+            Some(Msg::Exited(success)) => {
                 // What the CLI printed last is part of what it did, so it goes
                 // out before the news that it exited.
-                exiting = true;
+                exiting = Some(success);
             }
             Some(Msg::Shutdown) => break,
             None => {}
@@ -912,7 +921,7 @@ fn run(
             input.clear();
         }
 
-        if exiting {
+        if let Some(success) = exiting.take() {
             if dirty && visible {
                 let frame = build_frame(&mut render_state, &mut rows, &mut cells, &terminal)?;
                 if updates.send_blocking(Update::Frame(frame)).is_err() {
@@ -921,8 +930,7 @@ fn run(
                 dirty = false;
                 last_frame = Instant::now();
             }
-            exiting = false;
-            updates.send_blocking(Update::Exited).ok();
+            updates.send_blocking(Update::Exited(success)).ok();
         }
 
         if dirty && visible && last_frame.elapsed() >= FRAME_INTERVAL {
@@ -1329,7 +1337,7 @@ mod tests {
                     }
                 }
                 Update::Copy { .. } => {}
-                Update::Exited => panic!("exited early"),
+                Update::Exited(_) => panic!("exited early"),
             }
         }
         assert_eq!(status, Some(Some(Status::Working)));
@@ -1694,7 +1702,10 @@ mod tests {
                     pid = pid.or(row_text(&frame).trim().parse::<u32>().ok());
                 }
                 Update::Status(_) | Update::Copy { .. } => {}
-                Update::Exited => break,
+                Update::Exited(success) => {
+                    assert!(success, "sh exited with an error");
+                    break;
+                }
             }
         }
         // The output may reach the terminal after the reaper noticed the exit.

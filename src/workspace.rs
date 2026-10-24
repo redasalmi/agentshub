@@ -160,6 +160,11 @@ struct Chat {
     /// started earlier must not record its result after a newer one, or it
     /// would move the chat back to a session it has left.
     codex_lookup: u64,
+    /// Whether that lookup is still running.
+    codex_pending: bool,
+    /// Whether the user quit the CLI, so the chat closes once that lookup has
+    /// recorded what it found.
+    closing: bool,
     /// Something about the session to show above the terminal, without a
     /// restart button.
     notice: Option<SharedString>,
@@ -857,6 +862,7 @@ impl Workspace {
                 continue;
             };
             chat.codex_lookup = lookup;
+            chat.codex_pending = true;
             chats.push((chat.id, chat.report.clone(), pid));
         }
         if chats.is_empty() {
@@ -898,6 +904,18 @@ impl Workspace {
                 }
                 if recorded {
                     this.refresh(cx);
+                }
+                let mut closing = Vec::new();
+                for chat in &mut this.chats {
+                    if chat.codex_pending && chat.codex_lookup == lookup {
+                        chat.codex_pending = false;
+                        if chat.closing {
+                            closing.push(chat.id);
+                        }
+                    }
+                }
+                for id in closing {
+                    this.close_chat(id, cx);
                 }
             })
             .ok();
@@ -1107,9 +1125,12 @@ impl Workspace {
                 let view = cx.new(|cx| TerminalView::new(terminal.clone(), cx));
                 // Hidden terminals don't need to build frames.
                 terminal.read(cx).set_visible(false);
-                let exited = cx.subscribe(&terminal, move |this, _, _: &Exited, cx| {
-                    this.chat_exited(id, cx)
-                });
+                let exited = cx.subscribe(
+                    &terminal,
+                    move |this, _, &Exited { success }: &Exited, cx| {
+                        this.chat_exited(id, success, cx)
+                    },
+                );
                 let status = cx.subscribe(
                     &terminal,
                     move |this, _, StatusChanged(status): &StatusChanged, cx| {
@@ -1174,6 +1195,8 @@ impl Workspace {
             status: None,
             unseen: false,
             codex_lookup: 0,
+            codex_pending: false,
+            closing: false,
             notice: None,
             fresh_on_restart: false,
         });
@@ -1235,9 +1258,10 @@ impl Workspace {
         }
     }
 
-    /// Archives the last session, retaining the terminal's exit diagnostics
-    /// until the user restarts or deletes the chat.
-    fn chat_exited(&mut self, id: i64, cx: &mut Context<Self>) {
+    /// Archives the last session. A CLI the user quit closes its chat;
+    /// otherwise the terminal's exit diagnostics stay until the user restarts
+    /// or deletes the chat.
+    fn chat_exited(&mut self, id: i64, success: bool, cx: &mut Context<Self>) {
         let Some(index) = self.chats.iter().position(|chat| chat.id == id) else {
             return;
         };
@@ -1247,6 +1271,22 @@ impl Workspace {
         let report = self.chats[index].report.clone();
         self.read_reports(&report, cx);
         let chat = &mut self.chats[index];
+        // A CLI that quits by itself without failing, as on a startup error,
+        // keeps its terminal too, since only typing quits it otherwise.
+        let quit = success
+            && chat.terminal.as_ref().is_some_and(|terminal| {
+                terminal.terminal.read(cx).input() != terminal::Input::Untouched
+            });
+        if quit {
+            // A running Codex lookup may still find the session the CLI was
+            // in, and nothing else would record it.
+            if chat.codex_pending {
+                chat.closing = true;
+            } else {
+                self.close_chat(id, cx);
+            }
+            return;
+        }
         if let Some(terminal) = &mut chat.terminal {
             terminal.exited = true;
         }
@@ -1263,6 +1303,18 @@ impl Workspace {
             .update(cx, |history, cx| history.refresh(None, &[], cx));
         self.sync_sidebar(cx);
         cx.notify();
+        self.read_sessions(session.into_iter().collect(), false, cx)
+            .detach();
+    }
+
+    /// Closes a chat whose CLI the user quit, and reads its last session.
+    fn close_chat(&mut self, id: i64, cx: &mut Context<Self>) {
+        let session = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .and_then(|chat| chat.session);
+        self.stop_chat(id, cx);
         self.read_sessions(session.into_iter().collect(), false, cx)
             .detach();
     }
