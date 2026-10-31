@@ -1,5 +1,5 @@
 //! The app's fonts, its light and dark themes, and the colors the theme files
-//! have no place for: the simple-base roles the app draws with itself, and the
+//! have no place for: the extra palette roles the app draws with itself, and the
 //! terminals' ANSI palette.
 
 use std::borrow::Cow;
@@ -39,41 +39,41 @@ const fn hex(rgb: u32) -> RgbColor {
 /// Black, red, green, yellow, blue, magenta, cyan and white, then their bright
 /// variants. On the light background, white is a grey that stays readable.
 const LIGHT_ANSI: [RgbColor; 16] = [
-    hex(0x23211C),
-    hex(0xA5301D),
-    hex(0x2B6A44),
-    hex(0x85580A),
-    hex(0x2A547D),
-    hex(0x8A3F7A),
-    hex(0x1F6A6E),
-    hex(0x8E8676),
-    hex(0x6B655A),
-    hex(0xB8402B),
-    hex(0x2F7A4D),
-    hex(0xB07A12),
-    hex(0x3A6C9C),
-    hex(0x9C4F8C),
-    hex(0x2B7F84),
-    hex(0xC9C0AE),
+    hex(0x0F1011),
+    hex(0xC93B3B),
+    hex(0x1E7F35),
+    hex(0x8A6200),
+    hex(0x4F52D6),
+    hex(0x7C3AED),
+    hex(0x007A88),
+    hex(0x8A8F98),
+    hex(0x62666D),
+    hex(0xEB5757),
+    hex(0x27A644),
+    hex(0xB88600),
+    hex(0x6366F1),
+    hex(0x8B5CF6),
+    hex(0x02A3B5),
+    hex(0xC8CCD2),
 ];
 
 pub const DARK_ANSI: [RgbColor; 16] = [
-    hex(0x4A463D),
-    hex(0xF28C79),
-    hex(0x8FD0A6),
-    hex(0xE9BD62),
-    hex(0x8FB8E0),
-    hex(0xD3A0C8),
-    hex(0x8CCFCB),
-    hex(0xC6BFB0),
-    hex(0x6E6A5E),
-    hex(0xF7A898),
-    hex(0xABDEBD),
-    hex(0xF0CE85),
-    hex(0xABCBEA),
-    hex(0xE0B9D7),
-    hex(0xA9DDDA),
-    hex(0xF0EBE0),
+    hex(0x23252A),
+    hex(0xEB5757),
+    hex(0x3FBF5E),
+    hex(0xF2C94C),
+    hex(0x818CF8),
+    hex(0xA78BFA),
+    hex(0x02B8CC),
+    hex(0xD0D6E0),
+    hex(0x62666D),
+    hex(0xF27A7A),
+    hex(0x5FD17A),
+    hex(0xF7D978),
+    hex(0xA5B4FC),
+    hex(0xC4B5FD),
+    hex(0x4FD6E6),
+    hex(0xF7F8F8),
 ];
 
 /// Loads the fonts and themes. `follow_system` then puts the theme in the
@@ -153,7 +153,7 @@ pub struct Tint {
     pub soft: Hsla,
 }
 
-/// The simple-base roles the theme files have no place for.
+/// The palette roles the theme files have no place for.
 pub struct Palette {
     /// The fill one step further than `muted`: tracks, keys, pressed rows.
     pub strong: Hsla,
@@ -182,29 +182,29 @@ fn tint(base: u32, text: u32, soft: u32) -> Tint {
 }
 
 static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette {
-    strong: color(0xEDE6D8),
-    secondary_foreground: color(0x555047),
-    border_strong: color(0x8E8676),
-    accent: color(0x1F4D3A),
-    accent_soft: color(0xDDE9E0),
-    on_accent: color(0xFDFBF6),
-    info: tint(0x3A6C9C, 0x2A547D, 0xDDE6EF),
-    warning: tint(0xB07A12, 0x85580A, 0xF5E6C6),
-    success: tint(0x2F7A4D, 0x2B6A44, 0xDCEBE0),
-    danger: tint(0xB8402B, 0xA5301D, 0xF7DCD4),
+    strong: color(0xEDEEF0),
+    secondary_foreground: color(0x3C4049),
+    border_strong: color(0x8A8F98),
+    accent: color(0x5F6600),
+    accent_soft: color(0xF6F9C6),
+    on_accent: color(0xFFFFFF),
+    info: tint(0x02B8CC, 0x007A88, 0xDDF4F7),
+    warning: tint(0xE0A800, 0x8A6200, 0xFBF1D4),
+    success: tint(0x27A644, 0x1E7F35, 0xE1F4E5),
+    danger: tint(0xEB5757, 0xC93B3B, 0xFCE6E6),
 });
 
 static DARK: LazyLock<Palette> = LazyLock::new(|| Palette {
-    strong: color(0x332F28),
-    secondary_foreground: color(0xC6BFB0),
-    border_strong: color(0x6E6A5E),
-    accent: color(0x93D1B0),
-    accent_soft: color(0x1F3A2D),
-    on_accent: color(0x12110E),
-    info: tint(0x8FB8E0, 0x8FB8E0, 0x1D2C3B),
-    warning: tint(0xE9BD62, 0xE9BD62, 0x3D3016),
-    success: tint(0x8FD0A6, 0x8FD0A6, 0x1E3526),
-    danger: tint(0xF28C79, 0xF28C79, 0x45221B),
+    strong: color(0x23252A),
+    secondary_foreground: color(0xD0D6E0),
+    border_strong: color(0x62666D),
+    accent: color(0xE4F222),
+    accent_soft: color(0x2D3013),
+    on_accent: color(0x08090A),
+    info: tint(0x02B8CC, 0x02B8CC, 0x0E282B),
+    warning: tint(0xF2C94C, 0xF2C94C, 0x2F2A19),
+    success: tint(0x27A644, 0x3FBF5E, 0x122518),
+    danger: tint(0xEB5757, 0xEB5757, 0x2E1A1B),
 });
 
 /// The palette of the mode the theme is in.
