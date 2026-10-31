@@ -70,11 +70,8 @@ pub fn open_window(workspace: Option<Entity<Workspace>>, cx: &mut App) -> Entity
         window
             .observe_window_appearance(appearance::follow_system)
             .detach();
-        match workspace {
+        let workspace = match workspace {
             Some(workspace) => {
-                // The system may have changed mode while the window was
-                // closed, and the observer only fires on later changes.
-                appearance::follow_system(window, cx);
                 workspace.update(cx, |workspace, cx| {
                     workspace.set_hidden(false, cx);
                     workspace.focus_chat(window, cx);
@@ -82,10 +79,15 @@ pub fn open_window(workspace: Option<Entity<Workspace>>, cx: &mut App) -> Entity
                 workspace
             }
             None => {
-                appearance::init(window, cx);
+                appearance::init(cx);
                 cx.new(|cx| Workspace::new(window, cx))
             }
-        }
+        };
+        // The workspace loads the settings that pick the mode the first
+        // time. Later, the system may have changed mode while the window was
+        // closed, and the observer only fires on later changes.
+        appearance::follow_system(window, cx);
+        workspace
     })
     .expect("failed to open window");
     workspace

@@ -9,6 +9,7 @@ use gpui_kit::*;
 use libghostty_vt::style::RgbColor;
 
 use crate::agent::Agent;
+use crate::settings::{Appearance, Settings};
 use crate::terminal::Colors;
 use crate::terminal_view::rgb_color;
 
@@ -68,8 +69,9 @@ pub const DARK_ANSI: [RgbColor; 16] = [
     hex(0xF1F5F2),
 ];
 
-/// Loads the fonts and themes, in the mode the system is in.
-pub fn init(window: &mut Window, cx: &mut App) {
+/// Loads the fonts and themes. `follow_system` then puts the theme in the
+/// mode the settings ask for, once they're loaded.
+pub fn init(cx: &mut App) {
     cx.text_system()
         .add_fonts(FONTS.iter().map(|font| Cow::Borrowed(*font)).collect())
         .expect("bundled fonts are valid");
@@ -82,7 +84,6 @@ pub fn init(window: &mut Window, cx: &mut App) {
             theme.light_theme = Rc::new(config);
         }
     }
-    follow_system(window, cx);
 }
 
 /// The system appearance the theme last followed.
@@ -90,10 +91,9 @@ struct SystemAppearance(WindowAppearance);
 
 impl Global for SystemAppearance {}
 
-/// Puts the theme in the system's mode if the system changed mode since the
-/// theme last followed it. A window opened again from the tray calls this, as
-/// it misses the changes made while it was closed; the mode the user picked
-/// stays when the system didn't change.
+/// Puts the theme in the mode the settings ask for, if the system changed
+/// mode since the theme last followed it. A window opened again from the tray
+/// calls this, as it misses the changes made while it was closed.
 pub fn follow_system(window: &mut Window, cx: &mut App) {
     let appearance = window.appearance();
     if cx
@@ -103,16 +103,25 @@ pub fn follow_system(window: &mut Window, cx: &mut App) {
         return;
     }
     cx.set_global(SystemAppearance(appearance));
-    Theme::sync_system_appearance(Some(window), cx);
+    apply(window, cx);
 }
 
-pub fn toggle(window: &mut Window, cx: &mut App) {
-    let mode = if cx.theme().is_dark() {
-        ThemeMode::Light
+/// Puts the theme in the mode the settings ask for.
+pub fn apply(window: &mut Window, cx: &mut App) {
+    match cx.global::<Settings>().appearance {
+        Appearance::System => Theme::sync_system_appearance(Some(window), cx),
+        Appearance::Light => Theme::change(ThemeMode::Light, Some(window), cx),
+        Appearance::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+    }
+}
+
+/// The mode the theme isn't in, which the sidebar's button switches to.
+pub fn other(cx: &App) -> Appearance {
+    if cx.theme().is_dark() {
+        Appearance::Light
     } else {
-        ThemeMode::Dark
-    };
-    Theme::change(mode, Some(window), cx);
+        Appearance::Dark
+    }
 }
 
 /// The color that marks an agent's sessions.

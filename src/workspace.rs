@@ -8,6 +8,7 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
@@ -22,7 +23,7 @@ use crate::db::{self, Db};
 use crate::history::History;
 use crate::reports::{self, Reports};
 use crate::sessions;
-use crate::settings::Settings;
+use crate::settings::{Appearance, Settings};
 use crate::sidebar::{Lamp, Sidebar, SidebarEvent, lamp};
 use crate::status::Status;
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
@@ -239,6 +240,9 @@ impl Workspace {
                 SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
                 SidebarEvent::Export => this.export_database(window, cx),
                 SidebarEvent::OpenSettings => this.show_settings(true, window, cx),
+                SidebarEvent::SetAppearance(appearance) => {
+                    this.set_appearance(*appearance, window, cx)
+                }
             });
 
         let (reports, reported) = Reports::new();
@@ -1530,6 +1534,15 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Saves the theme's mode and puts the theme in it.
+    fn set_appearance(&mut self, value: Appearance, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = Settings::set_appearance(&self.db, value, cx) {
+            setting_not_saved(err, window, cx);
+        }
+        appearance::apply(window, cx);
+        cx.notify();
+    }
+
     /// Focuses the shown chat's CLI, or the workspace if it has none running
     /// or the settings cover it. A terminal out of the rendered tree can't
     /// hold the focus: keys would skip the workspace's bindings.
@@ -1791,9 +1804,20 @@ fn render_broken(reason: SharedString, cx: &Context<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
+fn setting_not_saved(err: rusqlite::Error, window: &mut Window, cx: &mut App) {
+    eprintln!("can't save the settings: {err}");
+    window.push_notification(
+        format!("Couldn't save the setting, so it lasts until Agents Hub quits: {err}"),
+        cx,
+    );
+}
+
 fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
     let theme = cx.theme();
-    let close_to_tray = cx.global::<Settings>().close_to_tray;
+    let Settings {
+        close_to_tray,
+        appearance: current,
+    } = *cx.global::<Settings>();
     v_flex()
         .size_full()
         .p_8()
@@ -1818,6 +1842,22 @@ fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
         .child(
             v_flex()
                 .max_w(px(440.))
+                .gap_3()
+                .child(div().font_medium().child("Appearance"))
+                .child(
+                    RadioGroup::horizontal("appearance")
+                        .children(Appearance::ALL.map(Appearance::label))
+                        .selected_index(
+                            Appearance::ALL.iter().position(|choice| *choice == current),
+                        )
+                        .on_click(cx.listener(|this, index: &usize, window, cx| {
+                            this.set_appearance(Appearance::ALL[*index], window, cx)
+                        })),
+                ),
+        )
+        .child(
+            v_flex()
+                .max_w(px(440.))
                 .gap_2()
                 .child(
                     Checkbox::new("close-to-tray")
@@ -1825,14 +1865,7 @@ fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
                         .checked(close_to_tray)
                         .on_click(cx.listener(|this, checked: &bool, window, cx| {
                             if let Err(err) = Settings::set_close_to_tray(&this.db, *checked, cx) {
-                                eprintln!("can't save the settings: {err}");
-                                window.push_notification(
-                                    format!(
-                                        "Couldn't save the setting, so it lasts until Agents Hub \
-                                         quits: {err}"
-                                    ),
-                                    cx,
-                                );
+                                setting_not_saved(err, window, cx);
                             }
                             cx.notify();
                         })),

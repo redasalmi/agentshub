@@ -470,6 +470,25 @@ impl Db {
         Ok(())
     }
 
+    /// A setting that is one of several words, or `None` while it has its
+    /// default.
+    pub fn text(&self, key: &str) -> Result<Option<String>> {
+        self.read()
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+    }
+
+    pub fn set_text(&self, key: &str, value: &str) -> Result<()> {
+        self.write().execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// Moves a chat to where `to` is, among the chats of its project that are
     /// pinned as it is. Nothing moves when `to` isn't one of them.
     pub fn move_chat(&self, id: i64, to: i64) -> Result<()> {
@@ -1271,6 +1290,15 @@ mod tests {
         db.set_flag("x", true).unwrap();
         db.set_flag("x", false).unwrap();
         assert_eq!(db.flag("x").unwrap(), Some(false));
+    }
+
+    #[test]
+    fn texts_keep_their_last_value() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.text("x").unwrap(), None);
+        db.set_text("x", "light").unwrap();
+        db.set_text("x", "dark").unwrap();
+        assert_eq!(db.text("x").unwrap().as_deref(), Some("dark"));
     }
 
     #[test]

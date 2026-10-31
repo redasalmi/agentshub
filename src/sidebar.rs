@@ -12,6 +12,7 @@ use gpui_kit::*;
 use crate::agent::Agent;
 use crate::appearance;
 use crate::db::{self, Chat, Project};
+use crate::settings::Appearance;
 use crate::status::{Need, Status};
 
 /// How often the ages of the chats are brought up to date.
@@ -37,6 +38,8 @@ pub enum SidebarEvent {
     /// Write a copy of the database where the user asks.
     Export,
     OpenSettings,
+    /// Put the theme in this mode and keep it there.
+    SetAppearance(Appearance),
 }
 
 pub struct Sidebar {
@@ -383,7 +386,9 @@ impl Render for Sidebar {
                             } else {
                                 "Use dark theme"
                             })
-                            .on_click(|_, window, cx| appearance::toggle(window, cx)),
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(SidebarEvent::SetAppearance(appearance::other(cx)))
+                            })),
                     ),
             )
             .child(
