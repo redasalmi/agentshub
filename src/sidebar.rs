@@ -36,6 +36,7 @@ pub enum SidebarEvent {
     DeleteChat(i64),
     /// Write a copy of the database where the user asks.
     Export,
+    OpenSettings,
 }
 
 pub struct Sidebar {
@@ -423,6 +424,16 @@ impl Render for Sidebar {
                             .icon(IconName::HardDrive)
                             .tooltip("Export a copy of the database")
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::Export))),
+                    )
+                    .child(
+                        Button::new("settings")
+                            .ghost()
+                            .small()
+                            .icon(ExtraIcon::Settings)
+                            .tooltip("Settings")
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenSettings)),
+                            ),
                     ),
             )
     }

@@ -20,7 +20,7 @@ use crate::transcript::{self, Kind};
 
 /// Each migration takes the database from the version before it, as counted
 /// by `PRAGMA user_version`, to the next.
-const MIGRATIONS: [&str; 2] = [
+const MIGRATIONS: [&str; 3] = [
     r#"
 CREATE TABLE projects (
     id         INTEGER PRIMARY KEY,
@@ -122,6 +122,13 @@ UPDATE chats SET position = (
     WHERE o.project_id = chats.project_id
       AND (o.updated_at, o.id) > (chats.updated_at, chats.id)
 );
+"#,
+    r#"
+-- The app's settings, by name. A setting without a row has its default.
+CREATE TABLE settings (
+    key   TEXT PRIMARY KEY,
+    value ANY NOT NULL
+) WITHOUT ROWID;
 "#,
 ];
 
@@ -441,6 +448,24 @@ impl Db {
              )
              WHERE id = ?1",
             params![id, pinned],
+        )?;
+        Ok(())
+    }
+
+    /// A setting that is on or off, or `None` while it has its default.
+    pub fn flag(&self, key: &str) -> Result<Option<bool>> {
+        self.read()
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+    }
+
+    pub fn set_flag(&self, key: &str, value: bool) -> Result<()> {
+        self.write().execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
         )?;
         Ok(())
     }
@@ -1237,6 +1262,15 @@ mod tests {
         drop(db);
         assert_eq!(Db::open(&path).unwrap().sessions(chat).unwrap().len(), 1);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn flags_keep_their_last_value() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.flag("x").unwrap(), None);
+        db.set_flag("x", true).unwrap();
+        db.set_flag("x", false).unwrap();
+        assert_eq!(db.flag("x").unwrap(), Some(false));
     }
 
     #[test]

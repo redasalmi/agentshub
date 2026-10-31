@@ -82,6 +82,27 @@ pub fn init(window: &mut Window, cx: &mut App) {
             theme.light_theme = Rc::new(config);
         }
     }
+    follow_system(window, cx);
+}
+
+/// The system appearance the theme last followed.
+struct SystemAppearance(WindowAppearance);
+
+impl Global for SystemAppearance {}
+
+/// Puts the theme in the system's mode if the system changed mode since the
+/// theme last followed it. A window opened again from the tray calls this, as
+/// it misses the changes made while it was closed; the mode the user picked
+/// stays when the system didn't change.
+pub fn follow_system(window: &mut Window, cx: &mut App) {
+    let appearance = window.appearance();
+    if cx
+        .try_global::<SystemAppearance>()
+        .is_some_and(|last| last.0 == appearance)
+    {
+        return;
+    }
+    cx.set_global(SystemAppearance(appearance));
     Theme::sync_system_appearance(Some(window), cx);
 }
 

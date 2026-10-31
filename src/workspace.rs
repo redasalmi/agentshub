@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, IconName, Sizable as _, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -21,6 +22,7 @@ use crate::db::{self, Db};
 use crate::history::History;
 use crate::reports::{self, Reports};
 use crate::sessions;
+use crate::settings::Settings;
 use crate::sidebar::{Lamp, Sidebar, SidebarEvent, lamp};
 use crate::status::Status;
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
@@ -106,7 +108,6 @@ pub struct Workspace {
     _sidebar_events: Subscription,
     _report_events: Task<()>,
     _codex_events: Task<()>,
-    _appearance: Subscription,
     _theme: Subscription,
     new_chat_select: Option<Subscription>,
     /// Why the workspace can't be used: the database didn't open, or another
@@ -124,6 +125,10 @@ pub struct Workspace {
     shells: HashMap<PathBuf, Shell>,
     /// Whether the shown chat's project shell shows under it.
     shell_shown: bool,
+    /// Whether the settings show in place of the chat.
+    settings_shown: bool,
+    /// Whether the window is closed to the tray, so no terminal is shown.
+    hidden: bool,
     /// Holds the focus when nothing in the workspace does, so its key
     /// bindings still reach it.
     focus_handle: FocusHandle,
@@ -206,6 +211,7 @@ impl Workspace {
             }
         };
 
+        cx.set_global(Settings::load(&db));
         let sidebar = cx.new(Sidebar::new);
         let sidebar_events =
             cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| match event {
@@ -232,6 +238,7 @@ impl Workspace {
                 }
                 SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
                 SidebarEvent::Export => this.export_database(window, cx),
+                SidebarEvent::OpenSettings => this.show_settings(true, window, cx),
             });
 
         let (reports, reported) = Reports::new();
@@ -279,8 +286,8 @@ impl Workspace {
             }
         });
 
-        // Closing the window releases the workspace before the app quits, and
-        // quitting releases it too.
+        // The workspace outlives its window (see `tray`), so it's released
+        // when the app quits.
         cx.on_release(|this, cx| {
             // Nothing can be scheduled on a released workspace, so what the
             // CLIs wrote last is read here: the sessions in their queued
@@ -358,9 +365,6 @@ impl Workspace {
         })
         .detach();
 
-        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            Theme::sync_system_appearance(Some(window), cx)
-        });
         let theme = cx.observe_global::<Theme>(|this, cx| {
             let colors = appearance::terminal_colors(cx);
             for chat in &this.chats {
@@ -388,7 +392,6 @@ impl Workspace {
             _sidebar_events: sidebar_events,
             _report_events: report_events,
             _codex_events: codex_events,
-            _appearance: appearance,
             _theme: theme,
             new_chat_select: None,
             broken,
@@ -396,6 +399,8 @@ impl Workspace {
             _lock: lock,
             shells: HashMap::new(),
             shell_shown: false,
+            settings_shown: false,
+            hidden: false,
             focus_handle: cx.focus_handle(),
         };
         this.update_codex_watch();
@@ -495,7 +500,7 @@ impl Workspace {
                         // Dropping its terminal kills the shell.
                         if let Some(project) = project {
                             this.shells.remove(&project.path);
-                            this.sync_shells(cx);
+                            this.sync_terminals(cx);
                         }
                         if let Err(err) = this.db.remove_project(id) {
                             eprintln!("can't remove project {id}: {err}");
@@ -736,73 +741,81 @@ impl Workspace {
             if let Err(err) = read {
                 eprintln!("can't read the last session of chat {id}: {err}");
             }
-            this.update_in(cx, |this, window, cx| {
-                this.opening.remove(&id);
-                // The chat may have been deleted, or opened elsewhere, meanwhile.
-                if this.chats.iter().any(|chat| chat.id == id) {
-                    return;
-                }
-                match this.db.chat(id) {
-                    Ok(Some(_)) => {}
-                    Ok(None) => return,
-                    Err(err) => {
-                        eprintln!("can't open chat {id}: {err}");
+            if this
+                .update_in(cx, |this, window, cx| {
+                    this.opening.remove(&id);
+                    // The chat may have been deleted, or opened elsewhere, meanwhile.
+                    if this.chats.iter().any(|chat| chat.id == id) {
                         return;
                     }
-                }
-                let sessions = this.sessions_of(id);
-                let mut notice = None;
-                let resumed = match sessions.last() {
-                    Some(last) if last.prompted && last.transcript_path.exists() => Some(last),
-                    // Claude deletes old transcripts. What the chat kept of the
-                    // session stays in its history, and the banner says why a
-                    // new session started.
-                    Some(last) if last.prompted => {
-                        match this.db.set_missing(last.id) {
-                            Ok(true) => {
-                                this.db.add_notice(last.id, TRANSCRIPT_GONE).ok();
-                            }
-                            Ok(false) => {}
-                            Err(err) => eprintln!("can't mark session {} missing: {err}", last.id),
+                    match this.db.chat(id) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => return,
+                        Err(err) => {
+                            eprintln!("can't open chat {id}: {err}");
+                            return;
                         }
-                        notice = Some(TRANSCRIPT_GONE.into());
-                        None
                     }
-                    // A session without a prompt has nothing to resume.
-                    _ => None,
-                };
-                // A chat the user selected while this one was being read
-                // keeps the view. This one still starts, but in the
-                // background, so its completion can't steal focus.
-                let show = this.requested == Some(id);
-                // Two CLIs in one session would append to the same transcript,
-                // so a session another chat is running can't be resumed here.
-                if let Some(last) = resumed
-                    && this.live_elsewhere(id, last.id)
-                {
-                    this.block_chat(
-                        id,
-                        agent,
-                        &cwd,
-                        "This session is running in another chat. Start a new session to \
+                    let sessions = this.sessions_of(id);
+                    let mut notice = None;
+                    let resumed = match sessions.last() {
+                        Some(last) if last.prompted && last.transcript_path.exists() => Some(last),
+                        // Claude deletes old transcripts. What the chat kept of the
+                        // session stays in its history, and the banner says why a
+                        // new session started.
+                        Some(last) if last.prompted => {
+                            match this.db.set_missing(last.id) {
+                                Ok(true) => {
+                                    this.db.add_notice(last.id, TRANSCRIPT_GONE).ok();
+                                }
+                                Ok(false) => {}
+                                Err(err) => {
+                                    eprintln!("can't mark session {} missing: {err}", last.id)
+                                }
+                            }
+                            notice = Some(TRANSCRIPT_GONE.into());
+                            None
+                        }
+                        // A session without a prompt has nothing to resume.
+                        _ => None,
+                    };
+                    // A chat the user selected while this one was being read
+                    // keeps the view. This one still starts, but in the
+                    // background, so its completion can't steal focus.
+                    let show = this.requested == Some(id);
+                    // Two CLIs in one session would append to the same transcript,
+                    // so a session another chat is running can't be resumed here.
+                    if let Some(last) = resumed
+                        && this.live_elsewhere(id, last.id)
+                    {
+                        this.block_chat(
+                            id,
+                            agent,
+                            &cwd,
+                            "This session is running in another chat. Start a new session to \
                          keep going here."
-                            .into(),
-                        cx,
-                    );
-                } else if this.start_chat(id, agent, &cwd, resumed, window, cx)
-                    && let Some(notice) = notice
-                    && let Some(chat) = this.chats.iter_mut().find(|chat| chat.id == id)
-                {
-                    chat.notice = Some(notice);
-                }
-                if show {
-                    this.activate(id, window, cx);
-                } else {
-                    this.sync_sidebar(cx);
-                    cx.notify();
-                }
-            })
-            .ok();
+                                .into(),
+                            cx,
+                        );
+                    } else if this.start_chat(id, agent, &cwd, resumed, window, cx)
+                        && let Some(notice) = notice
+                        && let Some(chat) = this.chats.iter_mut().find(|chat| chat.id == id)
+                    {
+                        chat.notice = Some(notice);
+                    }
+                    if show {
+                        this.activate(id, window, cx);
+                    } else {
+                        this.sync_sidebar(cx);
+                        cx.notify();
+                    }
+                })
+                .is_err()
+            {
+                // The window closed meanwhile, so the chat isn't started, but
+                // it can be opened again.
+                this.update(cx, |this, _| this.opening.remove(&id)).ok();
+            }
         })
         .detach();
     }
@@ -1334,7 +1347,7 @@ impl Workspace {
         if self.active == Some(id) {
             self.active = None;
         }
-        self.sync_shells(cx);
+        self.sync_terminals(cx);
         self.sync_sidebar(cx);
         cx.notify();
         reaped
@@ -1448,19 +1461,14 @@ impl Workspace {
             let chat = self.chats.remove(index);
             self.chats.push(chat);
         }
-        for chat in &mut self.chats {
-            let shown = chat.id == id;
-            if let Some(terminal) = &chat.terminal {
-                terminal.terminal.read(cx).set_visible(shown);
-            }
-            if shown {
-                chat.unseen = false;
-            }
+        if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) {
+            chat.unseen = false;
         }
         self.active = Some(id);
         self.requested = Some(id);
+        self.settings_shown = false;
         self.focus_chat(window, cx);
-        self.sync_shells(cx);
+        self.sync_terminals(cx);
         self.sync_sidebar(cx);
         self.evict(cx);
         cx.notify();
@@ -1479,24 +1487,59 @@ impl Workspace {
             .filter(|_| self.shell_shown)
     }
 
-    /// Only the shown shell builds frames.
-    fn sync_shells(&self, cx: &App) {
-        let shown = self.active_cwd().filter(|_| self.shell_shown);
-        for (cwd, shell) in &self.shells {
-            shell
-                .terminal
+    /// Only the shown chat's CLI and project shell build frames, and neither
+    /// does while the settings cover them or the window is closed to the tray.
+    fn sync_terminals(&self, cx: &App) {
+        let shown = !self.hidden && !self.settings_shown;
+        let chat = self.active.filter(|_| shown);
+        for each in &self.chats {
+            if let Some(terminal) = &each.terminal {
+                terminal
+                    .terminal
+                    .read(cx)
+                    .set_visible(Some(each.id) == chat);
+            }
+        }
+        let shell = self.active_cwd().filter(|_| shown && self.shell_shown);
+        for (cwd, each) in &self.shells {
+            each.terminal
                 .read(cx)
-                .set_visible(Some(cwd.as_path()) == shown);
+                .set_visible(Some(cwd.as_path()) == shell);
         }
     }
 
-    /// Focuses the shown chat's CLI, or the workspace if it has none running.
-    fn focus_chat(&self, window: &mut Window, cx: &mut App) {
+    /// Stops the shown terminals from building frames while the window is
+    /// closed to the tray, and starts them again when it opens.
+    pub fn set_hidden(&mut self, hidden: bool, cx: &App) {
+        self.hidden = hidden;
+        self.sync_terminals(cx);
+    }
+
+    /// Shows the settings in place of the chat, or the chat again. The focus
+    /// leaves the covered terminals, so keys can't reach a CLI out of sight.
+    fn show_settings(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_shown = shown;
+        if shown {
+            // A chat still opening mustn't take the view from the settings.
+            self.requested = None;
+            self.focus_handle.focus(window, cx);
+        } else {
+            self.focus_chat(window, cx);
+        }
+        self.sync_terminals(cx);
+        cx.notify();
+    }
+
+    /// Focuses the shown chat's CLI, or the workspace if it has none running
+    /// or the settings cover it. A terminal out of the rendered tree can't
+    /// hold the focus: keys would skip the workspace's bindings.
+    pub fn focus_chat(&self, window: &mut Window, cx: &mut App) {
         match self
             .chats
             .iter()
             .find(|chat| Some(chat.id) == self.active)
             .and_then(|chat| chat.terminal.as_ref())
+            .filter(|_| !self.settings_shown)
         {
             Some(terminal) => terminal.view.focus_handle(cx).focus(window, cx),
             None => self.focus_handle.focus(window, cx),
@@ -1504,12 +1547,15 @@ impl Workspace {
     }
 
     /// Hides the shell when it has the focus. Otherwise shows and focuses the
-    /// shown chat's project shell, starting it if it isn't running.
+    /// shown chat's project shell, starting it if it isn't running. Settings
+    /// cover the shell, so they close and the shell shows.
     fn toggle_shell(&mut self, _: &ToggleShell, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cwd) = self.active_cwd().map(Path::to_path_buf) else {
             return;
         };
-        if let Some(shell) = self.shown_shell()
+        let settings_were_shown = std::mem::take(&mut self.settings_shown);
+        if !settings_were_shown
+            && let Some(shell) = self.shown_shell()
             && shell.view.focus_handle(cx).is_focused(window)
         {
             self.shell_shown = false;
@@ -1521,6 +1567,8 @@ impl Workspace {
                 let pty = match Pty::spawn(&program, &[], &[], &cwd, colors) {
                     Ok(pty) => pty,
                     Err(err) => {
+                        // Nothing changes, so the settings stay up.
+                        self.settings_shown = settings_were_shown;
                         window.push_notification(format!("Couldn't start {program}: {err}"), cx);
                         return;
                     }
@@ -1528,10 +1576,10 @@ impl Workspace {
                 let terminal = cx.new(|cx| Terminal::new(pty, cx));
                 let view = cx.new(|cx| TerminalView::new(terminal.clone(), cx));
                 let exited_cwd = cwd.clone();
-                let exited =
-                    cx.subscribe_in(&terminal, window, move |this, _, _: &Exited, window, cx| {
-                        this.shell_exited(&exited_cwd, window, cx)
-                    });
+                // Shells can exit while the window is closed to the tray.
+                let exited = cx.subscribe(&terminal, move |this, _, _: &Exited, cx| {
+                    this.shell_exited(&exited_cwd, cx)
+                });
                 self.shells.insert(
                     cwd.clone(),
                     Shell {
@@ -1544,21 +1592,24 @@ impl Workspace {
             self.shell_shown = true;
             self.shells[&cwd].view.focus_handle(cx).focus(window, cx);
         }
-        self.sync_shells(cx);
+        self.sync_terminals(cx);
         cx.notify();
     }
 
     /// Closes a shell that exited, hiding the panel if it showed it.
-    fn shell_exited(&mut self, cwd: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    fn shell_exited(&mut self, cwd: &Path, cx: &mut Context<Self>) {
         if self.active_cwd() == Some(cwd) && self.shell_shown {
             self.shell_shown = false;
-            if self
-                .shells
-                .get(cwd)
-                .is_some_and(|shell| shell.view.focus_handle(cx).is_focused(window))
-            {
-                self.focus_chat(window, cx);
-            }
+            // Without a window there's no focus to move.
+            cx.with_window(cx.entity_id(), |window, cx| {
+                if self
+                    .shells
+                    .get(cwd)
+                    .is_some_and(|shell| shell.view.focus_handle(cx).is_focused(window))
+                {
+                    self.focus_chat(window, cx);
+                }
+            });
         }
         self.shells.remove(cwd);
         cx.notify();
@@ -1601,6 +1652,7 @@ impl Render for Workspace {
                     .min_w_0()
                     .h_full()
                     .map(|this| match active {
+                        _ if self.settings_shown => this.child(render_settings(cx)),
                         Some(chat) => {
                             let id = chat.id;
                             let history_max = if chat.terminal.is_none() {
@@ -1737,6 +1789,67 @@ fn render_broken(reason: SharedString, cx: &Context<Workspace>) -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
+    let theme = cx.theme();
+    let close_to_tray = cx.global::<Settings>().close_to_tray;
+    v_flex()
+        .size_full()
+        .p_8()
+        .gap_6()
+        .child(
+            h_flex()
+                .justify_between()
+                .child(div().text_xl().font_semibold().child("Settings"))
+                .child(
+                    Button::new("close-settings")
+                        .ghost()
+                        .small()
+                        .icon(IconName::Close)
+                        .tooltip("Close settings")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.show_settings(false, window, cx)
+                            }),
+                        ),
+                ),
+        )
+        .child(
+            v_flex()
+                .max_w(px(440.))
+                .gap_2()
+                .child(
+                    Checkbox::new("close-to-tray")
+                        .label("Keep running in the tray when the window is closed")
+                        .checked(close_to_tray)
+                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                            if let Err(err) = Settings::set_close_to_tray(&this.db, *checked, cx) {
+                                eprintln!("can't save the settings: {err}");
+                                window.push_notification(
+                                    format!(
+                                        "Couldn't save the setting, so it lasts until Agents Hub \
+                                         quits: {err}"
+                                    ),
+                                    cx,
+                                );
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .pl_6()
+                        .text_sm()
+                        .line_height(rems(1.4))
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            "Agents keep working while the window is closed. Choose \
+                             Agents Hub in the tray to open it again, or Quit there to \
+                             stop them.",
+                        ),
+                ),
+        )
 }
 
 /// What shows while no chat is open: how to start one, and how to read the
