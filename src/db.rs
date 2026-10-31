@@ -20,7 +20,7 @@ use crate::transcript::{self, Kind};
 
 /// Each migration takes the database from the version before it, as counted
 /// by `PRAGMA user_version`, to the next.
-const MIGRATIONS: [&str; 3] = [
+const MIGRATIONS: [&str; 4] = [
     r#"
 CREATE TABLE projects (
     id         INTEGER PRIMARY KEY,
@@ -130,6 +130,15 @@ CREATE TABLE settings (
     value ANY NOT NULL
 ) WITHOUT ROWID;
 "#,
+    r#"
+-- Where a project sits in the rail.
+ALTER TABLE projects ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+-- The projects keep the order they were shown in, newest first.
+UPDATE projects SET position = (
+    SELECT COUNT(*) FROM projects o
+    WHERE (o.created_at, o.id) > (projects.created_at, projects.id)
+);
+"#,
 ];
 
 /// The schema version this build writes.
@@ -139,6 +148,9 @@ const TITLE: &str = "COALESCE(s.custom_title, s.generated_title, s.prompt)";
 
 /// The order of a project's chats.
 const CHAT_ORDER: &str = "pinned DESC, position, id DESC";
+
+/// The order of the projects.
+const PROJECT_ORDER: &str = "position, id DESC";
 
 /// Where the database lives: `$XDG_DATA_HOME/agentshub/agentshub.db`.
 pub fn path() -> Option<PathBuf> {
@@ -350,8 +362,7 @@ impl Db {
         lock(&self.reads)
     }
 
-    /// The projects, in the order they were added, newest first, with their
-    /// chats.
+    /// The projects, in the order the user put them in, with their chats.
     pub fn projects(&self) -> Result<Vec<Project>> {
         let conn = self.read();
         let mut chats: HashMap<i64, Vec<Chat>> = HashMap::new();
@@ -380,8 +391,9 @@ impl Db {
             chats.entry(chat.project_id).or_default().push(chat);
         }
 
-        let mut stmt =
-            conn.prepare("SELECT id, path, name FROM projects ORDER BY created_at DESC, id DESC")?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, path, name FROM projects ORDER BY {PROJECT_ORDER}"
+        ))?;
         stmt.query_map([], |row| {
             let id = row.get(0)?;
             Ok(Project {
@@ -394,7 +406,8 @@ impl Db {
         .collect()
     }
 
-    /// Adds a folder as a project, or finds the project it already is.
+    /// Adds a folder as a project at the top of the list, or finds the
+    /// project it already is, which stays where it is.
     pub fn add_project(&self, path: &Path) -> Result<i64> {
         let conn = self.write();
         let name = path
@@ -403,7 +416,8 @@ impl Db {
             .to_string_lossy();
         let path = path.to_string_lossy();
         conn.execute(
-            "INSERT INTO projects (path, name, created_at) VALUES (?1, ?2, ?3)
+            "INSERT INTO projects (path, name, created_at, position)
+             VALUES (?1, ?2, ?3, (SELECT COALESCE(MIN(position), 0) - 1 FROM projects))
              ON CONFLICT (path) DO NOTHING",
             params![path, name, now()],
         )?;
@@ -532,6 +546,32 @@ impl Db {
         for (position, id) in ids.iter().enumerate() {
             tx.execute(
                 "UPDATE chats SET position = ?2 WHERE id = ?1",
+                params![id, position as i64],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// Moves a project to where `to` is. Nothing moves when `to` isn't a
+    /// project.
+    pub fn move_project(&self, id: i64, to: i64) -> Result<()> {
+        let mut conn = self.write();
+        let tx = conn.transaction()?;
+        let mut ids = tx
+            .prepare(&format!("SELECT id FROM projects ORDER BY {PROJECT_ORDER}"))?
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>>>()?;
+        let (Some(from), Some(index)) = (
+            ids.iter().position(|&other| other == id),
+            ids.iter().position(|&other| other == to),
+        ) else {
+            return Ok(());
+        };
+        ids.remove(from);
+        ids.insert(index, id);
+        for (position, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE projects SET position = ?2 WHERE id = ?1",
                 params![id, position as i64],
             )?;
         }
@@ -1598,6 +1638,51 @@ mod tests {
         let order = |project: &Project| project.chats.iter().map(|c| c.id).collect::<Vec<_>>();
         assert_eq!(order(&projects[0]), [4]);
         assert_eq!(order(&projects[1]), [2, 3, 1]);
+    }
+
+    #[test]
+    fn migrating_keeps_the_order_projects_were_shown_in() {
+        let conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..3] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.execute_batch(
+            "PRAGMA user_version = 3;
+             INSERT INTO projects VALUES (1, '/p', 'p', 5), (2, '/q', 'q', 9), (3, '/r', 'r', 5);",
+        )
+        .unwrap();
+        let db = Db::init(conn, None).unwrap();
+        assert_eq!(project_order(&db), [2, 3, 1]);
+    }
+
+    /// The ids of the projects, in order.
+    fn project_order(db: &Db) -> Vec<i64> {
+        db.projects()
+            .unwrap()
+            .iter()
+            .map(|project| project.id)
+            .collect()
+    }
+
+    #[test]
+    fn adds_projects_at_the_top_and_moves_them() {
+        let db = Db::open_in_memory().unwrap();
+        let [a, b, c, d] = ["a", "b", "c", "d"]
+            .map(|name| db.add_project(&Path::new("/home/me").join(name)).unwrap());
+        assert_eq!(project_order(&db), [d, c, b, a]);
+
+        // A project takes the place of the one it is moved to, up or down.
+        db.move_project(d, b).unwrap();
+        assert_eq!(project_order(&db), [c, b, d, a]);
+        db.move_project(a, c).unwrap();
+        assert_eq!(project_order(&db), [a, c, b, d]);
+
+        // Adding a folder again leaves its project where it is.
+        assert_eq!(db.add_project(Path::new("/home/me/b")).unwrap(), b);
+        assert_eq!(project_order(&db), [a, c, b, d]);
+
+        let e = db.add_project(Path::new("/home/me/e")).unwrap();
+        assert_eq!(project_order(&db), [e, a, c, b, d]);
     }
 
     #[test]

@@ -3,9 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::Value;
@@ -14,7 +12,6 @@ use crate::db::{Db, Item, Session};
 use crate::sidebar::age;
 use crate::transcript::Kind;
 
-const HEADER_HEIGHT: Pixels = px(32.);
 const ROW_HEIGHT: Pixels = px(32.);
 
 /// How much of a tool's input shows beside its name.
@@ -29,7 +26,8 @@ pub struct History {
     db: Db,
     chat_id: i64,
     sessions: Vec<Earlier>,
-    /// Whether the list shows, rather than only the line that sums it up.
+    /// Whether the list shows. The chat's header has the button that opens
+    /// it.
     open: bool,
     /// The items of the sessions that are expanded, once they're loaded.
     expanded: HashMap<i64, Option<Vec<Item>>>,
@@ -51,12 +49,12 @@ struct Earlier {
 }
 
 impl History {
-    pub fn new(db: Db, chat_id: i64) -> Self {
+    pub fn new(db: Db, chat_id: i64, open: bool) -> Self {
         Self {
             db,
             chat_id,
             sessions: Vec::new(),
-            open: true,
+            open,
             expanded: HashMap::new(),
             limits: HashMap::new(),
             more: HashSet::new(),
@@ -99,20 +97,31 @@ impl History {
         cx.notify();
     }
 
-    /// How tall the list is, at most `max`, or `None` while it's empty.
+    /// How many earlier sessions there are.
+    pub fn count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub fn toggle(&mut self, cx: &mut Context<Self>) {
+        self.open = !self.open;
+        cx.notify();
+    }
+
+    /// How tall the list is, at most `max`, or `None` while it's closed or
+    /// empty.
     pub fn height(&self, max: Pixels) -> Option<Pixels> {
-        if self.sessions.is_empty() {
+        if self.sessions.is_empty() || !self.open {
             return None;
         }
-        // The border under it takes a pixel.
-        let rows = if !self.open {
-            0.
-        } else if self.expanded.is_empty() {
-            self.sessions.len() as f32
-        } else {
+        if !self.expanded.is_empty() {
             return Some(max);
-        };
-        Some((HEADER_HEIGHT + ROW_HEIGHT * rows + px(1.)).min(max))
+        }
+        // The border under it takes a pixel.
+        Some((ROW_HEIGHT * self.sessions.len() as f32 + px(1.)).min(max))
     }
 
     fn toggle_session(&mut self, id: i64, cx: &mut Context<Self>) {
@@ -197,10 +206,10 @@ impl History {
                     .id(("session", id as u64))
                     .h(ROW_HEIGHT)
                     .flex_none()
-                    .px_3()
+                    .px_6()
                     .gap_2()
                     .cursor_pointer()
-                    .hover(|style| style.bg(theme.muted))
+                    .hover(|style| style.bg(theme.accent))
                     .child(chevron(items.is_some(), cx))
                     .child(
                         div()
@@ -214,6 +223,7 @@ impl History {
                         div()
                             .flex_none()
                             .text_xs()
+                            .font_family(theme.mono_font_family.clone())
                             .text_color(theme.muted_foreground)
                             .child(format!("{} · {}", session.ended, age(session.started_at))),
                     )
@@ -221,8 +231,8 @@ impl History {
             )
             .children(items.map(|items| {
                 v_flex()
-                    .pl_8()
-                    .pr_4()
+                    .pl_12()
+                    .pr_6()
                     .pt_1()
                     .pb_4()
                     .gap_3()
@@ -333,7 +343,9 @@ impl History {
                                 .p_2()
                                 .gap_2()
                                 .rounded(theme.radius)
-                                .bg(theme.muted)
+                                .bg(theme.background)
+                                .border_1()
+                                .border_color(theme.border)
                                 .text_xs()
                                 .font_family(theme.mono_font_family.clone())
                                 .child(input)
@@ -370,48 +382,18 @@ impl History {
 impl Render for History {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let summary = match self.sessions.len() {
-            1 => "1 earlier session".to_string(),
-            count => format!("{count} earlier sessions"),
-        };
-
         v_flex()
+            .id("sessions")
             .size_full()
+            .overflow_y_scroll()
+            .bg(theme.muted)
             .border_b_1()
             .border_color(theme.border)
-            .child(
-                h_flex()
-                    .id("earlier-sessions")
-                    .h(HEADER_HEIGHT)
-                    .flex_none()
-                    .px_3()
-                    .gap_2()
-                    .cursor_pointer()
-                    .text_xs()
-                    .font_medium()
-                    .text_color(theme.muted_foreground)
-                    .hover(|style| style.text_color(theme.foreground))
-                    .child(chevron(self.open, cx))
-                    .child(summary)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open = !this.open;
-                        cx.notify();
-                    })),
+            .children(
+                self.sessions
+                    .iter()
+                    .map(|session| self.render_session(session, cx)),
             )
-            .when(self.open, |this| {
-                this.child(
-                    v_flex()
-                        .id("sessions")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .children(
-                            self.sessions
-                                .iter()
-                                .map(|session| self.render_session(session, cx)),
-                        ),
-                )
-            })
     }
 }
 

@@ -4,17 +4,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use gpui_kit::assets::IconName as ExtraIcon;
+use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::base::InteractiveElementExt as _;
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::resizable::{HandleEdge, resize_handle};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, IconName, Selectable as _, Sizable as _, StyledExt as _, Theme,
+    WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -25,17 +28,18 @@ use crate::alerts::{self, Alert};
 use crate::appearance;
 use crate::db::{self, Db};
 use crate::history::History;
+use crate::palette::{self, Entry, Lead, Pick};
 use crate::reports::{self, Reports};
 use crate::sessions;
 use crate::settings::{Appearance, DEFAULT_SIDEBAR_WIDTH, Settings};
-use crate::sidebar::{Lamp, Sidebar, SidebarEvent, lamp};
+use crate::sidebar::{self, Filter, NUMBERED, Sidebar, SidebarEvent, Tone, home_relative};
 use crate::status::Status;
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::TerminalView;
 use crate::transcript;
 
 /// The narrowest the sidebar can be dragged.
-const MIN_SIDEBAR_WIDTH: Pixels = px(200.);
+const MIN_SIDEBAR_WIDTH: Pixels = px(300.);
 
 /// The widest the sidebar can be dragged.
 const MAX_SIDEBAR_WIDTH: Pixels = px(600.);
@@ -43,11 +47,22 @@ const MAX_SIDEBAR_WIDTH: Pixels = px(600.);
 /// How much of the window the sidebar always leaves to the chat.
 const MIN_MAIN_WIDTH: Pixels = px(360.);
 
+/// The least room a chat's title keeps beside its status and actions; with
+/// less, they move below it.
+const MIN_TITLE_WIDTH: Pixels = px(200.);
+
 /// The most of the window's height that a chat's earlier sessions take.
 const HISTORY_SHARE: f32 = 0.45;
 
 /// How much of the window's height a project's shell takes under its chat.
 const SHELL_SHARE: f32 = 0.35;
+
+/// The least height a chat's CLI keeps when the earlier sessions and the
+/// shell crowd it. They give up their height to it, in proportion to it.
+const MIN_TERMINAL_HEIGHT: Pixels = px(160.);
+
+/// The least height the shell keeps: its header and a few lines.
+const MIN_SHELL_HEIGHT: Pixels = px(96.);
 
 /// Codex writes its session files in bursts, so they're looked at once it
 /// pauses.
@@ -62,12 +77,54 @@ const MAX_RUNNING: usize = 4;
 const TRANSCRIPT_GONE: &str = "This session's transcript is gone, so it couldn't be resumed. \
                                Its saved history is still available here.";
 
-actions!(workspace, [ToggleShell]);
+actions!(
+    workspace,
+    [
+        ToggleShell,
+        OpenSearch,
+        NewChat,
+        AddProject,
+        ToggleSettings,
+        ToggleHistory,
+        RenameChat,
+        TogglePin,
+        DeleteChat,
+        ToggleTheme,
+        ExportDatabase,
+    ]
+);
 
+/// Opens the `n`th chat of the sidebar's list, counting from zero.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = workspace, no_json)]
+pub struct OpenChatAt(pub usize);
+
+/// Selects the `n`th project of the sidebar's rail, counting from zero.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = workspace, no_json)]
+pub struct SelectProjectAt(pub usize);
+
+// The shortcuts are bound without a context, so they reach the workspace
+// before a focused terminal sends them to its CLI. They hold Ctrl and Shift
+// together, or Alt or Ctrl with a digit, which terminal programs leave alone,
+// so the CLIs keep the plain Ctrl keys.
 pub fn init(cx: &mut App) {
-    // Bound without a context so it reaches the workspace before a focused
-    // terminal sends it to its CLI.
-    cx.bind_keys([KeyBinding::new("ctrl-`", ToggleShell, None)]);
+    cx.bind_keys([
+        KeyBinding::new("ctrl-shift-k", OpenSearch, None),
+        KeyBinding::new("ctrl-shift-n", NewChat, None),
+        KeyBinding::new("ctrl-`", ToggleShell, None),
+        KeyBinding::new("ctrl-shift-h", ToggleHistory, None),
+        KeyBinding::new("f2", RenameChat, None),
+        KeyBinding::new("ctrl-shift-o", AddProject, None),
+        KeyBinding::new("ctrl-,", ToggleSettings, None),
+    ]);
+    for n in 0..NUMBERED {
+        let digit = n + 1;
+        cx.bind_keys([
+            KeyBinding::new(&format!("alt-{digit}"), OpenChatAt(n), None),
+            KeyBinding::new(&format!("ctrl-{digit}"), SelectProjectAt(n), None),
+        ]);
+    }
 }
 
 impl SelectItem for Agent {
@@ -82,10 +139,13 @@ impl SelectItem for Agent {
     }
 
     fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        h_flex()
-            .gap_2()
-            .child(lamp(appearance::agent_color(*self, cx), Lamp::Off))
-            .child(self.display_name())
+        h_flex().gap_2().child(self.display_name()).child(
+            div()
+                .text_xs()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_color(cx.theme().muted_foreground)
+                .child(self.program()),
+        )
     }
 }
 
@@ -271,12 +331,14 @@ impl Workspace {
                     }
                     this.refresh(cx);
                 }
-                SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
-                SidebarEvent::Export => this.export_database(window, cx),
-                SidebarEvent::OpenSettings => this.show_settings(true, window, cx),
-                SidebarEvent::SetAppearance(appearance) => {
-                    this.set_appearance(*appearance, window, cx)
+                SidebarEvent::MoveProject(id, to) => {
+                    if let Err(err) = this.db.move_project(*id, *to) {
+                        eprintln!("can't move project {id}: {err}");
+                    }
+                    this.refresh(cx);
                 }
+                SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
+                SidebarEvent::OpenSettings => this.show_settings(true, window, cx),
             });
 
         let (reports, reported) = Reports::new();
@@ -475,7 +537,7 @@ impl Workspace {
                     Ok(id) => {
                         this.refresh(cx);
                         this.sidebar
-                            .update(cx, |sidebar, cx| sidebar.expand(id, cx));
+                            .update(cx, |sidebar, cx| sidebar.select(id, cx));
                     }
                     Err(err) => window
                         .push_notification(format!("Couldn't add {}: {err}", path.display()), cx),
@@ -726,6 +788,10 @@ impl Workspace {
         // Its first session report adds its first session.
         if self.start_chat(id, agent, cwd, None, window, cx) {
             self.activate(id, window, cx);
+            // The sidebar doesn't list the new chat yet, so it can't find
+            // its project by itself.
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.select(project_id, cx));
         } else {
             self.stop_chat(id, cx);
             self.db.delete_chat(id).ok();
@@ -1285,7 +1351,8 @@ impl Workspace {
         let transcript = session.map(|session| session.transcript_path.clone());
         let db = self.db.clone();
         let history = cx.new(|cx| {
-            let mut history = History::new(db, id);
+            // Without a terminal, the history is all there is to show.
+            let mut history = History::new(db, id, terminal.is_none());
             history.refresh(current, &[], cx);
             history
         });
@@ -1565,6 +1632,10 @@ impl Workspace {
         self.focus_chat(window, cx);
         self.sync_terminals(cx);
         self.sync_sidebar(cx);
+        // Showing a chat, even the one already shown, brings its project back
+        // into the rail's selection, so the chat list and New Chat follow it.
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.reveal(id, cx));
         self.evict(cx);
         cx.notify();
     }
@@ -1580,6 +1651,12 @@ impl Workspace {
         self.shells
             .get(self.active_cwd()?)
             .filter(|_| self.shell_shown)
+    }
+
+    /// Whether the shown chat's project shell is on screen. The flag alone
+    /// can outlast a switch to a project whose shell isn't running.
+    fn shell_visible(&self) -> bool {
+        !self.settings_shown && self.shown_shell().is_some()
     }
 
     /// Only the shown chat's CLI and project shell build frames, and neither
@@ -1725,6 +1802,300 @@ impl Workspace {
     }
 }
 
+/// What the shortcuts, the search modal and the chat's menu run.
+impl Workspace {
+    /// The shown chat as the sidebar lists it.
+    fn active_entry<'a>(&self, cx: &'a App) -> Option<&'a db::Chat> {
+        let id = self.active?;
+        self.sidebar
+            .read(cx)
+            .projects()
+            .iter()
+            .flat_map(|project| &project.chats)
+            .find(|chat| chat.id == id)
+    }
+
+    fn open_search(&mut self, _: &OpenSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(window, cx);
+    }
+
+    /// Starts an agent in the selected project, or asks for a project when
+    /// there's none.
+    fn new_chat_here(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
+        match self.sidebar.read(cx).selected().map(|project| project.id) {
+            Some(id) => self.open_new_chat_dialog(id, window, cx),
+            None => self.add_project(window, cx),
+        }
+    }
+
+    fn add_project_action(&mut self, _: &AddProject, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_project(window, cx);
+    }
+
+    fn toggle_settings(&mut self, _: &ToggleSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_settings(!self.settings_shown, window, cx);
+    }
+
+    fn toggle_history(&mut self, _: &ToggleHistory, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(chat) = self.chats.iter().find(|chat| Some(chat.id) == self.active) {
+            chat.history.update(cx, |history, cx| history.toggle(cx));
+            cx.notify();
+        }
+    }
+
+    fn rename_active(&mut self, _: &RenameChat, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(chat) = self.active_entry(cx) {
+            let (id, title) = (chat.id, chat.title.clone().unwrap_or_default());
+            self.open_rename_dialog(id, title.into(), window, cx);
+        }
+    }
+
+    fn toggle_pin(&mut self, _: &TogglePin, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(chat) = self.active_entry(cx) {
+            let (id, pinned) = (chat.id, chat.pinned);
+            if let Err(err) = self.db.set_pinned(id, !pinned) {
+                eprintln!("can't pin chat {id}: {err}");
+            }
+            self.refresh(cx);
+        }
+    }
+
+    fn delete_active(&mut self, _: &DeleteChat, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.active {
+            self.confirm_delete_chat(id, window, cx);
+        }
+    }
+
+    fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_appearance(appearance::other(cx), window, cx);
+    }
+
+    fn export_action(&mut self, _: &ExportDatabase, window: &mut Window, cx: &mut Context<Self>) {
+        self.export_database(window, cx);
+    }
+
+    fn open_chat_at(&mut self, action: &OpenChatAt, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.sidebar.read(cx).chat_at(action.0) {
+            self.open_chat(id, window, cx);
+        }
+    }
+
+    fn select_project_at(
+        &mut self,
+        action: &SelectProjectAt,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_at(action.0, cx));
+    }
+
+    /// Hides the shell, or shows it, as the header's button does whether or
+    /// not the shell has the focus.
+    fn click_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shell_visible() {
+            self.shell_shown = false;
+            self.focus_chat(window, cx);
+            self.sync_terminals(cx);
+            cx.notify();
+        } else {
+            self.toggle_shell(&ToggleShell, window, cx);
+        }
+    }
+
+    /// Opens the search modal over the chats of every project, the agents
+    /// the selected project can start, the projects and the commands.
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sidebar = self.sidebar.read(cx);
+        let mut chats = Vec::new();
+        for project in sidebar.projects() {
+            for chat in &project.chats {
+                let tone = Tone::of(sidebar.running(chat.id));
+                let doing = match tone {
+                    Tone::Saved => sidebar::age(chat.updated_at),
+                    tone => tone.label().to_string(),
+                };
+                let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
+                chats.push((
+                    tone.needs_you(),
+                    Entry::new(title, Lead::Tone(tone), Pick::OpenChat(chat.id))
+                        .meta(format!(
+                            "{} · {doing} · {}",
+                            chat.agent.label(),
+                            project.name
+                        ))
+                        .keywords([chat.agent.display_name()]),
+                ));
+            }
+        }
+        // The chats that need the user come first.
+        chats.sort_by_key(|(needs_you, _)| !needs_you);
+        let chats = chats.into_iter().map(|(_, entry)| entry).collect();
+
+        let selected = sidebar.selected();
+        let start_heading = match selected {
+            Some(project) => format!("Start an agent in {}", project.name),
+            None => "Start an agent".into(),
+        };
+        let start = selected
+            .map(|project| {
+                Agent::installed(&project.path)
+                    .into_iter()
+                    .map(|agent| {
+                        Entry::new(
+                            agent.display_name(),
+                            Lead::Icon(IconName::Plus),
+                            Pick::StartAgent(project.id, agent),
+                        )
+                        .meta(agent.program())
+                        .keywords(["new chat", "start"])
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let projects = sidebar
+            .projects()
+            .iter()
+            .map(|project| {
+                Entry::new(
+                    project.name.clone(),
+                    Lead::Icon(IconName::FolderOpen),
+                    Pick::SelectProject(project.id),
+                )
+                .meta(home_relative(&project.path))
+                .keywords(["project"])
+            })
+            .collect();
+
+        let run = |label: &str, icon: IconName, action: Box<dyn Action>| {
+            Entry::new(label.to_string(), Lead::Icon(icon), Pick::Run(action))
+        };
+        let mut commands = Vec::new();
+        if let Some(chat) = self.active_entry(cx) {
+            commands.push(run(
+                "Show or hide the earlier sessions",
+                IconName::Inbox,
+                Box::new(ToggleHistory),
+            ));
+            commands.push(run(
+                "Show or hide the project's shell",
+                IconName::SquareTerminal,
+                Box::new(ToggleShell),
+            ));
+            commands.push(run(
+                "Rename this chat",
+                IconName::Replace,
+                Box::new(RenameChat),
+            ));
+            commands.push(run(
+                if chat.pinned {
+                    "Unpin this chat"
+                } else {
+                    "Pin this chat to the top"
+                },
+                IconName::Star,
+                Box::new(TogglePin),
+            ));
+            commands.push(run(
+                "Delete this chat",
+                IconName::Delete,
+                Box::new(DeleteChat),
+            ));
+        }
+        let filter = sidebar.filter();
+        for each in Filter::ALL.into_iter().filter(|each| *each != filter) {
+            let label = match each {
+                Filter::All => "Show all the chats",
+                Filter::NeedsYou => "Show the chats that need you",
+                Filter::Running => "Show the running chats",
+            };
+            commands.push(Entry::new(
+                label,
+                Lead::Icon(IconName::Search),
+                Pick::Filter(each),
+            ));
+        }
+        commands.push(run(
+            "Add a project",
+            IconName::FolderOpen,
+            Box::new(AddProject),
+        ));
+        commands.push(run(
+            if cx.theme().is_dark() {
+                "Use the light theme"
+            } else {
+                "Use the dark theme"
+            },
+            if cx.theme().is_dark() {
+                IconName::Sun
+            } else {
+                IconName::Moon
+            },
+            Box::new(ToggleTheme),
+        ));
+        commands.push(run(
+            "Settings",
+            IconName::Settings,
+            Box::new(ToggleSettings),
+        ));
+        commands.push(run(
+            "Export a copy of the database",
+            IconName::HardDrive,
+            Box::new(ExportDatabase),
+        ));
+
+        let this = cx.entity().downgrade();
+        palette::open(
+            vec![
+                ("Chats".into(), chats),
+                (start_heading.into(), start),
+                ("Projects".into(), projects),
+                ("Commands".into(), commands),
+            ],
+            move |pick, window, cx| {
+                this.update(cx, |this, cx| this.run_pick(pick, window, cx))
+                    .ok();
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn run_pick(&mut self, pick: Pick, window: &mut Window, cx: &mut Context<Self>) {
+        match pick {
+            Pick::OpenChat(id) => self.open_chat(id, window, cx),
+            Pick::StartAgent(project_id, agent) => {
+                let path = self
+                    .sidebar
+                    .read(cx)
+                    .projects()
+                    .iter()
+                    .find(|project| project.id == project_id)
+                    .map(|project| project.path.clone());
+                if let Some(path) = path {
+                    self.new_chat(project_id, agent, &path, window, cx);
+                }
+            }
+            Pick::SelectProject(id) => self
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.select(id, cx)),
+            Pick::Filter(filter) => self
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.set_filter(filter, cx)),
+            // Sent from where the keys would have sent it: closing the search
+            // gave the focus back to where it was, as the shell, unless it was
+            // outside the workspace.
+            Pick::Run(action) => {
+                if !self.focus_handle.contains_focused(window, cx) {
+                    self.focus_chat(window, cx);
+                }
+                window.dispatch_action(action, cx);
+            }
+        }
+    }
+}
+
 impl Workspace {
     /// The sidebar's right edge, which resizes it when dragged and restores
     /// its default width when double clicked.
@@ -1774,20 +2145,29 @@ impl Render for Workspace {
         let active = self
             .active
             .and_then(|id| self.chats.iter().find(|chat| chat.id == id));
-        let history_max = window.viewport_size().height * HISTORY_SHARE;
-        let shell_height = window.viewport_size().height * SHELL_SHARE;
-        let shell = self.shown_shell().map(|shell| shell.view.clone());
 
         h_flex()
             .size_full()
-            .bg(theme.background)
+            .bg(theme.sidebar)
             .text_color(theme.foreground)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_shell))
+            .on_action(cx.listener(Self::open_search))
+            .on_action(cx.listener(Self::new_chat_here))
+            .on_action(cx.listener(Self::add_project_action))
+            .on_action(cx.listener(Self::toggle_settings))
+            .on_action(cx.listener(Self::toggle_history))
+            .on_action(cx.listener(Self::rename_active))
+            .on_action(cx.listener(Self::toggle_pin))
+            .on_action(cx.listener(Self::delete_active))
+            .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(Self::export_action))
+            .on_action(cx.listener(Self::open_chat_at))
+            .on_action(cx.listener(Self::select_project_at))
             // Follows the pointer anywhere in the window while the sidebar's
             // edge is dragged, since it leaves the edge's thin band at once.
-            .on_drag_move(cx.listener(
-                |this, event: &DragMoveEvent<ResizeSidebar>, window, cx| {
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<ResizeSidebar>, window, cx| {
                     let width = clamp_sidebar_width(
                         event.event.position.x - event.bounds.left(),
                         window.viewport_size().width,
@@ -1796,8 +2176,8 @@ impl Render for Workspace {
                         this.sidebar_width = width;
                         cx.notify();
                     }
-                },
-            ))
+                }),
+            )
             .child(
                 div()
                     .relative()
@@ -1817,77 +2197,454 @@ impl Render for Workspace {
                     )
                     .child(self.render_sidebar_edge(cx)),
             )
+            // The sheet the chat is drawn on, set on the sidebar's ground.
+            .child(
+                div().flex_1().min_w_0().h_full().p_2().child(
+                    v_flex()
+                        .size_full()
+                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius_lg)
+                        .shadow_xs()
+                        .child(v_flex().flex_1().min_h_0().map(|this| match active {
+                            _ if self.settings_shown => this.child(render_settings(window, cx)),
+                            Some(chat) => this.child(self.render_chat(chat, window, cx)),
+                            None => this.child(self.render_empty(window, cx)),
+                        }))
+                        .child(self.render_footer(window, cx)),
+                ),
+            )
+            .into_any_element()
+    }
+}
+
+impl Workspace {
+    fn render_chat(&self, chat: &Chat, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let id = chat.id;
+        let viewport = window.viewport_size().height;
+        let shell_height = viewport * SHELL_SHARE;
+        let shell = self.shown_shell().map(|shell| shell.view.clone());
+        // Without a terminal, the history takes the sheet but for its header
+        // and footer, and the shell.
+        let history_max = if chat.terminal.is_none() {
+            viewport
+                - px(140.)
+                - if shell.is_some() {
+                    shell_height
+                } else {
+                    px(0.)
+                }
+        } else {
+            viewport * HISTORY_SHARE
+        };
+
+        // A window too short for even the least heights clips the chat
+        // rather than drawing it under the footer.
+        v_flex()
+            .size_full()
+            .overflow_hidden()
+            .child(self.render_chat_header(chat, cx))
+            .when_some(chat.notice.clone(), |this, notice| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .px_6()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .bg(theme.muted)
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(notice),
+                )
+            })
+            .when_some(chat.message.clone(), |this, message| {
+                let tint = appearance::palette(cx).danger;
+                this.child(
+                    h_flex()
+                        .flex_none()
+                        .px_6()
+                        .py_2()
+                        .gap_3()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .bg(tint.soft)
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(tint.text)
+                                .child(message),
+                        )
+                        .child(
+                            Button::new("restart-agent")
+                                .small()
+                                .label("Restart agent")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.restart(id, window, cx);
+                                })),
+                        ),
+                )
+            })
+            // The earlier sessions and the shell ask for a share of the window,
+            // but shrink to fit what the header, notices and footer leave the
+            // CLI, which keeps its least height.
+            .children(chat.history.read(cx).height(history_max).map(|height| {
+                chat.history.clone().cached(
+                    StyleRefinement::default()
+                        .w_full()
+                        .h(height)
+                        .flex_shrink(1.)
+                        .min_h_0(),
+                )
+            }))
+            .children(chat.terminal.as_ref().map(|terminal| {
+                div()
+                    .flex_1()
+                    .min_h(MIN_TERMINAL_HEIGHT)
+                    .pl_5()
+                    .pr_2()
+                    .pt_3()
+                    .child(terminal.view.clone())
+            }))
+            .when_some(shell, |this, shell| {
+                this.child(
+                    v_flex()
+                        .flex_shrink(1.)
+                        .h(shell_height)
+                        .min_h(MIN_SHELL_HEIGHT)
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(
+                            h_flex()
+                                .flex_none()
+                                .h_8()
+                                .pl_5()
+                                .pr_2()
+                                .gap_3()
+                                .text_xs()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(theme.muted_foreground)
+                                .child("shell")
+                                .child(div().flex_1().truncate().child(home_relative(&chat.cwd)))
+                                .child(
+                                    Button::new("close-shell")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Close)
+                                        .tooltip_with_action("Hide the shell", &ToggleShell, None)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.click_shell(window, cx)
+                                        })),
+                                ),
+                        )
+                        .child(div().flex_1().min_h_0().pl_5().pr_2().child(shell)),
+                )
+            })
+    }
+
+    /// The chat's title and folder, what its agent is doing, and what can be
+    /// done with it.
+    fn render_chat_header(&self, chat: &Chat, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let entry = self.active_entry(cx);
+        let title = entry
+            .and_then(|entry| entry.title.clone())
+            .unwrap_or_else(|| "New chat".into());
+        let pinned = entry.is_some_and(|entry| entry.pinned);
+        let tone = Tone::of(self.sidebar.read(cx).running(chat.id));
+        let history = chat.history.read(cx);
+        let (earlier, open) = (history.count(), history.is_open());
+        let focus = self.focus_handle.clone();
+
+        // A sheet too narrow for the title, the status and the actions on one
+        // line wraps them, rather than pushing the actions out of reach.
+        h_flex()
+            .flex_none()
+            .flex_wrap()
+            .gap_x_4()
+            .gap_y_2()
+            .pl_6()
+            .pr_3()
+            .py_3()
+            .border_b_1()
+            .border_color(theme.border)
             .child(
                 v_flex()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .map(|this| match active {
-                        _ if self.settings_shown => this.child(render_settings(cx)),
-                        Some(chat) => {
-                            let id = chat.id;
-                            let history_max = if chat.terminal.is_none() {
-                                window.viewport_size().height
-                                    - px(80.)
-                                    - if shell.is_some() {
-                                        shell_height
-                                    } else {
-                                        px(0.)
-                                    }
-                            } else {
-                                history_max
-                            };
-                            this.when_some(chat.notice.clone(), |this, notice| {
-                                this.child(
-                                    div()
-                                        .flex_none()
-                                        .px_3()
-                                        .py_2()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child(notice),
-                                )
-                            })
-                            .when_some(chat.message.clone(), |this, message| {
-                                this.child(
-                                    h_flex()
-                                        .p_3()
-                                        .gap_3()
-                                        .child(div().flex_1().text_sm().child(message))
-                                        .child(
-                                            Button::new("restart-agent")
-                                                .label("Restart agent")
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.restart(id, window, cx);
-                                                    },
-                                                )),
-                                        ),
-                                )
-                            })
-                            .children(chat.history.read(cx).height(history_max).map(|height| {
-                                chat.history.clone().cached(
-                                    StyleRefinement::default().w_full().h(height).flex_none(),
-                                )
-                            }))
-                            .children(chat.terminal.as_ref().map(|terminal| {
-                                div().flex_1().min_h_0().child(terminal.view.clone())
-                            }))
-                            .when_some(shell, |this, shell| {
-                                this.child(
-                                    div()
-                                        .flex_none()
-                                        .h(shell_height)
-                                        .border_t_1()
-                                        .border_color(theme.border)
-                                        .child(shell),
-                                )
-                            })
-                        }
-                        None => this.child(render_empty(cx)),
-                    }),
+                    .min_w(MIN_TITLE_WIDTH)
+                    .child(
+                        div()
+                            .font_family(appearance::SERIF)
+                            .text_xl()
+                            .truncate()
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(format!(
+                                "{} · {}",
+                                chat.agent.label(),
+                                home_relative(&chat.cwd)
+                            )),
+                    ),
             )
-            .into_any_element()
+            .child(
+                h_flex()
+                    .ml_auto()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap_x_4()
+                    .gap_y_2()
+                    .when(chat.running(), |this| this.child(status_pill(tone, cx)))
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .when(earlier > 0, |this| {
+                                this.child(
+                                    Button::new("history")
+                                        .ghost()
+                                        .small()
+                                        .icon(ExtraIcon::Clock)
+                                        .label(format!("{earlier} earlier"))
+                                        .selected(open)
+                                        .tooltip_with_action(
+                                            "Show or hide the earlier sessions",
+                                            &ToggleHistory,
+                                            None,
+                                        )
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_history(&ToggleHistory, window, cx)
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("shell")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::SquareTerminal)
+                                    .label("Shell")
+                                    .selected(self.shell_visible())
+                                    .tooltip_with_action(
+                                        "Show or hide the project's shell",
+                                        &ToggleShell,
+                                        None,
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.click_shell(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("chat-menu")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Ellipsis)
+                                    .tooltip("More")
+                                    .dropdown_menu(move |menu, _, _| {
+                                        menu.action_context(focus.clone())
+                                            .menu("Rename", Box::new(RenameChat))
+                                            .menu(
+                                                if pinned { "Unpin" } else { "Pin to the top" },
+                                                Box::new(TogglePin),
+                                            )
+                                            .separator()
+                                            .menu("Delete", Box::new(DeleteChat))
+                                    }),
+                            ),
+                    ),
+            )
+    }
+
+    /// The shortcuts used most, and what the agents are doing.
+    fn render_footer(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let summary = self.sidebar.read(cx).summary();
+        let bound = |action: &dyn Action, label: &'static str| {
+            palette::shortcut(action, window).map(|keys| key_hint(keys, label, cx))
+        };
+
+        h_flex()
+            .flex_none()
+            .h_8()
+            .px_4()
+            .gap_4()
+            .overflow_hidden()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.muted)
+            .rounded_b(theme.radius_lg - px(1.))
+            .text_xs()
+            .font_family(theme.mono_font_family.clone())
+            .text_color(theme.muted_foreground)
+            .children(bound(&OpenSearch, "search"))
+            .children(bound(&NewChat, "new chat"))
+            .children(bound(&ToggleShell, "shell"))
+            .child(key_hint("Alt+1…9".into(), "open chat", cx))
+            .children(bound(&ToggleSettings, "settings"))
+            .child(div().flex_1())
+            .child(div().flex_none().child(summary))
+    }
+
+    /// What shows while no chat is open: how to start one, and how to read
+    /// the chats' dots.
+    fn render_empty(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let selected = self
+            .sidebar
+            .read(cx)
+            .selected()
+            .map(|project| project.name.clone());
+        let legend = [
+            Tone::Working,
+            Tone::NeedsYou(None),
+            Tone::Done,
+            Tone::Error,
+            Tone::Idle,
+            Tone::Saved,
+        ];
+
+        h_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .p_8()
+            .child(
+                v_flex()
+                    .max_w(px(480.))
+                    .gap_6()
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(div().font_family(appearance::SERIF).text_3xl().child(
+                                match selected {
+                                    Some(_) => "Start an agent",
+                                    None => "Add a project to begin",
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .line_height(rems(1.45))
+                                    .text_color(theme.muted_foreground)
+                                    .child(match &selected {
+                                        Some(name) => format!(
+                                            "Start Claude Code, Codex or Pi in {name}, or pick a \
+                                             chat on the left to reopen it where it left off. \
+                                             Agents keep running while you look at another chat."
+                                        ),
+                                        None => "A project is a folder you work in. Add one, \
+                                                 then start Claude Code, Codex or Pi there."
+                                            .to_string(),
+                                    }),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(match selected {
+                                Some(_) => Button::new("empty-new-chat")
+                                    .primary()
+                                    .icon(IconName::Plus)
+                                    .label("New chat")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.new_chat_here(&NewChat, window, cx)
+                                    })),
+                                None => Button::new("empty-add-project")
+                                    .primary()
+                                    .icon(IconName::FolderOpen)
+                                    .label("Add project")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.add_project(window, cx)
+                                    })),
+                            })
+                            .child(
+                                Button::new("empty-search")
+                                    .outline()
+                                    .icon(IconName::Search)
+                                    .label(match palette::shortcut(&OpenSearch, window) {
+                                        Some(keys) => format!("Search  {keys}"),
+                                        None => "Search".into(),
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_palette(window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_x_5()
+                            .gap_y_2()
+                            .pt_5()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .children(legend.map(|tone| {
+                                h_flex()
+                                    .gap_2()
+                                    .child(sidebar::dot(tone, cx))
+                                    .child(capitalized(match tone {
+                                        Tone::NeedsYou(_) => "needs you",
+                                        Tone::Error => "error",
+                                        tone => tone.label(),
+                                    }))
+                            })),
+                    ),
+            )
+    }
+}
+
+/// A shortcut's keys, and what they do.
+fn key_hint(keys: SharedString, label: &'static str, cx: &App) -> impl IntoElement {
+    let palette = appearance::palette(cx);
+    h_flex()
+        .flex_none()
+        .gap_1p5()
+        .child(
+            div()
+                .px_1p5()
+                .rounded(px(4.))
+                .bg(palette.strong)
+                .text_color(palette.secondary_foreground)
+                .child(keys),
+        )
+        .child(label)
+}
+
+/// What the agent is doing, on its status color.
+fn status_pill(tone: Tone, cx: &App) -> impl IntoElement {
+    let palette = appearance::palette(cx);
+    let (background, foreground) = tone
+        .tint(cx)
+        .map(|tint| (tint.soft, tint.text))
+        .unwrap_or((palette.strong, palette.secondary_foreground));
+    h_flex()
+        .flex_none()
+        .h(px(26.))
+        .px_2p5()
+        .gap_2()
+        .rounded_full()
+        .bg(background)
+        .text_color(foreground)
+        .text_xs()
+        .font_medium()
+        .child(sidebar::dot(tone, cx))
+        .child(capitalized(tone.label()))
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -1970,7 +2727,7 @@ fn setting_not_saved(err: rusqlite::Error, window: &mut Window, cx: &mut App) {
     );
 }
 
-fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
+fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement {
     let theme = cx.theme();
     let Settings {
         close_to_tray,
@@ -1987,20 +2744,63 @@ fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
             .text_color(theme.muted_foreground)
             .child(text)
     };
+    let section = |title: &'static str| {
+        v_flex()
+            .max_w(px(520.))
+            .gap_3()
+            .child(div().font_semibold().child(title))
+    };
+    let mono = theme.mono_font_family.clone();
+    let shortcut_row = |label: &'static str, keys: SharedString| {
+        h_flex()
+            .py_2()
+            .gap_4()
+            .border_b_1()
+            .border_color(theme.border)
+            .text_sm()
+            .child(div().flex_1().child(label))
+            .child(
+                div()
+                    .px_1p5()
+                    .rounded(px(4.))
+                    .bg(appearance::palette(cx).strong)
+                    .text_xs()
+                    .font_family(mono.clone())
+                    .child(keys),
+            )
+    };
+    let bound: [(&'static str, Box<dyn Action>); 7] = [
+        ("Search chats, projects and commands", Box::new(OpenSearch)),
+        ("Start an agent in the selected project", Box::new(NewChat)),
+        ("Show or hide the project's shell", Box::new(ToggleShell)),
+        ("Show or hide the earlier sessions", Box::new(ToggleHistory)),
+        ("Rename the chat", Box::new(RenameChat)),
+        ("Add a project", Box::new(AddProject)),
+        ("Open or close the settings", Box::new(ToggleSettings)),
+    ];
+
     v_flex()
+        .id("settings")
         .size_full()
-        .p_8()
-        .gap_6()
+        .overflow_y_scroll()
+        .px_10()
+        .py_8()
+        .gap_8()
         .child(
             h_flex()
                 .justify_between()
-                .child(div().text_xl().font_semibold().child("Settings"))
+                .child(
+                    div()
+                        .font_family(appearance::SERIF)
+                        .text_3xl()
+                        .child("Settings"),
+                )
                 .child(
                     Button::new("close-settings")
                         .ghost()
                         .small()
                         .icon(IconName::Close)
-                        .tooltip("Close settings")
+                        .tooltip_with_action("Close the settings", &ToggleSettings, None)
                         .on_click(
                             cx.listener(|this, _, window, cx| {
                                 this.show_settings(false, window, cx)
@@ -2009,25 +2809,17 @@ fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
                 ),
         )
         .child(
-            v_flex()
-                .max_w(px(440.))
-                .gap_3()
-                .child(div().font_medium().child("Appearance"))
-                .child(
-                    RadioGroup::horizontal("appearance")
-                        .children(Appearance::ALL.map(Appearance::label))
-                        .selected_index(
-                            Appearance::ALL.iter().position(|choice| *choice == current),
-                        )
-                        .on_click(cx.listener(|this, index: &usize, window, cx| {
-                            this.set_appearance(Appearance::ALL[*index], window, cx)
-                        })),
-                ),
+            section("Appearance").child(
+                RadioGroup::horizontal("appearance")
+                    .children(Appearance::ALL.map(Appearance::label))
+                    .selected_index(Appearance::ALL.iter().position(|choice| *choice == current))
+                    .on_click(cx.listener(|this, index: &usize, window, cx| {
+                        this.set_appearance(Appearance::ALL[*index], window, cx)
+                    })),
+            ),
         )
         .child(
-            v_flex()
-                .max_w(px(440.))
-                .gap_2()
+            section("Window")
                 .child(
                     Checkbox::new("close-to-tray")
                         .label("Keep running in the tray when the window is closed")
@@ -2045,10 +2837,7 @@ fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
                 )),
         )
         .child(
-            v_flex()
-                .max_w(px(440.))
-                .gap_2()
-                .child(div().font_medium().child("Notifications"))
+            section("Notifications")
                 .child(
                     Checkbox::new("notification-popups")
                         .label("Show a notification")
@@ -2089,79 +2878,56 @@ fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
                     ),
                 ),
         )
-}
-
-/// What shows while no chat is open: how to start one, and how to read the
-/// sidebar's lamps.
-fn render_empty(cx: &Context<Workspace>) -> impl IntoElement {
-    let theme = cx.theme();
-    let legend_item =
-        |color, state, label: &'static str| h_flex().gap_2().child(lamp(color, state)).child(label);
-
-    h_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .p_8()
         .child(
-            v_flex()
-                .max_w(px(440.))
-                .gap_6()
+            section("Keyboard shortcuts")
                 .child(
-                    v_flex()
-                        .gap_2()
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.4))
+                        .text_color(theme.muted_foreground)
                         .child(
-                            div()
-                                .text_xl()
-                                .font_semibold()
-                                .child("Add a project, then start a chat in it"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .line_height(rems(1.4))
-                                .text_color(theme.muted_foreground)
-                                .child(
-                                    "A project is a folder you work in. Once it's added, \
-                                     press + beside it to start Claude Code, Codex or Pi \
-                                     there. Choose a chat on the left to reopen it where it \
-                                     left off. Agents keep running while you look at \
-                                     another chat.",
-                                ),
-                        )
-                        .child(
-                            h_flex().pt_2().child(
-                                Button::new("add-first-project")
-                                    .icon(IconName::FolderOpen)
-                                    .label("Add project")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_project(window, cx)
-                                    })),
-                            ),
+                            "They work while an agent has the keyboard, so they use keys \
+                             terminal programs leave alone.",
                         ),
                 )
                 .child(
                     v_flex()
-                        .pt_5()
-                        .gap_3()
-                        .border_t_1()
-                        .border_color(theme.border)
+                        .children(bound.iter().filter_map(|(label, action)| {
+                            palette::shortcut(action.as_ref(), window)
+                                .map(|keys| shortcut_row(label, keys))
+                        }))
+                        .child(shortcut_row(
+                            "Open the chat at that place in the list",
+                            "Alt+1 … Alt+9".into(),
+                        ))
+                        .child(shortcut_row(
+                            "Select the project at that place in the rail",
+                            "Ctrl+1 … Ctrl+9".into(),
+                        )),
+                ),
+        )
+        .child(
+            section("Data")
+                .child(
+                    div()
                         .text_sm()
-                        .child(h_flex().gap_5().children(Agent::ALL.map(|agent| {
-                            legend_item(
-                                appearance::agent_color(agent, cx),
-                                Lamp::Off,
-                                agent.display_name(),
-                            )
-                        })))
+                        .line_height(rems(1.4))
+                        .text_color(theme.muted_foreground)
                         .child(
-                            h_flex()
-                                .gap_5()
-                                .text_color(theme.muted_foreground)
-                                .child(legend_item(theme.muted_foreground, Lamp::Off, "Saved"))
-                                .child(legend_item(theme.muted_foreground, Lamp::Dim, "Open"))
-                                .child(legend_item(theme.muted_foreground, Lamp::Lit, "Working")),
+                            "Chats and their history live in one database. Export writes a \
+                             copy of it where you choose.",
                         ),
+                )
+                .child(
+                    h_flex().child(
+                        Button::new("export-database")
+                            .small()
+                            .icon(IconName::HardDrive)
+                            .label("Export a copy of the database")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.export_database(window, cx)),
+                            ),
+                    ),
                 ),
         )
 }

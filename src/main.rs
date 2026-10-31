@@ -3,6 +3,7 @@ mod alerts;
 mod appearance;
 mod db;
 mod history;
+mod palette;
 mod reports;
 mod sessions;
 mod settings;
@@ -21,7 +22,7 @@ use gpui_kit::*;
 use crate::workspace::Workspace;
 
 // The icons agentshub uses beyond the components' own.
-gpui_kit::assets::icon_assets!(ExtraIcons, [Pencil, Pin, PinOff, Settings]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [Clock, Pencil, Pin, PinOff, Settings]);
 
 struct Assets;
 
@@ -82,7 +83,10 @@ pub fn open_window(workspace: Option<Entity<Workspace>>, cx: &mut App) -> Entity
             }
             None => {
                 appearance::init(cx);
-                cx.new(|cx| Workspace::new(window, cx))
+                let workspace = cx.new(|cx| Workspace::new(window, cx));
+                // The shortcuts reach the workspace through the focus.
+                workspace.update(cx, |workspace, cx| workspace.focus_chat(window, cx));
+                workspace
             }
         };
         // The chat on screen may have had a notification while the window

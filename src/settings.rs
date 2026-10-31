@@ -12,7 +12,7 @@ const NOTIFICATION_SOUND: &str = "notification_sound";
 const SIDEBAR_WIDTH: &str = "sidebar_width";
 
 /// The sidebar's width until the user drags its edge.
-pub const DEFAULT_SIDEBAR_WIDTH: f32 = 280.;
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 340.;
 
 /// The mode the theme is in.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
