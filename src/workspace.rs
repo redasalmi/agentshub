@@ -631,7 +631,11 @@ impl Workspace {
         let Some(project) = project else {
             return;
         };
-        let select = cx.new(|cx| SelectState::new(Agent::ALL.to_vec(), None, window, cx));
+        // Only the agents whose CLI is installed can start. Chats of the others
+        // stay as they are.
+        let agents = Agent::installed(&project.path);
+        let none_installed = agents.is_empty();
+        let select = cx.new(|cx| SelectState::new(agents, None, window, cx));
         let project_label = SharedString::from(project.path.to_string_lossy().into_owned());
         self.new_chat_select =
             Some(
@@ -645,7 +649,7 @@ impl Workspace {
 
         let initial_focus = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
-            if initial_focus.replace(false) {
+            if initial_focus.replace(false) && !none_installed {
                 select.focus_handle(cx).focus(window, cx);
             }
             dialog.title("Start a coding agent").child(
@@ -657,7 +661,16 @@ impl Workspace {
                             .text_color(cx.theme().muted_foreground)
                             .child(project_label.clone()),
                     )
-                    .child(Select::new(&select).placeholder("Choose an agent")),
+                    .map(|content| {
+                        if none_installed {
+                            content.child(div().text_sm().child(
+                                "No coding agent is installed. Install Claude Code, \
+                                 Codex or Pi, with its command on your PATH.",
+                            ))
+                        } else {
+                            content.child(Select::new(&select).placeholder("Choose an agent"))
+                        }
+                    }),
             )
         });
     }
