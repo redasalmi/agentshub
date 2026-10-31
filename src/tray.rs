@@ -200,7 +200,7 @@ fn sync(cx: &mut App) {
 
 /// Brings the window back, opening it again on the same workspace if it was
 /// closed.
-fn show(token: Option<String>, cx: &mut App) {
+pub fn show(token: Option<String>, cx: &mut App) {
     if let Some(window) = cx.windows().first() {
         window
             .update(cx, |_, window, _| match token {

@@ -1,4 +1,5 @@
 mod agent;
+mod alerts;
 mod appearance;
 mod db;
 mod history;
@@ -47,6 +48,7 @@ fn main() {
         // The tray decides whether closing the window quits.
         cx.set_quit_mode(QuitMode::Explicit);
         let workspace = open_window(None, cx);
+        alerts::init(&workspace, cx);
         tray::init(workspace, cx);
     });
 }
@@ -83,6 +85,16 @@ pub fn open_window(workspace: Option<Entity<Workspace>>, cx: &mut App) -> Entity
                 cx.new(|cx| Workspace::new(window, cx))
             }
         };
+        // The chat on screen may have had a notification while the window
+        // was out of the user's sight.
+        workspace.update(cx, |_, cx| {
+            cx.observe_window_activation(window, |workspace, window, cx| {
+                if window.is_window_active() {
+                    workspace.withdraw_seen(true, cx);
+                }
+            })
+            .detach();
+        });
         // The workspace loads the settings that pick the mode the first
         // time. Later, the system may have changed mode while the window was
         // closed, and the observer only fires on later changes.

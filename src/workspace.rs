@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
@@ -18,6 +19,7 @@ use gpui_kit::*;
 use notify::{RecursiveMode, Watcher as _};
 
 use crate::agent::Agent;
+use crate::alerts::{self, Alert};
 use crate::appearance;
 use crate::db::{self, Db};
 use crate::history::History;
@@ -506,8 +508,14 @@ impl Workspace {
                             this.shells.remove(&project.path);
                             this.sync_terminals(cx);
                         }
-                        if let Err(err) = this.db.remove_project(id) {
-                            eprintln!("can't remove project {id}: {err}");
+                        match this.db.remove_project(id) {
+                            // Their notifications can't open them anymore.
+                            Ok(()) => {
+                                for chat in project.into_iter().flat_map(|project| &project.chats) {
+                                    alerts::withdraw(chat.id, cx);
+                                }
+                            }
+                            Err(err) => eprintln!("can't remove project {id}: {err}"),
                         }
                         this.refresh(cx);
                     })
@@ -533,8 +541,10 @@ impl Workspace {
                 .on_ok(move |_, _, cx| {
                     this.update(cx, |this, cx| {
                         this.stop_chat(id, cx);
-                        if let Err(err) = this.db.delete_chat(id) {
-                            eprintln!("can't delete chat {id}: {err}");
+                        match this.db.delete_chat(id) {
+                            // Its notification can't open it anymore.
+                            Ok(()) => alerts::withdraw(id, cx),
+                            Err(err) => eprintln!("can't delete chat {id}: {err}"),
                         }
                         this.refresh(cx);
                     })
@@ -678,7 +688,7 @@ impl Workspace {
     }
 
     /// Shows a chat, resuming its last session if its CLI doesn't run.
-    fn open_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         if self.chats.iter().any(|chat| chat.id == id) {
             // Reading a chat's last session takes long enough for another
             // chat to be asked for meanwhile. This is the request that a
@@ -1077,6 +1087,8 @@ impl Workspace {
         };
         let busy = |status| matches!(status, Some(Status::Working | Status::Blocked(_)));
         let was_busy = busy(chat.status);
+        let alert = Alert::of(chat.agent, chat.status, status);
+        let agent = chat.agent;
         chat.unseen = match status {
             Some(Status::Done | Status::Error) => !shown,
             // Codex goes back to idle without saying it's done. The others
@@ -1092,8 +1104,40 @@ impl Workspace {
         {
             self.read_sessions(vec![session], true, cx).detach();
         }
+        match (alert, status) {
+            // Nobody needs telling about the chat they're looking at.
+            (Some(alert), Some(status)) if !self.in_view(id, cx.active_window().is_some()) => {
+                let body = self
+                    .sidebar
+                    .read(cx)
+                    .describe(id)
+                    .unwrap_or_else(|| "A chat in Agents Hub".into());
+                alerts::alert(id, agent, alert, status, body, cx);
+            }
+            // Once the agent is back at work, what it needed has been seen to.
+            (_, Some(Status::Working)) => alerts::withdraw(id, cx),
+            _ => {}
+        }
         self.sync_sidebar(cx);
         self.evict(cx);
+    }
+
+    /// Whether the user can see chat `id`: it's shown, nothing covers it and
+    /// the window has the focus.
+    fn in_view(&self, id: i64, focused: bool) -> bool {
+        self.active == Some(id) && !self.settings_shown && !self.hidden && focused
+    }
+
+    /// Takes back the notification about the shown chat once the user can
+    /// see it, as when the window takes the focus or the settings close.
+    /// `focused` is passed in because, on X11, the window's activation is
+    /// reported before `cx.active_window()` catches up with it.
+    pub fn withdraw_seen(&self, focused: bool, cx: &mut App) {
+        if let Some(id) = self.active
+            && self.in_view(id, focused)
+        {
+            alerts::withdraw(id, cx);
+        }
     }
 
     /// Marks the chat that is shown and what each running one is doing.
@@ -1468,6 +1512,7 @@ impl Workspace {
         if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) {
             chat.unseen = false;
         }
+        alerts::withdraw(id, cx);
         self.active = Some(id);
         self.requested = Some(id);
         self.settings_shown = false;
@@ -1514,9 +1559,10 @@ impl Workspace {
 
     /// Stops the shown terminals from building frames while the window is
     /// closed to the tray, and starts them again when it opens.
-    pub fn set_hidden(&mut self, hidden: bool, cx: &App) {
+    pub fn set_hidden(&mut self, hidden: bool, cx: &mut App) {
         self.hidden = hidden;
         self.sync_terminals(cx);
+        self.withdraw_seen(cx.active_window().is_some(), cx);
     }
 
     /// Shows the settings in place of the chat, or the chat again. The focus
@@ -1531,6 +1577,7 @@ impl Workspace {
             self.focus_chat(window, cx);
         }
         self.sync_terminals(cx);
+        self.withdraw_seen(window.is_window_active(), cx);
         cx.notify();
     }
 
@@ -1606,6 +1653,9 @@ impl Workspace {
             self.shells[&cwd].view.focus_handle(cx).focus(window, cx);
         }
         self.sync_terminals(cx);
+        // Closing the settings shows the chat, which no activation reports
+        // while the window already has the focus.
+        self.withdraw_seen(window.is_window_active(), cx);
         cx.notify();
     }
 
@@ -1817,7 +1867,17 @@ fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
     let Settings {
         close_to_tray,
         appearance: current,
+        notification_popups,
+        notification_sound,
     } = *cx.global::<Settings>();
+    let hint = |text: &'static str| {
+        div()
+            .pl_6()
+            .text_sm()
+            .line_height(rems(1.4))
+            .text_color(theme.muted_foreground)
+            .child(text)
+    };
     v_flex()
         .size_full()
         .p_8()
@@ -1870,17 +1930,54 @@ fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
                             cx.notify();
                         })),
                 )
+                .child(hint(
+                    "Agents keep working while the window is closed. Choose Agents Hub in \
+                     the tray to open it again, or Quit there to stop them.",
+                )),
+        )
+        .child(
+            v_flex()
+                .max_w(px(440.))
+                .gap_2()
+                .child(div().font_medium().child("Notifications"))
                 .child(
-                    div()
-                        .pl_6()
-                        .text_sm()
-                        .line_height(rems(1.4))
-                        .text_color(theme.muted_foreground)
-                        .child(
-                            "Agents keep working while the window is closed. Choose \
-                             Agents Hub in the tray to open it again, or Quit there to \
-                             stop them.",
-                        ),
+                    Checkbox::new("notification-popups")
+                        .label("Show a notification")
+                        .checked(notification_popups)
+                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                            if let Err(err) =
+                                Settings::set_notification_popups(&this.db, *checked, cx)
+                            {
+                                setting_not_saved(err, window, cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Checkbox::new("notification-sound")
+                        .label("Play a sound")
+                        .checked(notification_sound)
+                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                            if let Err(err) =
+                                Settings::set_notification_sound(&this.db, *checked, cx)
+                            {
+                                setting_not_saved(err, window, cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(hint(
+                    "When an agent finishes, needs you or stops on an error while you're \
+                     looking elsewhere. Clicking the notification opens its chat.",
+                ))
+                .child(
+                    h_flex().pl_6().pt_1().child(
+                        Button::new("test-notification")
+                            .small()
+                            .label("Try it")
+                            .disabled(!notification_popups && !notification_sound)
+                            .on_click(|_, _, cx| alerts::test(cx)),
+                    ),
                 ),
         )
 }

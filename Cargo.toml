@@ -21,6 +21,8 @@ unicode-segmentation = "1"
 uuid = { version = "1", features = ["v4"] }
 wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+zbus = "5"
 
 # Dependencies are built optimized even in dev builds: GPUI and the terminal
 # are far too slow unoptimized, and they rarely need a debugger.

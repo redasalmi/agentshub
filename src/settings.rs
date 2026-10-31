@@ -7,6 +7,8 @@ use crate::db::Db;
 
 const CLOSE_TO_TRAY: &str = "close_to_tray";
 const APPEARANCE: &str = "appearance";
+const NOTIFICATION_POPUPS: &str = "notification_popups";
+const NOTIFICATION_SOUND: &str = "notification_sound";
 
 /// The mode the theme is in.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -45,11 +47,27 @@ impl Appearance {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct Settings {
     /// Whether closing the window leaves the app running in the tray.
     pub close_to_tray: bool,
     pub appearance: Appearance,
+    /// Whether a desktop notification says when an agent finishes or needs
+    /// the user.
+    pub notification_popups: bool,
+    /// Whether a sound plays then, with or without the notification.
+    pub notification_sound: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            close_to_tray: false,
+            appearance: Appearance::default(),
+            notification_popups: true,
+            notification_sound: true,
+        }
+    }
 }
 
 impl Global for Settings {}
@@ -63,12 +81,33 @@ impl Settings {
                 .ok()
                 .flatten()
         }
+        let defaults = Self::default();
         Self {
-            close_to_tray: read(db.flag(CLOSE_TO_TRAY)).unwrap_or_default(),
+            close_to_tray: read(db.flag(CLOSE_TO_TRAY)).unwrap_or(defaults.close_to_tray),
             appearance: read(db.text(APPEARANCE))
                 .and_then(|key| Appearance::from_key(&key))
-                .unwrap_or_default(),
+                .unwrap_or(defaults.appearance),
+            notification_popups: read(db.flag(NOTIFICATION_POPUPS))
+                .unwrap_or(defaults.notification_popups),
+            notification_sound: read(db.flag(NOTIFICATION_SOUND))
+                .unwrap_or(defaults.notification_sound),
         }
+    }
+
+    pub fn set_notification_popups(db: &Db, value: bool, cx: &mut App) -> rusqlite::Result<()> {
+        cx.set_global(Self {
+            notification_popups: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_flag(NOTIFICATION_POPUPS, value)
+    }
+
+    pub fn set_notification_sound(db: &Db, value: bool, cx: &mut App) -> rusqlite::Result<()> {
+        cx.set_global(Self {
+            notification_sound: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_flag(NOTIFICATION_SOUND, value)
     }
 
     // The setters apply the setting, which only lasts until the app quits

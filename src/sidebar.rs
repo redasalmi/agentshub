@@ -91,6 +91,18 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Which chat `id` is, for telling the user about it away from the
+    /// sidebar: its title and its project's name.
+    pub fn describe(&self, id: i64) -> Option<String> {
+        self.projects.iter().find_map(|project| {
+            let chat = project.chats.iter().find(|chat| chat.id == id)?;
+            Some(match &chat.title {
+                Some(title) => format!("{title} · {}", project.name),
+                None => format!("New chat in {}", project.name),
+            })
+        })
+    }
+
     /// Shows a project's chats.
     pub fn expand(&mut self, project_id: i64, cx: &mut Context<Self>) {
         self.collapsed.remove(&project_id);
@@ -471,7 +483,7 @@ pub fn lamp(color: Hsla, state: Lamp) -> Div {
 
 /// What a chat's agent is doing, or just its name while it doesn't run.
 /// `Some(None)` is an agent that runs but hasn't said what it's doing.
-fn activity(agent: Agent, running: Option<Option<Status>>) -> String {
+pub fn activity(agent: Agent, running: Option<Option<Status>>) -> String {
     let name = agent.display_name();
     match running {
         None => name.to_string(),
