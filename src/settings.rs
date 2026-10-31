@@ -9,6 +9,10 @@ const CLOSE_TO_TRAY: &str = "close_to_tray";
 const APPEARANCE: &str = "appearance";
 const NOTIFICATION_POPUPS: &str = "notification_popups";
 const NOTIFICATION_SOUND: &str = "notification_sound";
+const SIDEBAR_WIDTH: &str = "sidebar_width";
+
+/// The sidebar's width until the user drags its edge.
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 280.;
 
 /// The mode the theme is in.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -57,6 +61,8 @@ pub struct Settings {
     pub notification_popups: bool,
     /// Whether a sound plays then, with or without the notification.
     pub notification_sound: bool,
+    /// How wide the user last dragged the sidebar, in logical pixels.
+    pub sidebar_width: f32,
 }
 
 impl Default for Settings {
@@ -66,6 +72,7 @@ impl Default for Settings {
             appearance: Appearance::default(),
             notification_popups: true,
             notification_sound: true,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 }
@@ -91,6 +98,10 @@ impl Settings {
                 .unwrap_or(defaults.notification_popups),
             notification_sound: read(db.flag(NOTIFICATION_SOUND))
                 .unwrap_or(defaults.notification_sound),
+            sidebar_width: read(db.number(SIDEBAR_WIDTH))
+                .map(|width| width as f32)
+                .filter(|width| width.is_finite() && *width > 0.)
+                .unwrap_or(defaults.sidebar_width),
         }
     }
 
@@ -119,6 +130,14 @@ impl Settings {
             ..*cx.global::<Self>()
         });
         db.set_flag(CLOSE_TO_TRAY, value)
+    }
+
+    pub fn set_sidebar_width(db: &Db, value: f32, cx: &mut App) -> rusqlite::Result<()> {
+        cx.set_global(Self {
+            sidebar_width: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_number(SIDEBAR_WIDTH, value.into())
     }
 
     /// Callers put the theme in the new mode with `appearance::apply`.

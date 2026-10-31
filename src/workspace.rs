@@ -9,7 +9,9 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::component::radio::RadioGroup;
+use gpui_kit::component::resizable::{HandleEdge, resize_handle};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
@@ -25,14 +27,21 @@ use crate::db::{self, Db};
 use crate::history::History;
 use crate::reports::{self, Reports};
 use crate::sessions;
-use crate::settings::{Appearance, Settings};
+use crate::settings::{Appearance, DEFAULT_SIDEBAR_WIDTH, Settings};
 use crate::sidebar::{Lamp, Sidebar, SidebarEvent, lamp};
 use crate::status::Status;
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::TerminalView;
 use crate::transcript;
 
-const SIDEBAR_WIDTH: Pixels = px(280.);
+/// The narrowest the sidebar can be dragged.
+const MIN_SIDEBAR_WIDTH: Pixels = px(200.);
+
+/// The widest the sidebar can be dragged.
+const MAX_SIDEBAR_WIDTH: Pixels = px(600.);
+
+/// How much of the window the sidebar always leaves to the chat.
+const MIN_MAIN_WIDTH: Pixels = px(360.);
 
 /// The most of the window's height that a chat's earlier sessions take.
 const HISTORY_SHARE: f32 = 0.45;
@@ -135,6 +144,29 @@ pub struct Workspace {
     /// Holds the focus when nothing in the workspace does, so its key
     /// bindings still reach it.
     focus_handle: FocusHandle,
+    /// How wide the user wants the sidebar, saved once a drag of its edge
+    /// ends. A window too narrow for it shows it narrower.
+    sidebar_width: Pixels,
+}
+
+/// What dragging the sidebar's edge carries, and draws: nothing, since the
+/// sidebar itself follows the pointer.
+#[derive(Clone)]
+struct ResizeSidebar;
+
+impl Render for ResizeSidebar {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// `width` kept within the sidebar's limits, and narrow enough to leave the
+/// chat room in a window `window_width` wide.
+fn clamp_sidebar_width(width: Pixels, window_width: Pixels) -> Pixels {
+    let max = MAX_SIDEBAR_WIDTH
+        .min(window_width - MIN_MAIN_WIDTH)
+        .max(MIN_SIDEBAR_WIDTH);
+    width.clamp(MIN_SIDEBAR_WIDTH, max)
 }
 
 struct Shell {
@@ -408,6 +440,7 @@ impl Workspace {
             settings_shown: false,
             hidden: false,
             focus_handle: cx.focus_handle(),
+            sidebar_width: px(cx.global::<Settings>().sidebar_width),
         };
         this.update_codex_watch();
         this.refresh(cx);
@@ -1692,6 +1725,46 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// The sidebar's right edge, which resizes it when dragged and restores
+    /// its default width when double clicked.
+    fn render_sidebar_edge(&self, cx: &Context<Self>) -> impl IntoElement {
+        let workspace = cx.weak_entity();
+        resize_handle("sidebar-edge", Axis::Horizontal)
+            .inside(HandleEdge::Trailing)
+            .on_drag(ResizeSidebar, move |drag, _, _, cx| {
+                cx.stop_propagation();
+                let workspace = workspace.clone();
+                cx.new(|cx| {
+                    // The drag lets go of what it carries once it ends, which
+                    // is when the width the user settled on is saved.
+                    cx.on_release(move |_, cx| {
+                        workspace
+                            .update(cx, |this, cx| this.save_sidebar_width(cx))
+                            .ok();
+                    })
+                    .detach();
+                    drag.clone()
+                })
+            })
+            .on_double_click(cx.listener(|this, _, _, cx| {
+                this.sidebar_width = px(DEFAULT_SIDEBAR_WIDTH);
+                this.save_sidebar_width(cx);
+                cx.notify();
+            }))
+    }
+
+    fn save_sidebar_width(&mut self, cx: &mut Context<Self>) {
+        let width = f32::from(self.sidebar_width);
+        if cx.global::<Settings>().sidebar_width == width {
+            return;
+        }
+        if let Err(err) = Settings::set_sidebar_width(&self.db, width, cx) {
+            eprintln!("can't save the sidebar's width: {err}");
+        }
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -1711,16 +1784,38 @@ impl Render for Workspace {
             .text_color(theme.foreground)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_shell))
-            // Terminal output re-renders the window many times a second; the
-            // sidebar and the history only need to render again when their own
-            // state changes.
+            // Follows the pointer anywhere in the window while the sidebar's
+            // edge is dragged, since it leaves the edge's thin band at once.
+            .on_drag_move(cx.listener(
+                |this, event: &DragMoveEvent<ResizeSidebar>, window, cx| {
+                    let width = clamp_sidebar_width(
+                        event.event.position.x - event.bounds.left(),
+                        window.viewport_size().width,
+                    );
+                    if width != this.sidebar_width {
+                        this.sidebar_width = width;
+                        cx.notify();
+                    }
+                },
+            ))
             .child(
-                self.sidebar.clone().cached(
-                    StyleRefinement::default()
-                        .w(SIDEBAR_WIDTH)
-                        .h_full()
-                        .flex_none(),
-                ),
+                div()
+                    .relative()
+                    .w(clamp_sidebar_width(
+                        self.sidebar_width,
+                        window.viewport_size().width,
+                    ))
+                    .h_full()
+                    .flex_none()
+                    // Terminal output re-renders the window many times a
+                    // second; the sidebar and the history only need to render
+                    // again when their own state changes.
+                    .child(
+                        self.sidebar
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    )
+                    .child(self.render_sidebar_edge(cx)),
             )
             .child(
                 v_flex()
@@ -1882,6 +1977,7 @@ fn render_settings(cx: &Context<Workspace>) -> impl IntoElement {
         appearance: current,
         notification_popups,
         notification_sound,
+        ..
     } = *cx.global::<Settings>();
     let hint = |text: &'static str| {
         div()

@@ -489,6 +489,25 @@ impl Db {
         Ok(())
     }
 
+    /// A setting that is a number, or `None` while it has its default. The
+    /// column stores a whole number as an integer, which reads back as well.
+    pub fn number(&self, key: &str) -> Result<Option<f64>> {
+        self.read()
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+    }
+
+    pub fn set_number(&self, key: &str, value: f64) -> Result<()> {
+        self.write().execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// Moves a chat to where `to` is, among the chats of its project that are
     /// pinned as it is. Nothing moves when `to` isn't one of them.
     pub fn move_chat(&self, id: i64, to: i64) -> Result<()> {
@@ -1290,6 +1309,17 @@ mod tests {
         db.set_flag("x", true).unwrap();
         db.set_flag("x", false).unwrap();
         assert_eq!(db.flag("x").unwrap(), Some(false));
+    }
+
+    #[test]
+    fn numbers_read_back_whole_or_fractional() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.number("x").unwrap(), None);
+        // The column's affinity stores this one as an integer.
+        db.set_number("x", 450.).unwrap();
+        assert_eq!(db.number("x").unwrap(), Some(450.));
+        db.set_number("x", 312.5).unwrap();
+        assert_eq!(db.number("x").unwrap(), Some(312.5));
     }
 
     #[test]
