@@ -1,0 +1,73 @@
+# Builds the Linux release and, for a version tag, publishes it as a GitHub
+# release that install.sh downloads.
+#
+#   git tag v0.1.0 && git push origin v0.1.0   -> builds and publishes v0.1.0
+#   Actions tab -> Release -> Run workflow     -> builds only, as an artifact
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # The oldest supported runner, so the binary links against an old glibc
+    # and runs on older distros too.
+    runs-on: ubuntu-22.04
+    env:
+      ASSET: agentshub-x86_64-linux
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libx11-xcb-dev
+
+      # Zig, which builds Ghostty's VT library, at the version in mise.toml.
+      - uses: jdx/mise-action@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          mkdir "$ASSET"
+          cp target/release/agentshub assets/agentshub.desktop assets/agentshub.svg "$ASSET"/
+          tar -czf "$ASSET.tar.gz" "$ASSET"
+          sha256sum "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
+
+      - name: Upload artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}.tar.gz*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --generate-notes \
+            "$ASSET.tar.gz" "$ASSET.tar.gz.sha256"
