@@ -31,7 +31,7 @@ use crate::history::History;
 use crate::palette::{self, Entry, Lead, Pick};
 use crate::reports::{self, Reports};
 use crate::sessions;
-use crate::settings::{Appearance, DEFAULT_SIDEBAR_WIDTH, Settings};
+use crate::settings::{Appearance, DEFAULT_SIDEBAR_WIDTH, Settings, ThemeFamily};
 use crate::sidebar::{self, Filter, NUMBERED, Sidebar, SidebarEvent, Tone, home_relative};
 use crate::status::Status;
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
@@ -93,6 +93,11 @@ actions!(
         ExportDatabase,
     ]
 );
+
+/// Puts the app in a family of themes.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = workspace, no_json)]
+pub struct UseTheme(pub ThemeFamily);
 
 /// Opens the `n`th chat of the sidebar's list, counting from zero.
 #[derive(Clone, PartialEq, Debug, Action)]
@@ -1713,6 +1718,15 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Saves the family of themes and puts the theme in it.
+    fn set_theme(&mut self, value: ThemeFamily, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = Settings::set_theme(&self.db, value, cx) {
+            setting_not_saved(err, window, cx);
+        }
+        appearance::apply(window, cx);
+        cx.notify();
+    }
+
     /// Focuses the shown chat's CLI, or the workspace if it has none running
     /// or the settings cover it. A terminal out of the rendered tree can't
     /// hold the focus: keys would skip the workspace's bindings.
@@ -1868,6 +1882,10 @@ impl Workspace {
 
     fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
         self.set_appearance(appearance::other(cx), window, cx);
+    }
+
+    fn use_theme(&mut self, action: &UseTheme, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_theme(action.0, window, cx);
     }
 
     fn export_action(&mut self, _: &ExportDatabase, window: &mut Window, cx: &mut Context<Self>) {
@@ -2034,6 +2052,17 @@ impl Workspace {
             },
             Box::new(ToggleTheme),
         ));
+        let family = cx.global::<Settings>().theme;
+        for each in ThemeFamily::ALL.into_iter().filter(|each| *each != family) {
+            commands.push(
+                run(
+                    &format!("Use the {} theme", each.label()),
+                    IconName::Palette,
+                    Box::new(UseTheme(each)),
+                )
+                .keywords(["theme", "colors"]),
+            );
+        }
         commands.push(run(
             "Settings",
             IconName::Settings,
@@ -2161,6 +2190,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_pin))
             .on_action(cx.listener(Self::delete_active))
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(Self::use_theme))
             .on_action(cx.listener(Self::export_action))
             .on_action(cx.listener(Self::open_chat_at))
             .on_action(cx.listener(Self::select_project_at))
@@ -2732,6 +2762,7 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
     let Settings {
         close_to_tray,
         appearance: current,
+        theme: family,
         notification_popups,
         notification_sound,
         ..
@@ -2807,6 +2838,16 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
                             }),
                         ),
                 ),
+        )
+        .child(
+            section("Theme").child(
+                RadioGroup::horizontal("theme")
+                    .children(ThemeFamily::ALL.map(ThemeFamily::label))
+                    .selected_index(ThemeFamily::ALL.iter().position(|choice| *choice == family))
+                    .on_click(cx.listener(|this, index: &usize, window, cx| {
+                        this.set_theme(ThemeFamily::ALL[*index], window, cx)
+                    })),
+            ),
         )
         .child(
             section("Appearance").child(

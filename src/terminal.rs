@@ -1247,10 +1247,13 @@ mod tests {
     }
 
     fn colors() -> Colors {
+        // Black, then red, which the scripts print in.
+        let mut ansi = [RgbColor::default(); 16];
+        ansi[1] = RgbColor { r: 255, g: 0, b: 0 };
         Colors {
             background: RgbColor::default(),
             foreground: white(),
-            ansi: crate::appearance::DARK_ANSI,
+            ansi,
         }
     }
 

@@ -7,6 +7,7 @@ use crate::db::Db;
 
 const CLOSE_TO_TRAY: &str = "close_to_tray";
 const APPEARANCE: &str = "appearance";
+const THEME: &str = "theme";
 const NOTIFICATION_POPUPS: &str = "notification_popups";
 const NOTIFICATION_SOUND: &str = "notification_sound";
 const SIDEBAR_WIDTH: &str = "sidebar_width";
@@ -51,11 +52,44 @@ impl Appearance {
     }
 }
 
+/// The family of themes the app draws with, each with a light and a dark
+/// theme.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum ThemeFamily {
+    #[default]
+    Linear,
+    Primer,
+}
+
+impl ThemeFamily {
+    pub const ALL: [Self; 2] = [Self::Linear, Self::Primer];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::Primer => "Primer",
+        }
+    }
+
+    /// How the database spells it.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Primer => "primer",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|family| family.key() == key)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Settings {
     /// Whether closing the window leaves the app running in the tray.
     pub close_to_tray: bool,
     pub appearance: Appearance,
+    pub theme: ThemeFamily,
     /// Whether a desktop notification says when an agent finishes or needs
     /// the user.
     pub notification_popups: bool,
@@ -70,6 +104,7 @@ impl Default for Settings {
         Self {
             close_to_tray: false,
             appearance: Appearance::default(),
+            theme: ThemeFamily::default(),
             notification_popups: true,
             notification_sound: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -94,6 +129,9 @@ impl Settings {
             appearance: read(db.text(APPEARANCE))
                 .and_then(|key| Appearance::from_key(&key))
                 .unwrap_or(defaults.appearance),
+            theme: read(db.text(THEME))
+                .and_then(|key| ThemeFamily::from_key(&key))
+                .unwrap_or(defaults.theme),
             notification_popups: read(db.flag(NOTIFICATION_POPUPS))
                 .unwrap_or(defaults.notification_popups),
             notification_sound: read(db.flag(NOTIFICATION_SOUND))
@@ -148,11 +186,20 @@ impl Settings {
         });
         db.set_text(APPEARANCE, value.key())
     }
+
+    /// Callers put the theme in the new family with `appearance::apply`.
+    pub fn set_theme(db: &Db, value: ThemeFamily, cx: &mut App) -> rusqlite::Result<()> {
+        cx.set_global(Self {
+            theme: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_text(THEME, value.key())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Appearance;
+    use super::{Appearance, ThemeFamily};
 
     #[test]
     fn appearances_read_back_as_saved() {
@@ -160,5 +207,13 @@ mod tests {
             assert_eq!(Appearance::from_key(appearance.key()), Some(appearance));
         }
         assert_eq!(Appearance::from_key("sepia"), None);
+    }
+
+    #[test]
+    fn theme_families_read_back_as_saved() {
+        for family in ThemeFamily::ALL {
+            assert_eq!(ThemeFamily::from_key(family.key()), Some(family));
+        }
+        assert_eq!(ThemeFamily::from_key("solarized"), None);
     }
 }
