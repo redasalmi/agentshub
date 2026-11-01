@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName as ExtraIcon;
@@ -91,6 +92,7 @@ actions!(
         DeleteChat,
         ToggleTheme,
         ExportDatabase,
+        ImportDatabase,
     ]
 );
 
@@ -212,6 +214,8 @@ pub struct Workspace {
     /// How wide the user wants the sidebar, saved once a drag of its edge
     /// ends. A window too narrow for it shows it narrower.
     sidebar_width: Pixels,
+    /// Whether a database to import is being picked or checked.
+    importing: bool,
 }
 
 /// What dragging the sidebar's edge carries, and draws: nothing, since the
@@ -299,17 +303,37 @@ impl Chat {
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (db, lock, broken) = match db::open_locked() {
-            Ok((db, lock)) => (db, lock, None),
+        let (db, lock, imported, broken) = match db::open_locked() {
+            Ok((db, lock, imported)) => (db, lock, imported, None),
             Err(err) => {
                 eprintln!("{err:#}");
                 (
                     Db::open_in_memory().expect("SQLite opens in memory"),
                     None,
+                    None,
                     Some(format!("{err:#}").into()),
                 )
             }
         };
+        // Said once the window is up, since its notifications aren't yet.
+        if let Some(imported) = imported {
+            let message = match imported {
+                db::Imported::Replaced(Some(backup)) => format!(
+                    "Imported the database. The one it replaced is backed up at {}",
+                    home_relative(&backup)
+                ),
+                db::Imported::Replaced(None) => "Imported the database.".into(),
+                db::Imported::Failed(err) => {
+                    eprintln!("can't import the database: {err:#}");
+                    format!("Couldn't import the database, so it is as it was: {err:#}")
+                }
+            };
+            cx.spawn_in(window, async move |_, cx| {
+                cx.update(|window, cx| window.push_notification(message, cx))
+                    .ok();
+            })
+            .detach();
+        }
 
         cx.set_global(Settings::load(&db));
         let sidebar = cx.new(Sidebar::new);
@@ -508,6 +532,7 @@ impl Workspace {
             hidden: false,
             focus_handle: cx.focus_handle(),
             sidebar_width: px(cx.global::<Settings>().sidebar_width),
+            importing: false,
         };
         this.update_codex_watch();
         this.refresh(cx);
@@ -581,6 +606,138 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Replaces the database with one the user picks, once it is checked and
+    /// they have seen what it holds. Agents Hub restarts to use it, which
+    /// stops the agents as quitting does, and backs up the database it
+    /// replaces on the way back up.
+    fn import_database(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // One pick and check at a time, so a second click doesn't open a
+        // second picker, or a second dialog over the first.
+        if self.importing {
+            return;
+        }
+        self.importing = true;
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match picked.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Err(err)) => {
+                    this.update_in(cx, |_, window, cx| {
+                        window.push_notification(format!("Couldn't pick a file: {err}"), cx)
+                    })
+                    .ok();
+                    None
+                }
+                _ => None,
+            };
+            let Some(path) = path else {
+                this.update(cx, |this, _| this.importing = false).ok();
+                return;
+            };
+            // Checking and copying a large database takes a while.
+            let prepared = smol::unblock({
+                let path = path.clone();
+                move || db::prepare_import(&path)
+            })
+            .await;
+            // Another import can start once this one is shown: the dialog is
+            // modal, and each check has a copy of its own. The window may have
+            // closed to the tray meanwhile, which the workspace outlives, so
+            // this doesn't wait for it.
+            this.update(cx, |this, _| this.importing = false).ok();
+            let unshown = prepared.as_ref().ok().map(|(pending, _)| pending.clone());
+            let shown = this.update_in(cx, |this, window, cx| match prepared {
+                Ok((pending, projects)) => {
+                    this.confirm_import(&path, pending, projects, window, cx)
+                }
+                Err(err) => window.push_notification(
+                    format!("Couldn't import {}: {err:#}", home_relative(&path)),
+                    cx,
+                ),
+            });
+            // Without a window to confirm it in, the copy is turned down.
+            if shown.is_err()
+                && let Some(pending) = unshown
+            {
+                pending.discard();
+            }
+        })
+        .detach();
+    }
+
+    /// Shows what a checked database holds, and restarts with it in place of
+    /// the database once the user confirms.
+    fn confirm_import(
+        &mut self,
+        path: &Path,
+        pending: db::PendingImport,
+        projects: Vec<db::Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let chats: usize = projects.iter().map(|project| project.chats.len()).sum();
+        let holds = match (projects.len(), chats) {
+            (0, _) => format!("{name} has no projects."),
+            (projects, chats) => format!(
+                "{name} has {} and {}:",
+                plural(projects, "project"),
+                plural(chats, "chat")
+            ),
+        };
+        let dir = db::path()
+            .and_then(|path| path.parent().map(home_relative))
+            .unwrap_or_default();
+        let projects: Rc<[db::Project]> = projects.into();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let theme = cx.theme();
+            let (confirm, discard) = (pending.clone(), pending.clone());
+            alert
+                .confirm()
+                .width(px(520.))
+                .title("Replace your chats with these?")
+                .description(holds.clone())
+                .when(!projects.is_empty(), |alert| {
+                    alert.child(render_import(&projects, theme))
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.4))
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "Agents Hub restarts to use them, which stops the agents running \
+                             now. Your projects, chats and settings are replaced; the database \
+                             holding them is backed up first in {dir}, and importing that \
+                             backup brings them back."
+                        )),
+                )
+                .ok_text("Import and restart")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    match confirm.confirm() {
+                        Ok(()) => cx.restart(),
+                        Err(err) => window.push_notification(
+                            format!("Couldn't import the database: {err:#}"),
+                            cx,
+                        ),
+                    }
+                    true
+                })
+                // The checked copy is gone once confirmed, so this only
+                // deletes one the user turned down.
+                .on_close(move |_, _, _| discard.discard())
+        });
     }
 
     fn confirm_remove_project(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
@@ -1892,6 +2049,10 @@ impl Workspace {
         self.export_database(window, cx);
     }
 
+    fn import_action(&mut self, _: &ImportDatabase, window: &mut Window, cx: &mut Context<Self>) {
+        self.import_database(window, cx);
+    }
+
     fn open_chat_at(&mut self, action: &OpenChatAt, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.sidebar.read(cx).chat_at(action.0) {
             self.open_chat(id, window, cx);
@@ -2073,6 +2234,14 @@ impl Workspace {
             IconName::HardDrive,
             Box::new(ExportDatabase),
         ));
+        commands.push(
+            run(
+                "Import a database",
+                IconName::HardDrive,
+                Box::new(ImportDatabase),
+            )
+            .keywords(["restore", "backup"]),
+        );
 
         let this = cx.entity().downgrade();
         palette::open(
@@ -2192,6 +2361,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_theme))
             .on_action(cx.listener(Self::use_theme))
             .on_action(cx.listener(Self::export_action))
+            .on_action(cx.listener(Self::import_action))
             .on_action(cx.listener(Self::open_chat_at))
             .on_action(cx.listener(Self::select_project_at))
             // Follows the pointer anywhere in the window while the sidebar's
@@ -2749,6 +2919,77 @@ fn render_broken(reason: SharedString, cx: &Context<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
+/// The projects of a database about to be imported, each with its first few
+/// chats.
+fn render_import(projects: &[db::Project], theme: &Theme) -> impl IntoElement {
+    /// The chats listed under each project; the others are counted.
+    const SHOWN_CHATS: usize = 3;
+    v_flex()
+        .id("import-projects")
+        .max_h(px(260.))
+        .overflow_y_scroll()
+        .gap_3()
+        .p_3()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .text_sm()
+        .children(projects.iter().map(|project| {
+            let more = project.chats.len().saturating_sub(SHOWN_CHATS);
+            v_flex()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_medium()
+                                .text_color(theme.foreground)
+                                .child(project.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .child(home_relative(&project.path)),
+                        ),
+                )
+                .children(project.chats.iter().take(SHOWN_CHATS).map(|chat| {
+                    div()
+                        .pl_3()
+                        .truncate()
+                        .text_color(theme.muted_foreground)
+                        .child(chat.title.clone().unwrap_or_else(|| "New chat".into()))
+                }))
+                .when(more > 0, |list| {
+                    list.child(
+                        div()
+                            .pl_3()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("and {} more", plural(more, "chat"))),
+                    )
+                })
+                .when(project.chats.is_empty(), |list| {
+                    list.child(
+                        div()
+                            .pl_3()
+                            .text_color(theme.muted_foreground)
+                            .child("No chats"),
+                    )
+                })
+        }))
+}
+
+/// "1 chat", "2 chats".
+fn plural(count: usize, noun: &str) -> String {
+    match count {
+        1 => format!("1 {noun}"),
+        _ => format!("{count} {noun}s"),
+    }
+}
+
 fn setting_not_saved(err: rusqlite::Error, window: &mut Window, cx: &mut App) {
     eprintln!("can't save the settings: {err}");
     window.push_notification(
@@ -2956,19 +3197,30 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
                         .text_color(theme.muted_foreground)
                         .child(
                             "Chats and their history live in one database. Export writes a \
-                             copy of it where you choose.",
+                             copy of it where you choose. Import replaces it with one Agents \
+                             Hub wrote, such as an export, and backs it up first.",
                         ),
                 )
                 .child(
-                    h_flex().child(
-                        Button::new("export-database")
-                            .small()
-                            .icon(IconName::HardDrive)
-                            .label("Export a copy of the database")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.export_database(window, cx)),
-                            ),
-                    ),
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("export-database")
+                                .small()
+                                .icon(IconName::HardDrive)
+                                .label("Export a copy of the database")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.export_database(window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("import-database")
+                                .small()
+                                .label("Import a database")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.import_database(window, cx)
+                                })),
+                        ),
                 ),
         )
 }
