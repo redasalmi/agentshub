@@ -11,6 +11,7 @@ const THEME: &str = "theme";
 const NOTIFICATION_POPUPS: &str = "notification_popups";
 const NOTIFICATION_SOUND: &str = "notification_sound";
 const SIDEBAR_WIDTH: &str = "sidebar_width";
+const WORKTREE_BY_DEFAULT: &str = "worktree_by_default";
 
 /// The sidebar's width until the user drags its edge.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 340.;
@@ -97,6 +98,9 @@ pub struct Settings {
     pub notification_sound: bool,
     /// How wide the user last dragged the sidebar, in logical pixels.
     pub sidebar_width: f32,
+    /// Whether a new chat in a git project starts in a worktree of its own
+    /// unless the user unticks it.
+    pub worktree_by_default: bool,
 }
 
 impl Default for Settings {
@@ -108,6 +112,7 @@ impl Default for Settings {
             notification_popups: true,
             notification_sound: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            worktree_by_default: false,
         }
     }
 }
@@ -140,6 +145,8 @@ impl Settings {
                 .map(|width| width as f32)
                 .filter(|width| width.is_finite() && *width > 0.)
                 .unwrap_or(defaults.sidebar_width),
+            worktree_by_default: read(db.flag(WORKTREE_BY_DEFAULT))
+                .unwrap_or(defaults.worktree_by_default),
         }
     }
 
@@ -168,6 +175,14 @@ impl Settings {
             ..*cx.global::<Self>()
         });
         db.set_flag(CLOSE_TO_TRAY, value)
+    }
+
+    pub fn set_worktree_by_default(db: &Db, value: bool, cx: &mut App) -> rusqlite::Result<()> {
+        cx.set_global(Self {
+            worktree_by_default: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_flag(WORKTREE_BY_DEFAULT, value)
     }
 
     pub fn set_sidebar_width(db: &Db, value: f32, cx: &mut App) -> rusqlite::Result<()> {

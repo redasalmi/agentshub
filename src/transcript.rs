@@ -640,7 +640,7 @@ mod tests {
     fn session(agent: Agent, path: &Path) -> (Db, i64) {
         let db = Db::open_in_memory().unwrap();
         let project = db.add_project(Path::new("/p")).unwrap();
-        let chat = db.add_chat(project, agent).unwrap();
+        let chat = db.add_chat(project, agent, None).unwrap();
         let id = session_id(agent, path).unwrap_or_else(|| "s".into());
         let session = db
             .record_session(chat, agent, &id, path, Some("startup"))

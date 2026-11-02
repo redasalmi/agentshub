@@ -14,6 +14,7 @@ mod terminal_view;
 mod transcript;
 mod tray;
 mod workspace;
+mod worktree;
 
 use std::borrow::Cow;
 

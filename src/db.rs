@@ -17,10 +17,11 @@ use serde_json::{Value, json};
 
 use crate::agent::Agent;
 use crate::transcript::{self, Kind};
+use crate::worktree::Worktree;
 
 /// Each migration takes the database from the version before it, as counted
 /// by `PRAGMA user_version`, to the next.
-const MIGRATIONS: [&str; 4] = [
+const MIGRATIONS: [&str; 5] = [
     r#"
 CREATE TABLE projects (
     id         INTEGER PRIMARY KEY,
@@ -139,6 +140,13 @@ UPDATE projects SET position = (
     WHERE (o.created_at, o.id) > (projects.created_at, projects.id)
 );
 "#,
+    r#"
+-- The git worktree Agents Hub made for a chat, and the folder in it the chat
+-- runs in: its project's folder in that worktree. Both are set or neither is,
+-- and without them the chat runs in its project's folder.
+ALTER TABLE chats ADD COLUMN worktree TEXT;
+ALTER TABLE chats ADD COLUMN worktree_folder TEXT;
+"#,
 ];
 
 /// The schema version this build writes.
@@ -237,6 +245,8 @@ pub struct Chat {
     pub title: Option<String>,
     pub pinned: bool,
     pub updated_at: i64,
+    /// The git worktree Agents Hub made for it, which it runs in.
+    pub worktree: Option<Worktree>,
 }
 
 /// A session as one chat went through it.
@@ -366,7 +376,7 @@ impl Db {
         // A chat the user didn't title is titled after the first of its
         // sessions that has a title.
         let mut stmt = conn.prepare(&format!(
-            "SELECT c.id, c.project_id, c.agent, c.updated_at, c.pinned, COALESCE(c.title, (
+            "SELECT c.id, c.project_id, c.agent, c.updated_at, c.pinned, c.worktree, c.worktree_folder, COALESCE(c.title, (
                 SELECT {TITLE} FROM chat_sessions cs JOIN sessions s ON s.id = cs.session_id
                 WHERE cs.chat_id = c.id AND {TITLE} IS NOT NULL
                 ORDER BY cs.first_position LIMIT 1
@@ -380,7 +390,17 @@ impl Db {
                 agent: agent(&row.get::<_, String>(2)?)?,
                 updated_at: row.get(3)?,
                 pinned: row.get(4)?,
-                title: row.get(5)?,
+                worktree: match (
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ) {
+                    (Some(root), Some(folder)) => Some(Worktree {
+                        root: root.into(),
+                        folder: folder.into(),
+                    }),
+                    _ => None,
+                },
+                title: row.get(7)?,
             })
         })?;
         for chat in rows {
@@ -428,14 +448,28 @@ impl Db {
         self.delete_where("DELETE FROM projects WHERE id = ?1", id)
     }
 
-    /// Adds a chat at the top of its project's unpinned chats.
-    pub fn add_chat(&self, project_id: i64, agent: Agent) -> Result<i64> {
+    /// Adds a chat at the top of its project's unpinned chats, running in
+    /// its project's folder or in `worktree`.
+    pub fn add_chat(
+        &self,
+        project_id: i64,
+        agent: Agent,
+        worktree: Option<&Worktree>,
+    ) -> Result<i64> {
         let conn = self.write();
         conn.execute(
-            "INSERT INTO chats (project_id, agent, created_at, updated_at, position)
+            "INSERT INTO chats (project_id, agent, created_at, updated_at, position,
+                                worktree, worktree_folder)
              VALUES (?1, ?2, ?3, ?3,
-                     (SELECT COALESCE(MIN(position), 0) - 1 FROM chats WHERE project_id = ?1))",
-            params![project_id, agent.label(), now()],
+                     (SELECT COALESCE(MIN(position), 0) - 1 FROM chats WHERE project_id = ?1),
+                     ?4, ?5)",
+            params![
+                project_id,
+                agent.label(),
+                now(),
+                worktree.map(|worktree| worktree.root.to_string_lossy()),
+                worktree.map(|worktree| worktree.folder.to_string_lossy()),
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -591,11 +625,24 @@ impl Db {
         tx.commit()
     }
 
-    /// A chat's agent and its project's folder.
+    /// A project's folder, or `None` once it is removed. Project ids can be
+    /// reused once removed, so a deferred action that kept one checks it
+    /// still names the folder it was about.
+    pub fn project_path(&self, id: i64) -> Result<Option<PathBuf>> {
+        self.read()
+            .query_row("SELECT path FROM projects WHERE id = ?1", [id], |row| {
+                row.get::<_, String>(0).map(PathBuf::from)
+            })
+            .optional()
+    }
+
+    /// A chat's agent and the folder it runs in: its worktree's, or its
+    /// project's.
     pub fn chat(&self, id: i64) -> Result<Option<(Agent, PathBuf)>> {
         self.read()
             .query_row(
-                "SELECT c.agent, p.path FROM chats c JOIN projects p ON p.id = c.project_id
+                "SELECT c.agent, COALESCE(c.worktree_folder, p.path)
+                 FROM chats c JOIN projects p ON p.id = c.project_id
                  WHERE c.id = ?1",
                 [id],
                 |row| {
@@ -1460,7 +1507,7 @@ mod tests {
 
     fn chat(db: &Db) -> i64 {
         let project = db.add_project(Path::new("/home/me/project")).unwrap();
-        db.add_chat(project, Agent::Claude).unwrap()
+        db.add_chat(project, Agent::Claude, None).unwrap()
     }
 
     fn record(db: &Db, chat: i64, id: &str, reason: &str) -> Recorded {
@@ -1705,6 +1752,49 @@ mod tests {
         assert!(third > second);
         assert!(db.chat(second).unwrap().is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_chat_in_a_worktree_runs_there() {
+        let db = Db::open_in_memory().unwrap();
+        let project = db.add_project(Path::new("/home/me/project")).unwrap();
+        let root = PathBuf::from("/home/me/.local/share/agentshub/worktrees/project/1a2b3c4d");
+        let worktree = Worktree {
+            folder: root.join("app"),
+            root,
+        };
+        let plain = db.add_chat(project, Agent::Claude, None).unwrap();
+        let isolated = db.add_chat(project, Agent::Pi, Some(&worktree)).unwrap();
+        assert_eq!(
+            db.chat(plain).unwrap(),
+            Some((Agent::Claude, PathBuf::from("/home/me/project")))
+        );
+        assert_eq!(
+            db.chat(isolated).unwrap(),
+            Some((Agent::Pi, worktree.folder.clone()))
+        );
+        let chats = &db.projects().unwrap()[0].chats;
+        let listed = |id| chats.iter().find(|chat| chat.id == id).unwrap();
+        assert_eq!(listed(plain).worktree, None);
+        assert_eq!(listed(isolated).worktree.as_ref(), Some(&worktree));
+    }
+
+    #[test]
+    fn a_removed_project_has_no_path_even_when_its_id_is_reused() {
+        let db = Db::open_in_memory().unwrap();
+        let old = db.add_project(Path::new("/home/me/old")).unwrap();
+        assert_eq!(
+            db.project_path(old).unwrap(),
+            Some(PathBuf::from("/home/me/old"))
+        );
+        db.remove_project(old).unwrap();
+        assert_eq!(db.project_path(old).unwrap(), None);
+        let new = db.add_project(Path::new("/home/me/new")).unwrap();
+        // Whether or not SQLite reuses the id, it doesn't name the old folder.
+        assert_ne!(
+            db.project_path(new).unwrap(),
+            Some(PathBuf::from("/home/me/old"))
+        );
     }
 
     #[test]
@@ -2033,7 +2123,7 @@ mod tests {
         let db = Db::open(path).unwrap();
         let project = db.add_project(Path::new(folder)).unwrap();
         for _ in 0..chats {
-            db.add_chat(project, Agent::Claude).unwrap();
+            db.add_chat(project, Agent::Claude, None).unwrap();
         }
         db
     }

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use gpui_kit::assets::IconName as ExtraIcon;
@@ -38,6 +39,7 @@ use crate::status::Status;
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::TerminalView;
 use crate::transcript;
+use crate::worktree::{self, Worktree};
 
 /// The narrowest the sidebar can be dragged.
 const MIN_SIDEBAR_WIDTH: Pixels = px(300.);
@@ -169,6 +171,11 @@ pub struct Workspace {
     /// session before starting its CLI, so a request can finish after a newer
     /// one; only the latest one may take the view.
     requested: Option<i64>,
+    /// How many times the user has asked to show something: a chat, or the
+    /// settings, or the chat again in their place. Something that finishes
+    /// later than it started, like a chat's worktree being checked out, only
+    /// takes the view if this hasn't changed meanwhile.
+    navigations: u64,
     /// The chats whose last session is being read before their CLI starts.
     opening: HashSet<i64>,
     /// The chats whose CLI was stopped to free what it held, until it has been
@@ -196,6 +203,14 @@ pub struct Workspace {
     /// itself since it can't wait for them. A session is in it once per read
     /// under way, so it stays until the last of them is done.
     reading: Vec<i64>,
+    /// The worktrees being checked out for new chats. Each is taken by its
+    /// chat once git is done, or by shutdown, so none is left without a chat
+    /// to remove it.
+    checkouts: Vec<worktree::Checkout>,
+    /// The worktrees of deleted chats waiting for their CLI and shells to be
+    /// reaped. Each is removed by its task, or by shutdown if the app quits
+    /// first, so none is left once its chat is gone.
+    removals: Vec<PendingRemoval>,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
     /// The projects' shells, by folder, for quick commands next to their
@@ -216,6 +231,34 @@ pub struct Workspace {
     sidebar_width: Pixels,
     /// Whether a database to import is being picked or checked.
     importing: bool,
+}
+
+/// A worktree and its project's folder, until someone takes them to remove
+/// the worktree. The remover holds the lock while git runs, so shutdown
+/// waits for a removal under way rather than quit midway.
+type RemovalJob = Arc<Mutex<Option<(Worktree, PathBuf)>>>;
+
+/// A worktree to remove once what ran in it has been reaped.
+struct PendingRemoval {
+    job: RemovalJob,
+    /// The CLI and the shells that ran in it, until they're reaped.
+    waits: Vec<smol::channel::Receiver<()>>,
+}
+
+impl PendingRemoval {
+    /// Whether it still has to be removed, or is being removed.
+    fn is_pending(&self) -> bool {
+        self.job.try_lock().map_or(true, |job| job.is_some())
+    }
+}
+
+/// Takes the worktree out of `job` and removes it, unless it was taken.
+fn take_and_remove(
+    job: &Mutex<Option<(Worktree, PathBuf)>>,
+) -> Option<anyhow::Result<worktree::Removal>> {
+    let mut job = job.lock().unwrap_or_else(PoisonError::into_inner);
+    let (worktree, project) = job.take()?;
+    Some(worktree::remove(&worktree, &project))
 }
 
 /// What dragging the sidebar's edge carries, and draws: nothing, since the
@@ -470,8 +513,21 @@ impl Workspace {
                         .values()
                         .map(|shell| shell.terminal.read(cx).shutdown()),
                 )
+                .chain(
+                    this.removals
+                        .iter()
+                        .flat_map(|removal| removal.waits.iter().cloned()),
+                )
                 .collect();
             terminal::wait_reaped(reaped);
+            worktree::abandon(std::mem::take(&mut this.checkouts));
+            // The worktrees of deleted chats, whose tasks won't run anymore.
+            // One being removed already is waited for.
+            for removal in std::mem::take(&mut this.removals) {
+                if let Some(Err(err)) = take_and_remove(&removal.job) {
+                    eprintln!("can't remove a worktree on shutdown: {err:#}");
+                }
+            }
             for chat in &this.chats {
                 if let Err(err) = import_chat(
                     &this.db,
@@ -513,6 +569,7 @@ impl Workspace {
             chats: Vec::new(),
             active: None,
             requested: None,
+            navigations: 0,
             opening: HashSet::new(),
             stopping: HashMap::new(),
             codex_lookup: 0,
@@ -526,6 +583,8 @@ impl Workspace {
             new_chat_select: None,
             broken,
             reading: Vec::new(),
+            checkouts: Vec::new(),
+            removals: Vec::new(),
             _lock: lock,
             shells: HashMap::new(),
             shell_shown: false,
@@ -743,23 +802,41 @@ impl Workspace {
 
     fn confirm_remove_project(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
+        let has_worktrees = self.db.projects().is_ok_and(|projects| {
+            projects
+                .iter()
+                .filter(|project| project.id == id)
+                .flat_map(|project| &project.chats)
+                .any(|chat| chat.worktree.is_some())
+        });
+        let description = if has_worktrees {
+            "Its agents are stopped, and its chats are deleted from Agents Hub. \
+             The folder and the agents' own session files stay. The worktrees of its chats \
+             are removed unless they have changes nobody committed, and their branches stay."
+        } else {
+            "Its agents are stopped, and its chats are deleted from Agents Hub. \
+             The folder and the agents' own session files stay."
+        };
         window.open_alert_dialog(cx, move |alert, _, _| {
             let this = this.clone();
             alert
                 .confirm()
                 .title("Remove this project?")
-                .description(
-                    "Its agents are stopped, and its chats are deleted from Agents Hub. \
-                     The folder and the agents' own session files stay.",
-                )
+                .description(description)
                 .ok_text("Remove")
                 .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
+                .on_ok(move |_, window, cx| {
                     this.update(cx, |this, cx| {
                         let projects = this.db.projects().unwrap_or_default();
                         let project = projects.iter().find(|project| project.id == id);
+                        let mut worktrees = Vec::new();
                         for chat in project.into_iter().flat_map(|project| &project.chats) {
-                            this.stop_chat(chat.id, cx);
+                            let reaped = this
+                                .stop_chat(chat.id, cx)
+                                .or_else(|| this.reaping(chat.id));
+                            if let Some(worktree) = &chat.worktree {
+                                worktrees.push((worktree.clone(), reaped));
+                            }
                         }
                         // Dropping its terminal kills the shell.
                         if let Some(project) = project {
@@ -771,6 +848,17 @@ impl Workspace {
                             Ok(()) => {
                                 for chat in project.into_iter().flat_map(|project| &project.chats) {
                                     alerts::withdraw(chat.id, cx);
+                                }
+                                if let Some(project) = project {
+                                    for (worktree, reaped) in worktrees {
+                                        this.remove_worktree(
+                                            &worktree,
+                                            &project.path,
+                                            reaped,
+                                            window,
+                                            cx,
+                                        );
+                                    }
                                 }
                             }
                             Err(err) => eprintln!("can't remove project {id}: {err}"),
@@ -785,23 +873,37 @@ impl Workspace {
 
     fn confirm_delete_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
+        let worktree = self.worktree_of(id);
+        let description = match worktree {
+            Some(_) => {
+                "Its agent is stopped, and the chat is deleted from Agents Hub. \
+                 The agent's own session files stay. Its worktree is removed unless it has \
+                 changes nobody committed, and its branch stays."
+            }
+            None => {
+                "Its agent is stopped, and the chat is deleted from Agents Hub. \
+                 The agent's own session files stay."
+            }
+        };
         window.open_alert_dialog(cx, move |alert, _, _| {
-            let this = this.clone();
+            let (this, worktree) = (this.clone(), worktree.clone());
             alert
                 .confirm()
                 .title("Delete this chat?")
-                .description(
-                    "Its agent is stopped, and the chat is deleted from Agents Hub. \
-                     The agent's own session files stay.",
-                )
+                .description(description)
                 .ok_text("Delete")
                 .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
+                .on_ok(move |_, window, cx| {
                     this.update(cx, |this, cx| {
-                        this.stop_chat(id, cx);
+                        let reaped = this.stop_chat(id, cx).or_else(|| this.reaping(id));
                         match this.db.delete_chat(id) {
                             // Its notification can't open it anymore.
-                            Ok(()) => alerts::withdraw(id, cx),
+                            Ok(()) => {
+                                alerts::withdraw(id, cx);
+                                if let Some((worktree, project)) = &worktree {
+                                    this.remove_worktree(worktree, project, reaped, window, cx);
+                                }
+                            }
                             Err(err) => eprintln!("can't delete chat {id}: {err}"),
                         }
                         this.refresh(cx);
@@ -810,6 +912,15 @@ impl Workspace {
                     true
                 })
         });
+    }
+
+    /// What says a chat's CLI that was stopped to free what it held has
+    /// been reaped, while it hasn't yet.
+    fn reaping(&self, id: i64) -> Option<smol::channel::Receiver<()>> {
+        self.stopping
+            .get(&id)
+            .map(|(reaped, _)| reaped.clone())
+            .filter(|reaped| !reaped.is_closed())
     }
 
     fn open_rename_dialog(
@@ -893,17 +1004,24 @@ impl Workspace {
         // stay as they are.
         let agents = Agent::installed(&project.path);
         let none_installed = agents.is_empty();
+        // A chat can have a worktree of its own when the project is in a git
+        // repository. Whether it does starts as the settings say.
+        let in_git = !none_installed && worktree::repo(&project.path).is_some();
+        let use_worktree = Rc::new(Cell::new(
+            in_git && cx.global::<Settings>().worktree_by_default,
+        ));
         let select = cx.new(|cx| SelectState::new(agents, None, window, cx));
         let project_label = SharedString::from(project.path.to_string_lossy().into_owned());
-        self.new_chat_select =
-            Some(
-                cx.subscribe_in(&select, window, move |this, _, event, window, cx| {
-                    if let SelectEvent::Confirm(Some(agent)) = event {
-                        window.close_dialog(cx);
-                        this.new_chat(project_id, *agent, &project.path, window, cx);
-                    }
-                }),
-            );
+        self.new_chat_select = Some(cx.subscribe_in(&select, window, {
+            let use_worktree = use_worktree.clone();
+            move |this, _, event, window, cx| {
+                if let SelectEvent::Confirm(Some(agent)) = event {
+                    window.close_dialog(cx);
+                    let worktree = use_worktree.get();
+                    this.new_chat(project_id, *agent, &project.path, worktree, window, cx);
+                }
+            }
+        }));
 
         let initial_focus = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -928,42 +1046,272 @@ impl Workspace {
                         } else {
                             content.child(Select::new(&select).placeholder("Choose an agent"))
                         }
+                    })
+                    .when(in_git, |content| {
+                        let use_worktree = use_worktree.clone();
+                        content.child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    Checkbox::new("new-chat-worktree")
+                                        .label("Start in a new git worktree")
+                                        .checked(use_worktree.get())
+                                        .on_click(move |checked, window, _| {
+                                            use_worktree.set(*checked);
+                                            window.refresh();
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .pl_6()
+                                        .text_sm()
+                                        .line_height(rems(1.4))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            "The agent works on a branch of its own, in a \
+                                             checkout of the project that other chats don't \
+                                             touch.",
+                                        ),
+                                ),
+                        )
                     }),
             )
         });
     }
 
+    /// Starts an agent in a new chat of a project, in a new worktree of its
+    /// own when `worktree` is set.
     fn new_chat(
         &mut self,
         project_id: i64,
         agent: Agent,
-        cwd: &Path,
+        project: &Path,
+        worktree: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let id = match self.db.add_chat(project_id, agent) {
+        if !worktree {
+            self.add_chat(project_id, agent, project, None, true, window, cx);
+            return;
+        }
+        // Checking out the project takes a while in a large repository, and
+        // the user may show another chat or the settings meanwhile. Then the
+        // new chat starts in the background, so it can't take the keyboard.
+        // Asking for it is itself a request to show something, so it
+        // supersedes the chats still opening and the worktrees still being
+        // checked out for earlier requests, which start in the background.
+        self.navigations += 1;
+        self.requested = None;
+        let navigations = self.navigations;
+        let project = project.to_path_buf();
+        let checkout = worktree::Checkout::start(&project);
+        let created = checkout.created();
+        self.checkouts.retain(|checkout| !checkout.is_taken());
+        self.checkouts.push(checkout);
+        cx.spawn_in(window, async move |this, cx| {
+            // Shutdown takes it instead if the app quits first. It can't
+            // between here and the chat being added, which is one step.
+            let Ok(created) = created.recv().await else {
+                return;
+            };
+            let added = this.update_in(cx, |this, window, cx| match &created {
+                Ok(worktree) => {
+                    // The project may have been removed meanwhile, and its id
+                    // given to another project, which the chat isn't about.
+                    match this.db.project_path(project_id) {
+                        Ok(Some(path)) if path == project => {
+                            let show = this.navigations == navigations;
+                            this.add_chat(
+                                project_id,
+                                agent,
+                                &project,
+                                Some(worktree),
+                                show,
+                                window,
+                                cx,
+                            )
+                        }
+                        Ok(_) => this.remove_worktree(worktree, &project, None, window, cx),
+                        Err(err) => {
+                            window.push_notification(format!("Couldn't add the chat: {err}"), cx);
+                            this.remove_worktree(worktree, &project, None, window, cx);
+                        }
+                    }
+                }
+                Err(err) => {
+                    window.push_notification(format!("Couldn't create a worktree: {err:#}"), cx)
+                }
+            });
+            // Without a window to start it in, no chat runs in the worktree.
+            // The workspace outlives its window (see `tray`), so shutdown
+            // still has to know of it.
+            if added.is_err()
+                && let Ok(worktree) = created
+            {
+                let app: &mut AsyncApp = cx;
+                let job = this
+                    .update(app, |this, _| {
+                        this.track_removal(&worktree, &project, Vec::new())
+                    })
+                    .unwrap_or_else(|_| Arc::new(Mutex::new(Some((worktree, project)))));
+                if let Some(Err(err)) = smol::unblock(move || take_and_remove(&job)).await {
+                    eprintln!("can't remove a worktree without a window: {err:#}");
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Adds a chat and starts its agent in `project`, or in the `worktree`
+    /// made for it, which goes again if the chat can't start. The chat is
+    /// shown if `show` is set, and otherwise runs in the background.
+    #[allow(clippy::too_many_arguments)]
+    fn add_chat(
+        &mut self,
+        project_id: i64,
+        agent: Agent,
+        project: &Path,
+        worktree: Option<&Worktree>,
+        show: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = worktree.map_or(project, |worktree| &worktree.folder);
+        let id = match self.db.add_chat(project_id, agent, worktree) {
             Ok(id) => id,
             Err(err) => {
                 window.push_notification(format!("Couldn't add the chat: {err}"), cx);
+                if let Some(worktree) = worktree {
+                    self.remove_worktree(worktree, project, None, window, cx);
+                }
                 return;
             }
         };
         // Its first session report adds its first session.
-        if self.start_chat(id, agent, cwd, None, window, cx) {
+        if !self.start_chat(id, agent, cwd, None, window, cx) {
+            let reaped = self.stop_chat(id, cx);
+            self.db.delete_chat(id).ok();
+            if let Some(worktree) = worktree {
+                self.remove_worktree(worktree, project, reaped, window, cx);
+            }
+        } else if show {
             self.activate(id, window, cx);
             // The sidebar doesn't list the new chat yet, so it can't find
             // its project by itself.
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.select(project_id, cx));
         } else {
-            self.stop_chat(id, cx);
-            self.db.delete_chat(id).ok();
+            // As a chat opened in the background does, it only shows in the
+            // sidebar as running, and may stop an idle one past the limit.
+            self.sync_sidebar(cx);
+            self.evict(cx);
+            cx.notify();
         }
         self.refresh(cx);
     }
 
+    /// The worktree Agents Hub made for chat `id`, and its project's folder.
+    fn worktree_of(&self, id: i64) -> Option<(Worktree, PathBuf)> {
+        let projects = self
+            .db
+            .projects()
+            .inspect_err(|err| eprintln!("can't list the projects: {err}"))
+            .ok()?;
+        projects.into_iter().find_map(|project| {
+            let chat = project.chats.into_iter().find(|chat| chat.id == id)?;
+            Some((chat.worktree?, project.path))
+        })
+    }
+
+    /// Has shutdown remove `worktree` once `waits` are reaped, unless the
+    /// job it returns is taken first.
+    fn track_removal(
+        &mut self,
+        worktree: &Worktree,
+        project: &Path,
+        waits: Vec<smol::channel::Receiver<()>>,
+    ) -> RemovalJob {
+        let job = Arc::new(Mutex::new(Some((worktree.clone(), project.to_path_buf()))));
+        self.removals.retain(PendingRemoval::is_pending);
+        self.removals.push(PendingRemoval {
+            job: job.clone(),
+            waits,
+        });
+        job
+    }
+
+    /// Removes the worktree a chat ran in once its CLI, if it had one, and
+    /// the shells running in it have been reaped. Git keeps one that has
+    /// changes nobody committed, which the user is told about.
+    fn remove_worktree(
+        &mut self,
+        worktree: &Worktree,
+        project: &Path,
+        reaped: Option<smol::channel::Receiver<()>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.shell_cwd(cx);
+        let inside: Vec<PathBuf> = self
+            .shells
+            .keys()
+            .filter(|cwd| cwd.starts_with(&worktree.root))
+            .cloned()
+            .collect();
+        let mut waits: Vec<_> = reaped.into_iter().collect();
+        for cwd in &inside {
+            if let Some(shell) = self.shells.remove(cwd) {
+                waits.push(shell.terminal.read(cx).shutdown());
+            }
+            if shown.as_ref() == Some(cwd) {
+                self.shell_shown = false;
+            }
+        }
+        if !inside.is_empty() {
+            self.sync_terminals(cx);
+            cx.notify();
+        }
+        let folder = worktree.root.clone();
+        let job = self.track_removal(worktree, project, waits.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            // What the CLI and the shells write as they exit, like a shell's
+            // history, would otherwise go to a folder being deleted.
+            for reaped in waits {
+                reaped.recv().await.ok();
+            }
+            // Shutdown removed it if the app quit first.
+            let Some(removed) = smol::unblock(move || take_and_remove(&job)).await else {
+                return;
+            };
+            let message = match removed {
+                Ok(worktree::Removal::Removed) => return,
+                Ok(worktree::Removal::Rescued(branch)) => format!(
+                    "Removed the worktree at {}. Commits made there on a detached HEAD are \
+                     kept on the branch {branch}.",
+                    home_relative(&folder)
+                ),
+                Ok(worktree::Removal::Kept(why)) => format!(
+                    "Kept the worktree at {}: {}",
+                    home_relative(&folder),
+                    why.trim_start_matches("fatal: ")
+                ),
+                Err(err) => {
+                    eprintln!("can't remove the worktree {}: {err:#}", folder.display());
+                    format!(
+                        "Couldn't remove the worktree at {}: {err:#}",
+                        home_relative(&folder)
+                    )
+                }
+            };
+            this.update_in(cx, |_, window, cx| window.push_notification(message, cx))
+                .ok();
+        })
+        .detach();
+    }
+
     /// Shows a chat, resuming its last session if its CLI doesn't run.
     pub fn open_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigations += 1;
         if self.chats.iter().any(|chat| chat.id == id) {
             // Reading a chat's last session takes long enough for another
             // chat to be asked for meanwhile. This is the request that a
@@ -1791,6 +2139,7 @@ impl Workspace {
         alerts::withdraw(id, cx);
         self.active = Some(id);
         self.requested = Some(id);
+        self.navigations += 1;
         self.settings_shown = false;
         self.focus_chat(window, cx);
         self.sync_terminals(cx);
@@ -1892,6 +2241,7 @@ impl Workspace {
     /// leaves the covered terminals, so keys can't reach a CLI out of sight.
     fn show_settings(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_shown = shown;
+        self.navigations += 1;
         if shown {
             // A chat still opening mustn't take the view from the settings.
             self.requested = None;
@@ -2310,8 +2660,12 @@ impl Workspace {
                     .iter()
                     .find(|project| project.id == project_id)
                     .map(|project| project.path.clone());
+                // The search has no checkbox, so a chat started from it gets
+                // a worktree as the settings say.
                 if let Some(path) = path {
-                    self.new_chat(project_id, agent, &path, window, cx);
+                    let worktree = cx.global::<Settings>().worktree_by_default
+                        && worktree::repo(&path).is_some();
+                    self.new_chat(project_id, agent, &path, worktree, window, cx);
                 }
             }
             Pick::SelectProject(id) => self
@@ -2446,18 +2800,20 @@ impl Render for Workspace {
                         .border_color(theme.border)
                         .rounded(theme.radius_lg)
                         .shadow_xs()
-                        .child(v_flex().flex_1().min_h_0().map(|this| match active {
-                            _ if self.settings_shown => this.child(render_settings(window, cx)),
-                            Some(chat) => this.child(self.render_chat(chat, window, cx)),
-                            None => this
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .overflow_hidden()
-                                        .child(self.render_empty(window, cx)),
-                                )
-                                .children(self.render_shell(window, cx)),
+                        .child(v_flex().flex_1().min_h_0().map(|this| {
+                            match active {
+                                _ if self.settings_shown => this.child(render_settings(window, cx)),
+                                Some(chat) => this.child(self.render_chat(chat, window, cx)),
+                                None => this
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .overflow_hidden()
+                                            .child(self.render_empty(window, cx)),
+                                    )
+                                    .children(self.render_shell(window, cx)),
+                            }
                         }))
                         .child(self.render_footer(window, cx)),
                 ),
@@ -3066,6 +3422,7 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
         theme: family,
         notification_popups,
         notification_sound,
+        worktree_by_default,
         ..
     } = *cx.global::<Settings>();
     let hint = |text: &'static str| {
@@ -3176,6 +3533,28 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
                 .child(hint(
                     "Agents keep working while the window is closed. Choose Agents Hub in \
                      the tray to open it again, or Quit there to stop them.",
+                )),
+        )
+        .child(
+            section("Chats")
+                .child(
+                    Checkbox::new("worktree-by-default")
+                        .label("Start new chats in a new git worktree")
+                        .checked(worktree_by_default)
+                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                            if let Err(err) =
+                                Settings::set_worktree_by_default(&this.db, *checked, cx)
+                            {
+                                setting_not_saved(err, window, cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(hint(
+                    "In projects that use git, each new chat gets a branch and a checkout of \
+                     its own, so agents don't edit each other's files. You can still untick \
+                     it when you start a chat. Deleting the chat removes its worktree unless \
+                     it has changes nobody committed; its branch stays.",
                 )),
         )
         .child(
@@ -3297,10 +3676,12 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
 
 #[cfg(test)]
 mod tests {
-    use super::import_chat;
+    use super::{PendingRemoval, import_chat, take_and_remove};
+    use crate::worktree::{Removal, Worktree};
     use crate::{agent::Agent, db::Db, reports::Reports, transcript};
     use serde_json::json;
     use std::fs;
+    use std::sync::{Arc, Mutex};
 
     fn message(id: &str, parent: Option<&str>, role: &str, text: &str) -> String {
         format!(
@@ -3319,7 +3700,7 @@ mod tests {
         let path = dir.join("agentshub.db");
         let db = Db::open(&path).unwrap();
         let project = db.add_project(&dir).unwrap();
-        let chat = db.add_chat(project, Agent::Claude).unwrap();
+        let chat = db.add_chat(project, Agent::Claude, None).unwrap();
         let first = dir.join("first.jsonl");
         let second = dir.join("second.jsonl");
         let prompt = message("1", None, "user", "first prompt");
@@ -3380,7 +3761,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let db = Db::open_in_memory().unwrap();
         let project = db.add_project(&dir).unwrap();
-        let chat = db.add_chat(project, Agent::Claude).unwrap();
+        let chat = db.add_chat(project, Agent::Claude, None).unwrap();
         // A directory cannot be read as a transcript.
         let bad = db
             .record_session(chat, Agent::Claude, "bad", &dir, None)
@@ -3399,5 +3780,29 @@ mod tests {
         assert_eq!(db.items(session, 100).unwrap()[0].payload["text"], "kept");
         reports.remove();
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_pending_worktree_removal_is_done_once() {
+        let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("gone");
+        let worktree = Worktree {
+            root: root.clone(),
+            folder: root,
+        };
+        let removal = PendingRemoval {
+            job: Arc::new(Mutex::new(Some((worktree, dir.clone())))),
+            waits: Vec::new(),
+        };
+        assert!(removal.is_pending());
+        // Whichever of its task and shutdown comes first removes it.
+        assert_eq!(
+            take_and_remove(&removal.job).unwrap().unwrap(),
+            Removal::Removed
+        );
+        assert!(take_and_remove(&removal.job).is_none());
+        assert!(!removal.is_pending());
+        fs::remove_dir_all(dir).ok();
     }
 }
