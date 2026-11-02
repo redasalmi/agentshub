@@ -97,6 +97,7 @@ actions!(
         ToggleTheme,
         ExportDatabase,
         ImportDatabase,
+        ToggleProjectNames,
     ]
 );
 
@@ -290,10 +291,12 @@ impl Render for ResizeSidebar {
 }
 
 /// `width` kept within the sidebar's limits, and narrow enough to leave the
-/// chat room in a window `window_width` wide.
-fn clamp_sidebar_width(width: Pixels, window_width: Pixels) -> Pixels {
+/// chat room in a window `window_width` wide. The width and the limits leave
+/// out `names`, the room the projects' names take in the rail, which the
+/// sidebar has on top.
+fn clamp_sidebar_width(width: Pixels, window_width: Pixels, names: Pixels) -> Pixels {
     let max = MAX_SIDEBAR_WIDTH
-        .min(window_width - MIN_MAIN_WIDTH)
+        .min(window_width - MIN_MAIN_WIDTH - names)
         .max(MIN_SIDEBAR_WIDTH);
     width.clamp(MIN_SIDEBAR_WIDTH, max)
 }
@@ -429,6 +432,7 @@ impl Workspace {
                 }
                 SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
                 SidebarEvent::OpenSettings => this.show_settings(true, window, cx),
+                SidebarEvent::ShowProjectNames(show) => this.show_project_names(*show, window, cx),
                 SidebarEvent::Selected => this.project_selected(window, cx),
             });
 
@@ -2403,6 +2407,25 @@ impl Workspace {
     }
 
     /// Saves the family of themes and puts the theme in it.
+    /// Names the projects in the sidebar's rail, or shows only their marks.
+    fn show_project_names(&mut self, show: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = Settings::set_project_names(&self.db, show, cx) {
+            setting_not_saved(err, window, cx);
+        }
+        self.sidebar.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    fn toggle_project_names(
+        &mut self,
+        _: &ToggleProjectNames,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let show = !cx.global::<Settings>().project_names;
+        self.show_project_names(show, window, cx);
+    }
+
     fn set_theme(&mut self, value: ThemeFamily, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(err) = Settings::set_theme(&self.db, value, cx) {
             setting_not_saved(err, window, cx);
@@ -2819,6 +2842,19 @@ impl Workspace {
             Box::new(AddProject),
         ));
         commands.push(run(
+            if cx.global::<Settings>().project_names {
+                "Hide the projects' names"
+            } else {
+                "Show the projects' names"
+            },
+            if cx.global::<Settings>().project_names {
+                IconName::PanelLeftClose
+            } else {
+                IconName::PanelLeftOpen
+            },
+            Box::new(ToggleProjectNames),
+        ));
+        commands.push(run(
             if cx.theme().is_dark() {
                 "Use the light theme"
             } else {
@@ -2991,6 +3027,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_all_chats))
             .on_action(cx.listener(Self::close_idle_chats))
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(Self::toggle_project_names))
             .on_action(cx.listener(Self::use_theme))
             .on_action(cx.listener(Self::export_action))
             .on_action(cx.listener(Self::import_action))
@@ -3000,9 +3037,11 @@ impl Render for Workspace {
             // edge is dragged, since it leaves the edge's thin band at once.
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<ResizeSidebar>, window, cx| {
+                    let names = sidebar::names_width(cx);
                     let width = clamp_sidebar_width(
-                        event.event.position.x - event.bounds.left(),
+                        event.event.position.x - event.bounds.left() - names,
                         window.viewport_size().width,
+                        names,
                     );
                     if width != this.sidebar_width {
                         this.sidebar_width = width;
@@ -3016,7 +3055,8 @@ impl Render for Workspace {
                     .w(clamp_sidebar_width(
                         self.sidebar_width,
                         window.viewport_size().width,
-                    ))
+                        sidebar::names_width(cx),
+                    ) + sidebar::names_width(cx))
                     .h_full()
                     .flex_none()
                     // Terminal output re-renders the window many times a

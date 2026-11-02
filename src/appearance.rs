@@ -334,6 +334,43 @@ static PRIMER_DARK: LazyLock<Scheme> = LazyLock::new(|| Scheme {
     ],
 });
 
+/// The colors projects are told apart by, as text on its tint, for light
+/// themes and for dark ones. Each family uses the same, as they're not its
+/// own roles. Each text reads at 5:1 or more on its tint.
+const PROJECT_LIGHT: [(u32, u32); 8] = [
+    (0x255EAF, 0xD9E6F7),
+    (0x197446, 0xD9F7E8),
+    (0x732FD3, 0xE6D9F7),
+    (0x93501F, 0xF7E6D9),
+    (0xAA2467, 0xF7D9E8),
+    (0x1B6E7E, 0xD9F2F7),
+    (0x3F7419, 0xE6F7D9),
+    (0x7A621A, 0xF7F0D9),
+];
+
+const PROJECT_DARK: [(u32, u32); 8] = [
+    (0x82A7DB, 0x222E3F),
+    (0x47CA88, 0x223F30),
+    (0xB190DF, 0x2E223F),
+    (0xD79E75, 0x3F2E22),
+    (0xDD88B3, 0x3F2230),
+    (0x5DBDD0, 0x223A3F),
+    (0x7BC843, 0x2E3F22),
+    (0xCEB055, 0x3F3822),
+];
+
+/// The color project `id` is marked with. Projects added one after another
+/// get different ones.
+pub fn project_tint(id: i64, cx: &App) -> Tint {
+    let colors = if cx.theme().is_dark() {
+        &PROJECT_DARK
+    } else {
+        &PROJECT_LIGHT
+    };
+    let (text, soft) = colors[id.rem_euclid(colors.len() as i64) as usize];
+    tint(text, text, soft)
+}
+
 /// What the theme in place draws with beyond its theme file.
 fn scheme(cx: &App) -> &'static Scheme {
     match (cx.global::<Settings>().theme, cx.theme().is_dark()) {

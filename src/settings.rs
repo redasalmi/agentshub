@@ -12,6 +12,7 @@ const NOTIFICATION_POPUPS: &str = "notification_popups";
 const NOTIFICATION_SOUND: &str = "notification_sound";
 const SIDEBAR_WIDTH: &str = "sidebar_width";
 const WORKTREE_BY_DEFAULT: &str = "worktree_by_default";
+const PROJECT_NAMES: &str = "project_names";
 
 /// The sidebar's width until the user drags its edge.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 340.;
@@ -101,6 +102,9 @@ pub struct Settings {
     /// Whether a new chat in a git project starts in a worktree of its own
     /// unless the user unticks it.
     pub worktree_by_default: bool,
+    /// Whether the sidebar's rail names its projects, or shows only their
+    /// marks.
+    pub project_names: bool,
 }
 
 impl Default for Settings {
@@ -113,6 +117,7 @@ impl Default for Settings {
             notification_sound: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             worktree_by_default: false,
+            project_names: true,
         }
     }
 }
@@ -147,6 +152,7 @@ impl Settings {
                 .unwrap_or(defaults.sidebar_width),
             worktree_by_default: read(db.flag(WORKTREE_BY_DEFAULT))
                 .unwrap_or(defaults.worktree_by_default),
+            project_names: read(db.flag(PROJECT_NAMES)).unwrap_or(defaults.project_names),
         }
     }
 
@@ -183,6 +189,14 @@ impl Settings {
             ..*cx.global::<Self>()
         });
         db.set_flag(WORKTREE_BY_DEFAULT, value)
+    }
+
+    pub fn set_project_names(db: &Db, value: bool, cx: &mut App) -> rusqlite::Result<()> {
+        cx.set_global(Self {
+            project_names: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_flag(PROJECT_NAMES, value)
     }
 
     pub fn set_sidebar_width(db: &Db, value: f32, cx: &mut App) -> rusqlite::Result<()> {

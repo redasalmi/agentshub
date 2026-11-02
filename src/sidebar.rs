@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,13 +14,22 @@ use gpui_kit::*;
 use crate::agent::Agent;
 use crate::appearance::{self, Tint};
 use crate::db::{self, Chat, Project};
+use crate::settings::Settings;
 use crate::status::{Need, Status};
 
 /// How often the ages of the chats are brought up to date.
 const AGE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The rail's width with the projects' marks alone.
 const RAIL_WIDTH: Pixels = px(60.);
+/// How much wider the rail is while it names the projects.
+const NAMES_WIDTH: Pixels = px(100.);
 const TILE_SIZE: Pixels = px(40.);
+/// A project's row in the rail while it names them, and its mark there.
+const ROW_HEIGHT: Pixels = px(34.);
+const MARK_SIZE: Pixels = px(22.);
+/// The bar beside the selected project, on the rail's edge.
+const BAR_WIDTH: Pixels = px(3.);
 const DOT_SIZE: Pixels = px(8.);
 
 /// How many chats and projects have a shortcut of their own.
@@ -47,6 +56,8 @@ pub enum SidebarEvent {
     MoveChat(i64, i64),
     DeleteChat(i64),
     OpenSettings,
+    /// Name the projects in the rail, or show only their marks.
+    ShowProjectNames(bool),
 }
 
 /// Which of the selected project's chats the list shows.
@@ -329,136 +340,233 @@ impl Sidebar {
 
     fn render_rail(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let named = cx.global::<Settings>().project_names;
+        let marks = marks(self.projects.iter().map(|project| project.name.as_str()));
+        let settings = Button::new("settings")
+            .ghost()
+            .icon(ExtraIcon::Settings)
+            .tooltip("Settings")
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenSettings)));
+        let toggle = Button::new("project-names")
+            .ghost()
+            .icon(if named {
+                IconName::PanelLeftClose
+            } else {
+                IconName::PanelLeftOpen
+            })
+            .tooltip(if named {
+                "Hide the projects' names"
+            } else {
+                "Show the projects' names"
+            })
+            .on_click(
+                cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::ShowProjectNames(!named))),
+            );
+
         v_flex()
-            .w(RAIL_WIDTH)
+            .w(rail_width(named))
             .h_full()
             .flex_none()
-            .items_center()
             .py_3()
             .gap_2()
             .border_r_1()
             .border_color(theme.sidebar_border)
+            .when(named, |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .pt_1()
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.muted_foreground)
+                        .child("PROJECTS"),
+                )
+            })
             .child(
                 v_flex()
                     .id("project-tiles")
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .items_center()
-                    .gap_2()
-                    .pt_1()
                     .overflow_y_scroll()
-                    .children(
-                        self.projects
-                            .iter()
-                            .enumerate()
-                            .map(|(index, project)| self.render_tile(index, project, cx)),
-                    )
-                    .child(
-                        div()
-                            .id("add-project")
-                            .flex_none()
-                            .size(TILE_SIZE)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(10.))
-                            .border_1()
-                            .border_color(appearance::palette(cx).border_strong)
-                            .text_color(theme.muted_foreground)
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.sidebar_accent))
-                            .child(Icon::new(IconName::Plus).small())
-                            .tooltip(|window, cx| Tooltip::new("Add a project").build(window, cx))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::AddProject))),
-                    ),
+                    .map(|this| {
+                        if named {
+                            this.px(px(6.)).gap_px()
+                        } else {
+                            // Room for the badges over the tiles' corners.
+                            this.items_center().gap_2().pt_1()
+                        }
+                    })
+                    .children(self.projects.iter().zip(marks).enumerate().map(
+                        |(index, (project, mark))| {
+                            self.render_project(index, project, mark.into(), named, cx)
+                        },
+                    ))
+                    .child(self.render_add_project(named, cx)),
             )
-            .child(
-                Button::new("settings")
-                    .ghost()
-                    .icon(ExtraIcon::Settings)
-                    .tooltip("Settings")
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenSettings))),
-            )
+            .child(if named {
+                h_flex()
+                    .px_2()
+                    .justify_between()
+                    .child(settings)
+                    .child(toggle)
+            } else {
+                v_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(toggle)
+                    .child(settings)
+            })
     }
 
-    /// A project's tile in the rail, with how many of its chats need the user.
-    fn render_tile(&self, index: usize, project: &Project, cx: &Context<Self>) -> impl IntoElement {
+    /// A project in the rail, with how many of its chats need the user: a
+    /// row with its mark and its name, or a tile with its mark alone.
+    fn render_project(
+        &self,
+        index: usize,
+        project: &Project,
+        mark: SharedString,
+        named: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let palette = appearance::palette(cx);
         let id = project.id;
         let selected = self.selected == Some(id);
+        let tint = appearance::project_tint(id, cx);
         let tones: Vec<Tone> = project
             .chats
             .iter()
             .map(|chat| Tone::of(self.running(chat.id)))
             .collect();
         let need_you = tones.iter().filter(|tone| tone.needs_you()).count();
-        let failed = tones.contains(&Tone::Error);
+        // The badge is red when one of them failed.
+        let alert = (need_you > 0).then(|| {
+            if tones.contains(&Tone::Error) {
+                palette.danger
+            } else {
+                palette.warning
+            }
+        });
         let name = SharedString::from(project.name.clone());
-        let hint = if index < NUMBERED {
-            format!("{name}  ·  Ctrl+{}", index + 1)
+        // The row already shows the name, so its hint tells where it is.
+        let hint = if named {
+            home_relative(&project.path)
         } else {
             name.to_string()
         };
+        let hint = if index < NUMBERED {
+            format!("{hint}  ·  Ctrl+{}", index + 1)
+        } else {
+            hint
+        };
         let dragged = DraggedProject {
             id,
-            initials: initials(&project.name).into(),
+            mark: mark.clone(),
+            name: name.clone(),
         };
         let drop_color = theme.drop_target;
+        let badge = |count: usize, alert: Tint| {
+            div()
+                .flex_none()
+                .min_w(px(18.))
+                .h(px(18.))
+                .px_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(alert.text)
+                .text_color(palette.on_accent)
+                .text_size(px(10.))
+                .font_medium()
+                .child(count.to_string())
+        };
+        let bar = div()
+            .absolute()
+            .w(BAR_WIDTH)
+            .rounded_r(px(2.))
+            .bg(palette.accent);
 
-        div()
-            .id(("project", id as u64))
-            .relative()
-            .flex_none()
-            .size(TILE_SIZE)
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(10.))
-            .text_sm()
-            .font_medium()
-            .font_family(theme.mono_font_family.clone())
-            .cursor_pointer()
-            .map(|this| {
-                if selected {
-                    this.bg(palette.accent_soft)
-                        .text_color(palette.accent)
-                        .border_1()
-                        .border_color(palette.accent)
-                } else {
-                    this.bg(palette.strong)
-                        .text_color(palette.secondary_foreground)
-                        .hover(|style| style.text_color(theme.foreground))
-                }
-            })
-            .child(initials(&project.name))
-            .when(need_you > 0, |this| {
-                let tint = if failed {
-                    palette.danger
-                } else {
-                    palette.warning
-                };
-                this.child(
+        let item = if named {
+            h_flex()
+                .id(("project", id as u64))
+                .relative()
+                .flex_none()
+                .h(ROW_HEIGHT)
+                .px_2()
+                .gap_2()
+                .rounded(theme.radius)
+                .map(|this| {
+                    if selected {
+                        this.bg(palette.accent_soft)
+                    } else {
+                        this.hover(|style| style.bg(theme.sidebar_accent))
+                    }
+                })
+                .child(project_mark(mark, tint, cx))
+                .child(
                     div()
-                        .absolute()
-                        .top(px(-4.))
-                        .right(px(-4.))
-                        .min_w(px(18.))
-                        .h(px(18.))
-                        .px_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .border_2()
-                        .border_color(theme.sidebar)
-                        .bg(tint.text)
-                        .text_color(palette.on_accent)
-                        .text_size(px(10.))
-                        .child(need_you.to_string()),
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .truncate()
+                        .map(|this| {
+                            if selected {
+                                this.font_medium().text_color(theme.foreground)
+                            } else {
+                                this.text_color(palette.secondary_foreground)
+                            }
+                        })
+                        .child(name),
                 )
-            })
+                .when_some(alert, |this, alert| this.child(badge(need_you, alert)))
+                // On the rail's edge, past the list's padding.
+                .when(selected, |this| {
+                    this.child(bar.left(px(-6.)).top(px(9.)).bottom(px(9.)))
+                })
+        } else {
+            div()
+                .id(("project", id as u64))
+                .relative()
+                .flex_none()
+                .size(TILE_SIZE)
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(10.))
+                .border_1()
+                .bg(tint.soft)
+                .text_color(tint.text)
+                .text_sm()
+                .font_medium()
+                .font_family(theme.mono_font_family.clone())
+                .map(|this| {
+                    if selected {
+                        this.border_color(palette.accent)
+                    } else {
+                        this.border_color(transparent_black())
+                            .hover(|style| style.border_color(palette.border_strong))
+                    }
+                })
+                .child(mark)
+                .when_some(alert, |this, alert| {
+                    this.child(
+                        badge(need_you, alert)
+                            .absolute()
+                            .top(px(-5.))
+                            .right(px(-5.))
+                            .border_2()
+                            .border_color(theme.sidebar),
+                    )
+                })
+                // On the rail's edge, as the tile is centered in it.
+                .when(selected, |this| {
+                    this.child(bar.left(px(-9.)).top(px(10.)).bottom(px(10.)))
+                })
+        };
+
+        item.cursor_pointer()
             .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
             // Projects are reordered by dropping one on another.
             .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
@@ -475,6 +583,53 @@ impl Sidebar {
                 }
             }))
             .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx)))
+    }
+
+    fn render_add_project(&self, named: bool, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let palette = appearance::palette(cx);
+        let item = if named {
+            h_flex()
+                .id("add-project")
+                .flex_none()
+                .h(ROW_HEIGHT)
+                .px_2()
+                .gap_2()
+                .rounded(theme.radius)
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .hover(|style| style.bg(theme.sidebar_accent).text_color(theme.foreground))
+                .child(
+                    div()
+                        .size(MARK_SIZE)
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(palette.border_strong)
+                        .child(Icon::new(IconName::Plus).xsmall()),
+                )
+                .child("Add project")
+        } else {
+            div()
+                .id("add-project")
+                .flex_none()
+                .size(TILE_SIZE)
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(palette.border_strong)
+                .text_color(theme.muted_foreground)
+                .hover(|style| style.bg(theme.sidebar_accent))
+                .child(Icon::new(IconName::Plus).small())
+                .tooltip(|window, cx| Tooltip::new("Add a project").build(window, cx))
+        };
+        item.cursor_pointer()
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::AddProject)))
     }
 
     fn render_list(&self, project: &Project, cx: &Context<Self>) -> impl IntoElement {
@@ -827,9 +982,79 @@ fn subtitle(chat: &Chat, tone: Tone) -> String {
     }
 }
 
-/// The two letters a project's tile shows: the first of its first two words,
-/// or its first two letters.
-pub fn initials(name: &str) -> String {
+/// How wide the rail is, naming the projects or not.
+fn rail_width(named: bool) -> Pixels {
+    if named {
+        RAIL_WIDTH + NAMES_WIDTH
+    } else {
+        RAIL_WIDTH
+    }
+}
+
+/// How much the rail adds to the sidebar's width beyond its marks alone,
+/// which is all the width the user drags accounts for.
+pub fn names_width(cx: &App) -> Pixels {
+    rail_width(cx.global::<Settings>().project_names) - RAIL_WIDTH
+}
+
+/// A project's mark, drawn in its color.
+fn project_mark(mark: SharedString, tint: Tint, cx: &App) -> Div {
+    div()
+        .size(MARK_SIZE)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(tint.soft)
+        .text_color(tint.text)
+        .text_size(px(11.))
+        .font_medium()
+        .font_family(cx.theme().mono_font_family.clone())
+        .child(mark)
+}
+
+/// The marks of projects named `names`, in the rail's order: each one's
+/// initials, unless an earlier project has them. It then gets the first pair
+/// of its letters starting with its first that no earlier one has, or else
+/// such a three.
+pub fn marks<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut taken = HashSet::new();
+    names
+        .into_iter()
+        .map(|name| {
+            let mark = candidates(name)
+                .into_iter()
+                .find(|mark| !taken.contains(mark))
+                .unwrap_or_else(|| initials(name));
+            taken.insert(mark.clone());
+            mark
+        })
+        .collect()
+}
+
+/// The marks project `name` could have, the likeliest first.
+fn candidates(name: &str) -> Vec<String> {
+    let letters: Vec<char> = name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    let mut candidates = vec![initials(name)];
+    if let [first, second, rest @ ..] = letters.as_slice() {
+        let pairs = std::iter::once(second).chain(rest);
+        candidates.extend(pairs.map(|other| [*first, *other].iter().collect::<String>()));
+        candidates.extend(
+            rest.iter()
+                .map(|other| [*first, *second, *other].iter().collect()),
+        );
+    }
+    candidates
+}
+
+/// The two letters a project's mark shows unless another project has them:
+/// the first of its first two words, or its first two letters.
+fn initials(name: &str) -> String {
     let words: Vec<&str> = name
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -881,30 +1106,33 @@ impl Render for DraggedChat {
     }
 }
 
-/// A project being dragged, and the tile that follows the pointer meanwhile.
+/// A project being dragged, and the row that follows the pointer meanwhile.
 #[derive(Clone)]
 struct DraggedProject {
     id: i64,
-    initials: SharedString,
+    mark: SharedString,
+    name: SharedString,
 }
 
 impl Render for DraggedProject {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let palette = appearance::palette(cx);
-        div()
-            .size(TILE_SIZE)
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(10.))
-            .bg(palette.strong)
-            .text_color(theme.foreground)
+        h_flex()
+            .max_w(px(240.))
+            .h(ROW_HEIGHT)
+            .px_2()
+            .gap_2()
+            .rounded(theme.radius)
+            .bg(theme.sidebar_accent)
+            .text_color(theme.sidebar_accent_foreground)
             .text_sm()
-            .font_medium()
-            .font_family(theme.mono_font_family.clone())
             .shadow_md()
-            .child(self.initials.clone())
+            .child(project_mark(
+                self.mark.clone(),
+                appearance::project_tint(self.id, cx),
+                cx,
+            ))
+            .child(div().min_w_0().truncate().child(self.name.clone()))
     }
 }
 
@@ -1035,7 +1263,7 @@ impl Sidebar {
 
 #[cfg(test)]
 mod tests {
-    use super::{initials, summary};
+    use super::{initials, marks, summary};
     use crate::status::Status;
 
     #[test]
@@ -1063,5 +1291,16 @@ mod tests {
         assert_eq!(initials("My_Blog"), "mb");
         assert_eq!(initials("x"), "x");
         assert_eq!(initials("--"), "?");
+    }
+
+    #[test]
+    fn tells_projects_with_the_same_initials_apart() {
+        assert_eq!(marks(["test", "terraform", "frontend"]), ["te", "tr", "fr"]);
+        // A project added twice from different folders.
+        assert_eq!(marks(["notes", "notes"]), ["no", "nt"]);
+        // Out of pairs, it takes three letters.
+        assert_eq!(marks(["ab", "ac", "abc"]), ["ab", "ac", "abc"]);
+        // Out of letters, it keeps its initials.
+        assert_eq!(marks(["ab", "a-b"]), ["ab", "ab"]);
     }
 }
