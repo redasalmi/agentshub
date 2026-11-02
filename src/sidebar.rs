@@ -21,9 +21,13 @@ use crate::status::{Need, Status};
 const AGE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The rail's width with the projects' marks alone.
-const RAIL_WIDTH: Pixels = px(60.);
-/// How much wider the rail is while it names the projects.
-const NAMES_WIDTH: Pixels = px(100.);
+pub const RAIL_WIDTH: Pixels = px(60.);
+/// The narrowest and widest the rail can be dragged while it names the
+/// projects. Dragged narrower than `FOLD_RAIL_BELOW`, it shows their marks
+/// alone.
+pub const MIN_NAMED_RAIL_WIDTH: Pixels = px(120.);
+pub const MAX_RAIL_WIDTH: Pixels = px(300.);
+pub const FOLD_RAIL_BELOW: Pixels = px(100.);
 const TILE_SIZE: Pixels = px(40.);
 /// A project's row in the rail while it names them, and its mark there.
 const ROW_HEIGHT: Pixels = px(34.);
@@ -338,9 +342,9 @@ impl Sidebar {
             .count()
     }
 
-    fn render_rail(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_rail(&self, window_width: Pixels, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let named = cx.global::<Settings>().project_names;
+        let (named, width) = rail(window_width, cx);
         let marks = marks(self.projects.iter().map(|project| project.name.as_str()));
         let settings = Button::new("settings")
             .ghost()
@@ -364,7 +368,7 @@ impl Sidebar {
             );
 
         v_flex()
-            .w(rail_width(named))
+            .w(width)
             .h_full()
             .flex_none()
             .py_3()
@@ -982,19 +986,35 @@ fn subtitle(chat: &Chat, tone: Tone) -> String {
     }
 }
 
-/// How wide the rail is, naming the projects or not.
-fn rail_width(named: bool) -> Pixels {
-    if named {
-        RAIL_WIDTH + NAMES_WIDTH
+/// Whether the rail names the projects in a window `window_width` wide, and
+/// how wide it is there. The settings keep the width the user wants, which a
+/// narrower window only shows narrower.
+pub fn rail(window_width: Pixels, cx: &App) -> (bool, Pixels) {
+    let settings = cx.global::<Settings>();
+    fit_rail(
+        settings.project_names,
+        px(settings.rail_width),
+        crate::workspace::rail_room(window_width),
+    )
+}
+
+/// The rail the user wants, `named` and `wanted` wide, fit in `room`: as
+/// narrow as it must be, and folded to the projects' marks when even its
+/// narrowest with their names doesn't fit.
+fn fit_rail(named: bool, wanted: Pixels, room: Pixels) -> (bool, Pixels) {
+    let room = room.min(MAX_RAIL_WIDTH);
+    if named && room >= MIN_NAMED_RAIL_WIDTH {
+        (true, wanted.clamp(MIN_NAMED_RAIL_WIDTH, room))
     } else {
-        RAIL_WIDTH
+        (false, RAIL_WIDTH)
     }
 }
 
-/// How much the rail adds to the sidebar's width beyond its marks alone,
-/// which is all the width the user drags accounts for.
-pub fn names_width(cx: &App) -> Pixels {
-    rail_width(cx.global::<Settings>().project_names) - RAIL_WIDTH
+/// How much the rail adds to the sidebar's width beyond its marks alone in a
+/// window `window_width` wide, which is all the width the user drags the
+/// sidebar's edge accounts for.
+pub fn names_width(window_width: Pixels, cx: &App) -> Pixels {
+    rail(window_width, cx).1 - RAIL_WIDTH
 }
 
 /// A project's mark, drawn in its color.
@@ -1137,7 +1157,7 @@ impl Render for DraggedProject {
 }
 
 impl Render for Sidebar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let drop_color = appearance::palette(cx).accent_soft;
         h_flex()
@@ -1151,7 +1171,7 @@ impl Render for Sidebar {
             .on_drop(cx.listener(|_, dropped: &ExternalPaths, _, cx| {
                 cx.emit(SidebarEvent::DropPaths(dropped.paths().to_vec()))
             }))
-            .child(self.render_rail(cx))
+            .child(self.render_rail(window.viewport_size().width, cx))
             .map(|this| match self.selected() {
                 Some(project) => this.child(self.render_list(project, cx)),
                 None => {
@@ -1263,7 +1283,9 @@ impl Sidebar {
 
 #[cfg(test)]
 mod tests {
-    use super::{initials, marks, summary};
+    use gpui_kit::px;
+
+    use super::{RAIL_WIDTH, fit_rail, initials, marks, summary};
     use crate::status::Status;
 
     #[test]
@@ -1291,6 +1313,19 @@ mod tests {
         assert_eq!(initials("My_Blog"), "mb");
         assert_eq!(initials("x"), "x");
         assert_eq!(initials("--"), "?");
+    }
+
+    #[test]
+    fn fits_the_rail_in_the_window() {
+        // Room enough: as the user wants it, within its limits.
+        assert_eq!(fit_rail(true, px(300.), px(1000.)), (true, px(300.)));
+        assert_eq!(fit_rail(true, px(50.), px(1000.)), (true, px(120.)));
+        assert_eq!(fit_rail(true, px(900.), px(1000.)), (true, px(300.)));
+        // A narrower window shows it narrower.
+        assert_eq!(fit_rail(true, px(300.), px(200.)), (true, px(200.)));
+        // Too narrow for the names, it folds.
+        assert_eq!(fit_rail(true, px(300.), px(100.)), (false, RAIL_WIDTH));
+        assert_eq!(fit_rail(false, px(300.), px(1000.)), (false, RAIL_WIDTH));
     }
 
     #[test]

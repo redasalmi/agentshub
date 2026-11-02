@@ -13,9 +13,14 @@ const NOTIFICATION_SOUND: &str = "notification_sound";
 const SIDEBAR_WIDTH: &str = "sidebar_width";
 const WORKTREE_BY_DEFAULT: &str = "worktree_by_default";
 const PROJECT_NAMES: &str = "project_names";
+const RAIL_WIDTH: &str = "rail_width";
 
 /// The sidebar's width until the user drags its edge.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 340.;
+
+/// The rail's width while it names the projects, until the user drags its
+/// edge.
+pub const DEFAULT_RAIL_WIDTH: f32 = 160.;
 
 /// The mode the theme is in.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -105,6 +110,9 @@ pub struct Settings {
     /// Whether the sidebar's rail names its projects, or shows only their
     /// marks.
     pub project_names: bool,
+    /// How wide the user last dragged the rail while it names the projects,
+    /// in logical pixels.
+    pub rail_width: f32,
 }
 
 impl Default for Settings {
@@ -118,6 +126,7 @@ impl Default for Settings {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             worktree_by_default: false,
             project_names: true,
+            rail_width: DEFAULT_RAIL_WIDTH,
         }
     }
 }
@@ -153,6 +162,10 @@ impl Settings {
             worktree_by_default: read(db.flag(WORKTREE_BY_DEFAULT))
                 .unwrap_or(defaults.worktree_by_default),
             project_names: read(db.flag(PROJECT_NAMES)).unwrap_or(defaults.project_names),
+            rail_width: read(db.number(RAIL_WIDTH))
+                .map(|width| width as f32)
+                .filter(|width| width.is_finite() && *width > 0.)
+                .unwrap_or(defaults.rail_width),
         }
     }
 
@@ -197,6 +210,14 @@ impl Settings {
             ..*cx.global::<Self>()
         });
         db.set_flag(PROJECT_NAMES, value)
+    }
+
+    pub fn set_rail_width(db: &Db, value: f32, cx: &mut App) -> rusqlite::Result<()> {
+        cx.set_global(Self {
+            rail_width: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_number(RAIL_WIDTH, value.into())
     }
 
     pub fn set_sidebar_width(db: &Db, value: f32, cx: &mut App) -> rusqlite::Result<()> {

@@ -33,7 +33,9 @@ use crate::history::History;
 use crate::palette::{self, Entry, Lead, Pick};
 use crate::reports::{self, Reports};
 use crate::sessions;
-use crate::settings::{Appearance, DEFAULT_SIDEBAR_WIDTH, Settings, ThemeFamily};
+use crate::settings::{
+    Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, Settings, ThemeFamily,
+};
 use crate::sidebar::{self, Filter, NUMBERED, Sidebar, SidebarEvent, Tone, home_relative};
 use crate::status::Status;
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
@@ -288,6 +290,23 @@ impl Render for ResizeSidebar {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Empty
     }
+}
+
+/// What dragging the rail's edge carries, and draws: nothing, as for the
+/// sidebar's.
+#[derive(Clone)]
+struct ResizeRail;
+
+impl Render for ResizeRail {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// The most room the rail has in a window `window_width` wide: what leaves
+/// the rest of the sidebar and the chat their least room.
+pub fn rail_room(window_width: Pixels) -> Pixels {
+    window_width - MIN_MAIN_WIDTH - MIN_SIDEBAR_WIDTH + sidebar::RAIL_WIDTH
 }
 
 /// `width` kept within the sidebar's limits, and narrow enough to leave the
@@ -2989,6 +3008,65 @@ impl Workspace {
             }))
     }
 
+    /// The rail's right edge, which resizes the rail when dragged, folds it
+    /// to the projects' marks when dragged narrow enough, and restores its
+    /// default width when double clicked. The sidebar grows or shrinks with
+    /// it, so its list keeps its width.
+    fn render_rail_edge(&self, window_width: Pixels, cx: &Context<Self>) -> impl IntoElement {
+        let workspace = cx.weak_entity();
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .w(sidebar::rail(window_width, cx).1)
+            .child(
+                resize_handle("rail-edge", Axis::Horizontal)
+                    .inside(HandleEdge::Trailing)
+                    .on_drag(ResizeRail, move |drag, _, _, cx| {
+                        cx.stop_propagation();
+                        let workspace = workspace.clone();
+                        cx.new(|cx| {
+                            // Saved once the drag ends, as the sidebar's width.
+                            cx.on_release(move |_, cx| {
+                                workspace.update(cx, |this, cx| this.save_rail(cx)).ok();
+                            })
+                            .detach();
+                            drag.clone()
+                        })
+                    })
+                    .on_double_click(cx.listener(|this, _, _, cx| {
+                        this.resize_rail(true, DEFAULT_RAIL_WIDTH, cx);
+                        this.save_rail(cx);
+                    })),
+            )
+    }
+
+    /// Shows the rail `width` wide, naming the projects, or with their marks
+    /// alone, without saving it.
+    fn resize_rail(&mut self, named: bool, width: f32, cx: &mut Context<Self>) {
+        let settings = *cx.global::<Settings>();
+        if settings.project_names == named && settings.rail_width == width {
+            return;
+        }
+        cx.set_global(Settings {
+            project_names: named,
+            rail_width: width,
+            ..settings
+        });
+        self.sidebar.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    fn save_rail(&mut self, cx: &mut Context<Self>) {
+        let settings = *cx.global::<Settings>();
+        let saved = Settings::set_rail_width(&self.db, settings.rail_width, cx)
+            .and_then(|()| Settings::set_project_names(&self.db, settings.project_names, cx));
+        if let Err(err) = saved {
+            eprintln!("can't save the rail's width: {err}");
+        }
+    }
+
     fn save_sidebar_width(&mut self, cx: &mut Context<Self>) {
         let width = f32::from(self.sidebar_width);
         if cx.global::<Settings>().sidebar_width == width {
@@ -3009,6 +3087,8 @@ impl Render for Workspace {
         let active = self
             .active
             .and_then(|id| self.chats.iter().find(|chat| chat.id == id));
+        let window_width = window.viewport_size().width;
+        let names = sidebar::names_width(window_width, cx);
 
         h_flex()
             .size_full()
@@ -3037,10 +3117,11 @@ impl Render for Workspace {
             // edge is dragged, since it leaves the edge's thin band at once.
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<ResizeSidebar>, window, cx| {
-                    let names = sidebar::names_width(cx);
+                    let window_width = window.viewport_size().width;
+                    let names = sidebar::names_width(window_width, cx);
                     let width = clamp_sidebar_width(
                         event.event.position.x - event.bounds.left() - names,
-                        window.viewport_size().width,
+                        window_width,
                         names,
                     );
                     if width != this.sidebar_width {
@@ -3049,14 +3130,28 @@ impl Render for Workspace {
                     }
                 }),
             )
+            // The rail's edge likewise. The rail starts where the window
+            // does.
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<ResizeRail>, window, cx| {
+                    let width = event.event.position.x - event.bounds.left();
+                    let rail_width = cx.global::<Settings>().rail_width;
+                    if width < sidebar::FOLD_RAIL_BELOW {
+                        // Folded, it keeps the width to unfold to.
+                        this.resize_rail(false, rail_width, cx);
+                    } else {
+                        let max = rail_room(window.viewport_size().width)
+                            .min(sidebar::MAX_RAIL_WIDTH)
+                            .max(sidebar::MIN_NAMED_RAIL_WIDTH);
+                        let width = width.clamp(sidebar::MIN_NAMED_RAIL_WIDTH, max);
+                        this.resize_rail(true, f32::from(width), cx);
+                    }
+                }),
+            )
             .child(
                 div()
                     .relative()
-                    .w(clamp_sidebar_width(
-                        self.sidebar_width,
-                        window.viewport_size().width,
-                        sidebar::names_width(cx),
-                    ) + sidebar::names_width(cx))
+                    .w(clamp_sidebar_width(self.sidebar_width, window_width, names) + names)
                     .h_full()
                     .flex_none()
                     // Terminal output re-renders the window many times a
@@ -3067,6 +3162,7 @@ impl Render for Workspace {
                             .clone()
                             .cached(StyleRefinement::default().size_full()),
                     )
+                    .child(self.render_rail_edge(window_width, cx))
                     .child(self.render_sidebar_edge(cx)),
             )
             // The sheet the chat is drawn on, set on the sidebar's ground.
