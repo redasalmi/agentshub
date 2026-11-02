@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -92,6 +92,8 @@ actions!(
         RenameChat,
         TogglePin,
         DeleteChat,
+        CloseAllChats,
+        CloseIdleChats,
         ToggleTheme,
         ExportDatabase,
         ImportDatabase,
@@ -126,6 +128,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("f2", RenameChat, None),
         KeyBinding::new("ctrl-shift-o", AddProject, None),
         KeyBinding::new("ctrl-,", ToggleSettings, None),
+        KeyBinding::new("ctrl-shift-w", CloseAllChats, None),
+        KeyBinding::new("ctrl-shift-i", CloseIdleChats, None),
     ]);
     for n in 0..NUMBERED {
         let digit = n + 1;
@@ -176,8 +180,10 @@ pub struct Workspace {
     /// later than it started, like a chat's worktree being checked out, only
     /// takes the view if this hasn't changed meanwhile.
     navigations: u64,
-    /// The chats whose last session is being read before their CLI starts.
-    opening: HashSet<i64>,
+    /// The chats whose last session is being read before their CLI starts,
+    /// with whether it still should once the read is done. Closing all the
+    /// chats cancels them, and opening one again revives its read.
+    opening: HashMap<i64, bool>,
     /// The chats whose CLI was stopped to free what it held, until it has been
     /// reaped, with the session it was in. Until then the CLI may still write
     /// to that session, so nothing else may run in it.
@@ -208,6 +214,9 @@ pub struct Workspace {
     /// chat once git is done, or by shutdown, so none is left without a chat
     /// to remove it.
     checkouts: Vec<worktree::Checkout>,
+    /// How many times all the chats were closed. A worktree checked out for
+    /// a new chat before then doesn't start its chat, and goes again.
+    closed_all: u64,
     /// The worktrees of deleted chats waiting for their CLI and shells to be
     /// reaped. Each is removed by its task, or by shutdown if the app quits
     /// first, so none is left once its chat is gone.
@@ -224,9 +233,16 @@ pub struct Workspace {
     settings_shown: bool,
     /// Whether the window is closed to the tray, so no terminal is shown.
     hidden: bool,
+    /// The window last opened on the workspace, for work that finishes
+    /// without one, like a chat closing once a Codex lookup is done, to give
+    /// the keyboard back.
+    window: AnyWindowHandle,
     /// Holds the focus when nothing in the workspace does, so its key
     /// bindings still reach it.
     focus_handle: FocusHandle,
+    /// Tracks the shown chat, so closing it can tell whether the keyboard
+    /// went with it, from its CLI or from its header's buttons alike.
+    chat_focus: FocusHandle,
     /// How wide the user wants the sidebar, saved once a drag of its edge
     /// ends. A window too narrow for it shows it narrower.
     sidebar_width: Pixels,
@@ -473,7 +489,7 @@ impl Workspace {
             // A chat being opened reads its last session on a thread of its
             // own, which isn't in `reading`, so it is read again here, the
             // way `open_chat` reads it.
-            for &id in &this.opening {
+            for &id in this.opening.keys() {
                 if let Some(last) = this.sessions_of(id).pop()
                     && last.transcript_path.exists()
                 {
@@ -572,7 +588,7 @@ impl Workspace {
             active: None,
             requested: None,
             navigations: 0,
-            opening: HashSet::new(),
+            opening: HashMap::new(),
             stopping: HashMap::new(),
             codex_lookup: 0,
             reports,
@@ -586,13 +602,16 @@ impl Workspace {
             broken,
             reading: Vec::new(),
             checkouts: Vec::new(),
+            closed_all: 0,
             removals: Vec::new(),
             _lock: lock,
             shells: HashMap::new(),
             shell_shown: false,
             settings_shown: false,
             hidden: false,
+            window: window.window_handle(),
             focus_handle: cx.focus_handle(),
+            chat_focus: cx.focus_handle(),
             sidebar_width: px(cx.global::<Settings>().sidebar_width),
             importing: false,
         };
@@ -1163,6 +1182,7 @@ impl Workspace {
         self.navigations += 1;
         self.requested = None;
         let navigations = self.navigations;
+        let closed_all = self.closed_all;
         let project = project.to_path_buf();
         let checkout = worktree::Checkout::start(&project);
         let created = checkout.created();
@@ -1175,6 +1195,11 @@ impl Workspace {
                 return;
             };
             let added = this.update_in(cx, |this, window, cx| match &created {
+                // All the chats were closed meanwhile, this one with them.
+                Ok(worktree) if this.closed_all != closed_all => {
+                    this.remove_worktree(worktree, &project, None, window, cx)
+                }
+                Err(_) if this.closed_all != closed_all => {}
                 Ok(worktree) => {
                     // The project may have been removed meanwhile, and its id
                     // given to another project, which the chat isn't about.
@@ -1421,10 +1446,12 @@ impl Workspace {
         // the view shows when the read below finishes.
         self.requested = Some(id);
         // Clicks that arrive while the session is read would start a second
-        // CLI in the same chat.
-        if !self.opening.insert(id) {
+        // CLI in the same chat. A read that was cancelled starts it after all.
+        if let Some(start) = self.opening.get_mut(&id) {
+            *start = true;
             return;
         }
+        self.opening.insert(id, true);
 
         // The last session decides how the CLI starts, so it's read first: the
         // CLI may have gone on without agentshub. Transcripts can be large
@@ -1448,7 +1475,10 @@ impl Workspace {
             }
             if this
                 .update_in(cx, |this, window, cx| {
-                    this.opening.remove(&id);
+                    // The chats may have been closed meanwhile.
+                    if this.opening.remove(&id) != Some(true) {
+                        return;
+                    }
                     // The chat may have been deleted, or opened elsewhere, meanwhile.
                     if this.chats.iter().any(|chat| chat.id == id) {
                         return;
@@ -1601,7 +1631,7 @@ impl Workspace {
                     .collect::<Vec<_>>()
             })
             .await;
-            this.update(cx, |this, cx| {
+            let Ok(closing) = this.update(cx, |this, cx| {
                 let mut recorded = false;
                 for (id, report, path, agent_id) in found {
                     // A chat with this id now is another chat, or the same
@@ -1632,11 +1662,33 @@ impl Workspace {
                         }
                     }
                 }
-                for id in closing {
-                    this.close_chat(id, cx);
-                }
-            })
-            .ok();
+                closing
+            }) else {
+                return;
+            };
+            if closing.is_empty() {
+                return;
+            }
+            // One closed while its CLI was exiting may not be reaped yet, so
+            // its session is read once it is, and nothing else runs in that
+            // session until then. The shown chat takes the keyboard with it,
+            // which only its window can give back.
+            let Ok(window) = this.read_with(cx, |this, _| this.window) else {
+                return;
+            };
+            let closed = window.update(cx, |_, window, cx| {
+                this.update(cx, |this, cx| this.close_chats(closing.clone(), window, cx))
+            });
+            // Closed to the tray, the window has no keyboard to give back, and
+            // opening it again focuses the shown chat.
+            if !matches!(closed, Ok(Ok(()))) {
+                this.update(cx, |this, cx| {
+                    for id in closing {
+                        this.suspend(id, cx);
+                    }
+                })
+                .ok();
+            }
         })
         .detach();
     }
@@ -2098,12 +2150,18 @@ impl Workspace {
     /// and can resume its session. One that never said what it's doing keeps
     /// running.
     fn idle(&self, chat: &Chat, cx: &App) -> bool {
+        self.active != Some(chat.id) && self.at_rest(chat, cx)
+    }
+
+    /// Whether a chat's CLI can be stopped without losing anything the user
+    /// would miss, shown or not: it's at rest, has nothing unseen, holds no
+    /// draft, and can resume its session.
+    fn at_rest(&self, chat: &Chat, cx: &App) -> bool {
         let last_prompt = || match chat.session {
             Some(session) => self.db.last_prompt(session),
             None => Ok((false, None)),
         };
-        self.active != Some(chat.id)
-            && !chat.unseen
+        !chat.unseen
             && matches!(chat.status, Some(Status::Idle | Status::Done))
             && chat.terminal.as_ref().is_some_and(|terminal| {
                 !terminal.exited
@@ -2139,7 +2197,7 @@ impl Workspace {
     /// Stops a chat's CLI after recording the session it's in, which opening
     /// the chat again resumes, and reads that session once the CLI is gone.
     fn suspend(&mut self, id: i64, cx: &mut Context<Self>) {
-        let Some(chat) = self.chats.iter().find(|chat| chat.id == id) else {
+        let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) else {
             return;
         };
         let report = chat.report.clone();
@@ -2157,6 +2215,14 @@ impl Workspace {
                     .with_pid(sessions::codex_session_of)
             })
             .and_then(|path| Some((transcript::session_id(Agent::Codex, &path)?, path)));
+        // A Codex that exited, or is exiting, while a lookup was under way
+        // has no open files left to look through, so only that lookup can
+        // find the session it was in. The chat stops once it has recorded it,
+        // as when the user quits the CLI.
+        if chat.codex_pending && codex.is_none() {
+            chat.closing = true;
+            return;
+        }
         // A queued report can say the CLI went into another session.
         self.read_reports(&report, cx);
         if let Some((agent_id, path)) = codex {
@@ -2295,6 +2361,11 @@ impl Workspace {
                 .read(cx)
                 .set_visible(Some(cwd) == shell.as_ref());
         }
+    }
+
+    /// Has the workspace shown in `window`, opened again from the tray.
+    pub fn set_window(&mut self, window: &Window) {
+        self.window = window.window_handle();
     }
 
     /// Stops the shown terminals from building frames while the window is
@@ -2494,6 +2565,78 @@ impl Workspace {
         }
     }
 
+    /// Closes every open chat, stopping its CLI even mid-turn, and the ones
+    /// still opening or waiting for their worktree. Opening a chat again
+    /// resumes its session.
+    fn close_all_chats(&mut self, _: &CloseAllChats, window: &mut Window, cx: &mut Context<Self>) {
+        // A chat waiting for its last session to be read, or for its stopped
+        // CLI to be reaped, would start once that's done.
+        for start in self.opening.values_mut() {
+            *start = false;
+        }
+        // So would a new chat once its worktree is checked out. The checkouts
+        // stay listed, so shutdown still removes what they make if the app
+        // quits first.
+        self.closed_all += 1;
+        for checkout in &self.checkouts {
+            checkout.cancel();
+        }
+        self.requested = None;
+        let ids = self.chats.iter().map(|chat| chat.id).collect();
+        self.close_chats(ids, window, cx);
+    }
+
+    /// Closes the chats whose CLI sits at rest with nothing the user would
+    /// miss, the shown one included. Opening one again resumes its session.
+    fn close_idle_chats(
+        &mut self,
+        _: &CloseIdleChats,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = self
+            .chats
+            .iter()
+            .filter(|chat| self.at_rest(chat, cx))
+            .map(|chat| chat.id)
+            .collect();
+        self.close_chats(ids, window, cx);
+    }
+
+    fn close_chats(&mut self, ids: Vec<i64>, window: &mut Window, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        // Settings in front of the chat keep the keyboard whatever closes,
+        // as does the sidebar beside it.
+        let chat_focused = self.active.is_some()
+            && !self.settings_shown
+            && self.chat_focus.contains_focused(window, cx);
+        let focused_shell = self
+            .shown_shell(cx)
+            .filter(|(_, shell)| shell.view.focus_handle(cx).contains_focused(window, cx))
+            .map(|(cwd, _)| cwd);
+        for id in ids {
+            self.suspend(id, cx);
+        }
+        let shell = self.shown_shell(cx);
+        match focused_shell {
+            // The shell under the shown chat follows the selected project once
+            // the chat is gone, so a worktree's shell gives way to the
+            // project's, which takes the keyboard if it's running.
+            Some(cwd) if shell.as_ref().map(|(shown, _)| shown) != Some(&cwd) => match shell {
+                Some((_, shell)) => shell.view.focus_handle(cx).focus(window, cx),
+                None => self.focus_chat(window, cx),
+            },
+            // The shell still shows and keeps the keyboard.
+            Some(_) => {}
+            // The shown chat went, its terminal and header with it, and the
+            // keyboard with them.
+            None if chat_focused && self.active.is_none() => self.focus_chat(window, cx),
+            None => {}
+        }
+    }
+
     fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
         self.set_appearance(appearance::other(cx), window, cx);
     }
@@ -2638,6 +2781,24 @@ impl Workspace {
                 IconName::Delete,
                 Box::new(DeleteChat),
             ));
+        }
+        if !self.chats.is_empty() {
+            commands.push(
+                run(
+                    "Close the idle chats",
+                    IconName::Close,
+                    Box::new(CloseIdleChats),
+                )
+                .keywords(["stop"]),
+            );
+            commands.push(
+                run(
+                    "Close all the chats",
+                    IconName::Close,
+                    Box::new(CloseAllChats),
+                )
+                .keywords(["stop"]),
+            );
         }
         let filter = sidebar.filter();
         for each in Filter::ALL.into_iter().filter(|each| *each != filter) {
@@ -2827,6 +2988,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::rename_active))
             .on_action(cx.listener(Self::toggle_pin))
             .on_action(cx.listener(Self::delete_active))
+            .on_action(cx.listener(Self::close_all_chats))
+            .on_action(cx.listener(Self::close_idle_chats))
             .on_action(cx.listener(Self::toggle_theme))
             .on_action(cx.listener(Self::use_theme))
             .on_action(cx.listener(Self::export_action))
@@ -2924,6 +3087,7 @@ impl Workspace {
         v_flex()
             .size_full()
             .overflow_hidden()
+            .track_focus(&self.chat_focus)
             .child(self.render_chat_header(chat, cx))
             .when_some(chat.notice.clone(), |this, notice| {
                 this.child(
@@ -3534,7 +3698,7 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
                     .child(keys),
             )
     };
-    let bound: [(&'static str, Box<dyn Action>); 7] = [
+    let bound: [(&'static str, Box<dyn Action>); 9] = [
         ("Search chats, projects and commands", Box::new(OpenSearch)),
         ("Start an agent in the selected project", Box::new(NewChat)),
         ("Show or hide the project's shell", Box::new(ToggleShell)),
@@ -3542,6 +3706,8 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
         ("Rename the chat", Box::new(RenameChat)),
         ("Add a project", Box::new(AddProject)),
         ("Open or close the settings", Box::new(ToggleSettings)),
+        ("Close the idle chats", Box::new(CloseIdleChats)),
+        ("Close all the chats", Box::new(CloseAllChats)),
     ];
 
     v_flex()

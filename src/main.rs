@@ -77,6 +77,7 @@ pub fn open_window(workspace: Option<Entity<Workspace>>, cx: &mut App) -> Entity
         let workspace = match workspace {
             Some(workspace) => {
                 workspace.update(cx, |workspace, cx| {
+                    workspace.set_window(window);
                     workspace.set_hidden(false, cx);
                     workspace.focus_chat(window, cx);
                 });

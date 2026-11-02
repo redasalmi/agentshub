@@ -17,7 +17,7 @@ use smol::future::FutureExt as _;
 const BRANCH_PREFIX: &str = "agentshub/";
 
 /// How long git and its hooks get to stop checking out a worktree when
-/// Agents Hub quits, before they're killed.
+/// Agents Hub quits, or its chat is closed, before they're killed.
 const STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// Where a project folder sits in its git repository.
@@ -114,26 +114,44 @@ impl Checkout {
         self.created.is_closed() && self.created.is_empty()
     }
 
-    /// Has git stop: SIGTERM lets it remove a checkout it hasn't finished,
-    /// and SIGKILL is for when it or a hook doesn't stop.
-    fn stop(&self, kill: bool) {
-        let mut git = lock(&self.git);
-        git.stopped = true;
-        let Some(child) = &mut git.child else {
+    /// Has git stop, as when its chat isn't wanted anymore. A checkout git
+    /// was too far along to stop still sends what it made, which then has to
+    /// be removed; one it stopped removes what it made and sends an error.
+    /// Git and its hooks get `STOP_GRACE` to stop before they're killed, so
+    /// a hook that ignores SIGTERM can't keep the checkout going.
+    pub fn cancel(&self) {
+        if !stop(&self.git, false) {
             return;
-        };
-        #[cfg(unix)]
-        {
-            let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
-            // Git isn't reaped while it is held here, so its process group
-            // is still its own.
-            unsafe { libc::killpg(child.id() as libc::pid_t, signal) };
         }
-        #[cfg(not(unix))]
-        if kill {
-            child.kill().ok();
-        }
+        let git = self.git.clone();
+        thread::spawn(move || {
+            thread::sleep(STOP_GRACE);
+            stop(&git, true);
+        });
     }
+}
+
+/// Has git stop: SIGTERM lets it remove a checkout it hasn't finished, and
+/// SIGKILL is for when it or a hook doesn't stop. Returns whether git was
+/// still running.
+fn stop(git: &Mutex<Git>, kill: bool) -> bool {
+    let mut git = lock(git);
+    git.stopped = true;
+    let Some(child) = &mut git.child else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
+        // Git isn't reaped while it is held here, so its process group is
+        // still its own.
+        unsafe { libc::killpg(child.id() as libc::pid_t, signal) };
+    }
+    #[cfg(not(unix))]
+    if kill {
+        child.kill().ok();
+    }
+    true
 }
 
 /// Stops the checkouts still under way, as when Agents Hub quits, and
@@ -141,7 +159,7 @@ impl Checkout {
 /// Git and its hooks get `STOP_GRACE` to stop before they're killed.
 pub fn abandon(checkouts: Vec<Checkout>) {
     for checkout in &checkouts {
-        checkout.stop(false);
+        stop(&checkout.git, false);
     }
     let deadline = Instant::now() + STOP_GRACE;
     smol::block_on(async {
@@ -155,7 +173,7 @@ pub fn abandon(checkouts: Vec<Checkout>) {
             let created = match created {
                 Some(created) => created,
                 None => {
-                    checkout.stop(true);
+                    stop(&checkout.git, true);
                     checkout.created.recv().await
                 }
             };
@@ -691,6 +709,57 @@ mod tests {
         }
         let begun = Instant::now();
         abandon(vec![checkout]);
+        assert!(begun.elapsed() < Duration::from_secs(5));
+        assert_nothing_left(&root, &dir);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_a_checkout_stops_git_and_removes_it() {
+        let (base, root) = setup();
+        let started = base.join("started");
+        hook(
+            &root,
+            &format!("#!/bin/sh\ntouch '{}'\nsleep 30\n", started.display()),
+        );
+        let dir = base.join("worktrees");
+        let checkout = Checkout::start_in(&root, Some(dir.clone()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !started.exists() {
+            assert!(Instant::now() < deadline, "the hook didn't start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let begun = Instant::now();
+        checkout.cancel();
+        assert!(checkout.created().recv_blocking().unwrap().is_err());
+        assert!(begun.elapsed() < Duration::from_secs(5));
+        assert_nothing_left(&root, &dir);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_a_checkout_kills_a_hook_ignoring_sigterm() {
+        let (base, root) = setup();
+        let started = base.join("started");
+        hook(
+            &root,
+            &format!(
+                "#!/bin/sh\ntrap '' TERM\ntouch '{}'\nsleep 30\n",
+                started.display()
+            ),
+        );
+        let dir = base.join("worktrees");
+        let checkout = Checkout::start_in(&root, Some(dir.clone()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !started.exists() {
+            assert!(Instant::now() < deadline, "the hook didn't start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let begun = Instant::now();
+        checkout.cancel();
+        assert!(checkout.created().recv_blocking().unwrap().is_err());
         assert!(begun.elapsed() < Duration::from_secs(5));
         assert_nothing_left(&root, &dir);
         fs::remove_dir_all(base).unwrap();
