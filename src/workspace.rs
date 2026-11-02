@@ -12,7 +12,7 @@ use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::resizable::{HandleEdge, resize_handle};
@@ -195,7 +195,8 @@ pub struct Workspace {
     _report_events: Task<()>,
     _codex_events: Task<()>,
     _theme: Subscription,
-    new_chat_select: Option<Subscription>,
+    /// What the open new chat dialog listens to: its agent and its title.
+    new_chat_subscriptions: Vec<Subscription>,
     /// Why the workspace can't be used: the database didn't open, or another
     /// Agents Hub holds the lock.
     broken: Option<SharedString>,
@@ -581,7 +582,7 @@ impl Workspace {
             _report_events: report_events,
             _codex_events: codex_events,
             _theme: theme,
-            new_chat_select: None,
+            new_chat_subscriptions: Vec::new(),
             broken,
             reading: Vec::new(),
             checkouts: Vec::new(),
@@ -1035,87 +1036,122 @@ impl Workspace {
             in_git && cx.global::<Settings>().worktree_by_default,
         ));
         let select = cx.new(|cx| SelectState::new(agents, None, window, cx));
+        // Left empty, the chat is titled after its agent's sessions.
+        let title = cx.new(|cx| InputState::new(window, cx).placeholder("Chat name (optional)"));
         let project_label = SharedString::from(project.path.to_string_lossy().into_owned());
-        self.new_chat_select = Some(cx.subscribe_in(&select, window, {
-            let use_worktree = use_worktree.clone();
-            move |this, _, event, window, cx| {
-                if let SelectEvent::Confirm(Some(agent)) = event {
-                    window.close_dialog(cx);
-                    let worktree = use_worktree.get();
-                    this.new_chat(project_id, *agent, &project.path, worktree, window, cx);
+        self.new_chat_subscriptions = vec![
+            cx.subscribe_in(&select, window, {
+                let (use_worktree, title) = (use_worktree.clone(), title.clone());
+                move |this, _, event, window, cx| {
+                    if let SelectEvent::Confirm(Some(agent)) = event {
+                        let title = title.read(cx).value().to_string();
+                        window.close_dialog(cx);
+                        let worktree = use_worktree.get();
+                        this.new_chat(
+                            project_id,
+                            *agent,
+                            &project.path,
+                            worktree,
+                            title,
+                            window,
+                            cx,
+                        );
+                    }
                 }
-            }
-        }));
+            }),
+            // Choosing the agent starts the chat, so Enter in the title goes
+            // on to it.
+            cx.subscribe_in(&title, window, {
+                let select = select.clone();
+                move |_, _, event, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        select.focus_handle(cx).focus(window, cx);
+                    }
+                }
+            }),
+        ];
 
         let initial_focus = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
             if initial_focus.replace(false) && !none_installed {
                 select.focus_handle(cx).focus(window, cx);
             }
-            dialog.title("Start a coding agent").child(
-                v_flex()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(project_label.clone()),
-                    )
-                    .map(|content| {
-                        if none_installed {
-                            content.child(div().text_sm().child(
-                                "No coding agent is installed. Install Claude Code, \
+            dialog
+                .title("Start a coding agent")
+                // Only choosing an agent starts the chat. Enter in the title
+                // goes on to it rather than confirming, and so closing, the
+                // dialog.
+                .on_ok(|_, _, _| false)
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(project_label.clone()),
+                        )
+                        .map(|content| {
+                            if none_installed {
+                                content.child(div().text_sm().child(
+                                    "No coding agent is installed. Install Claude Code, \
                                  Codex or Pi, with its command on your PATH.",
-                            ))
-                        } else {
-                            content.child(Select::new(&select).placeholder("Choose an agent"))
-                        }
-                    })
-                    .when(in_git, |content| {
-                        let use_worktree = use_worktree.clone();
-                        content.child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    Checkbox::new("new-chat-worktree")
-                                        .label("Start in a new git worktree")
-                                        .checked(use_worktree.get())
-                                        .on_click(move |checked, window, _| {
-                                            use_worktree.set(*checked);
-                                            window.refresh();
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .pl_6()
-                                        .text_sm()
-                                        .line_height(rems(1.4))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            "The agent works on a branch of its own, in a \
+                                ))
+                            } else {
+                                // Above the agent, whose choice starts the chat.
+                                content
+                                    .child(Input::new(&title))
+                                    .child(Select::new(&select).placeholder("Choose an agent"))
+                            }
+                        })
+                        .when(in_git, |content| {
+                            let use_worktree = use_worktree.clone();
+                            content.child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        Checkbox::new("new-chat-worktree")
+                                            .label("Start in a new git worktree")
+                                            .checked(use_worktree.get())
+                                            .on_click(move |checked, window, _| {
+                                                use_worktree.set(*checked);
+                                                window.refresh();
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .pl_6()
+                                            .text_sm()
+                                            .line_height(rems(1.4))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(
+                                                "The agent works on a branch of its own, in a \
                                              checkout of the project that other chats don't \
                                              touch.",
-                                        ),
-                                ),
-                        )
-                    }),
-            )
+                                            ),
+                                    ),
+                            )
+                        }),
+                )
         });
     }
 
     /// Starts an agent in a new chat of a project, in a new worktree of its
-    /// own when `worktree` is set.
+    /// own when `worktree` is set. An empty `title` leaves the chat titled
+    /// after its agent's sessions.
+    #[allow(clippy::too_many_arguments)]
     fn new_chat(
         &mut self,
         project_id: i64,
         agent: Agent,
         project: &Path,
         worktree: bool,
+        title: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !worktree {
-            self.add_chat(project_id, agent, project, None, true, window, cx);
+            self.add_chat(project_id, agent, project, None, &title, true, window, cx);
             return;
         }
         // Checking out the project takes a while in a large repository, and
@@ -1150,6 +1186,7 @@ impl Workspace {
                                 agent,
                                 &project,
                                 Some(worktree),
+                                &title,
                                 show,
                                 window,
                                 cx,
@@ -1188,7 +1225,8 @@ impl Workspace {
 
     /// Adds a chat and starts its agent in `project`, or in the `worktree`
     /// made for it, which goes again if the chat can't start. The chat is
-    /// shown if `show` is set, and otherwise runs in the background.
+    /// titled `title`, unless it's empty, and shown if `show` is set, and
+    /// otherwise runs in the background.
     #[allow(clippy::too_many_arguments)]
     fn add_chat(
         &mut self,
@@ -1196,6 +1234,7 @@ impl Workspace {
         agent: Agent,
         project: &Path,
         worktree: Option<&Worktree>,
+        title: &str,
         show: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1211,6 +1250,11 @@ impl Workspace {
                 return;
             }
         };
+        if !title.trim().is_empty()
+            && let Err(err) = self.db.rename_chat(id, title)
+        {
+            eprintln!("can't title chat {id}: {err}");
+        }
         // Its first session report adds its first session.
         if !self.start_chat(id, agent, cwd, None, window, cx) {
             let reaped = self.stop_chat(id, cx);
@@ -2689,7 +2733,15 @@ impl Workspace {
                 if let Some(path) = path {
                     let worktree = cx.global::<Settings>().worktree_by_default
                         && worktree::repo(&path).is_some();
-                    self.new_chat(project_id, agent, &path, worktree, window, cx);
+                    self.new_chat(
+                        project_id,
+                        agent,
+                        &path,
+                        worktree,
+                        String::new(),
+                        window,
+                        cx,
+                    );
                 }
             }
             Pick::SelectProject(id) => self
