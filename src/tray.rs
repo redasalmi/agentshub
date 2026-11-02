@@ -33,6 +33,13 @@ impl ksni::Tray for Icon {
         "Agents Hub".into()
     }
 
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: format!("Agents Hub {}", env!("CARGO_PKG_VERSION")),
+            ..Default::default()
+        }
+    }
+
     // shortcut: the icon comes from the installed icon theme, as the
     // .desktop file's does; embed a pixmap if it has to show uninstalled.
     fn icon_name(&self) -> String {

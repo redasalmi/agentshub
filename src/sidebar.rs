@@ -38,6 +38,8 @@ pub enum SidebarEvent {
     /// Ask for a chat's new title, starting from its current one.
     RenameChat(i64, SharedString),
     PinChat(i64, bool),
+    /// Another project was selected, or none.
+    Selected,
     /// Move a chat to where another one is.
     MoveChat(i64, i64),
     DeleteChat(i64),
@@ -210,10 +212,14 @@ impl Sidebar {
             .selected
             .is_some_and(|id| self.projects.iter().any(|project| project.id == id))
         {
-            self.selected = self
+            let selected = self
                 .active
                 .and_then(|id| self.project_of(id))
                 .or_else(|| self.projects.first().map(|project| project.id));
+            if selected != self.selected {
+                self.selected = selected;
+                cx.emit(SidebarEvent::Selected);
+            }
         }
         cx.notify();
     }
@@ -273,7 +279,10 @@ impl Sidebar {
     }
 
     pub fn select(&mut self, project_id: i64, cx: &mut Context<Self>) {
-        self.selected = Some(project_id);
+        if self.selected != Some(project_id) {
+            self.selected = Some(project_id);
+            cx.emit(SidebarEvent::Selected);
+        }
         cx.notify();
     }
 
