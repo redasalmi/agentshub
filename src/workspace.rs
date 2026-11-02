@@ -383,6 +383,7 @@ impl Workspace {
         let sidebar_events =
             cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| match event {
                 SidebarEvent::AddProject => this.add_project(window, cx),
+                SidebarEvent::DropPaths(paths) => this.add_dropped(paths, window, cx),
                 SidebarEvent::RemoveProject(id) => this.confirm_remove_project(*id, window, cx),
                 SidebarEvent::NewChat(project_id) => {
                     this.open_new_chat_dialog(*project_id, window, cx)
@@ -621,21 +622,44 @@ impl Workspace {
             let Some(path) = path else {
                 return;
             };
-            this.update_in(cx, |this, window, cx| {
-                let path = fs::canonicalize(&path).unwrap_or(path);
-                match this.db.add_project(&path) {
-                    Ok(id) => {
-                        this.refresh(cx);
-                        this.sidebar
-                            .update(cx, |sidebar, cx| sidebar.select(id, cx));
-                    }
-                    Err(err) => window
-                        .push_notification(format!("Couldn't add {}: {err}", path.display()), cx),
-                }
-            })
-            .ok();
+            this.update_in(cx, |this, window, cx| this.add_folders(&[path], window, cx))
+                .ok();
         })
         .detach();
+    }
+
+    /// Adds the folders among paths dropped on the sidebar as projects, and
+    /// says so when none of them is a folder.
+    fn add_dropped(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let folders: Vec<PathBuf> = paths.iter().filter(|path| path.is_dir()).cloned().collect();
+        if folders.is_empty() {
+            window.push_notification("Drop a folder to add it as a project", cx);
+            return;
+        }
+        self.add_folders(&folders, window, cx);
+    }
+
+    /// Adds folders as projects, in the order given at the top of the list,
+    /// and selects the first. A folder that already is a project is selected
+    /// where it is.
+    fn add_folders(&mut self, folders: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let mut first = None;
+        // Each one goes on top, so the last goes in first.
+        for path in folders.iter().rev() {
+            let path = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            match self.db.add_project(&path) {
+                Ok(id) => first = Some(id),
+                Err(err) => {
+                    window.push_notification(format!("Couldn't add {}: {err}", path.display()), cx)
+                }
+            }
+        }
+        let Some(id) = first else {
+            return;
+        };
+        self.refresh(cx);
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select(id, cx));
     }
 
     /// Copies the database where the user asks, so the history can live

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::assets::IconName as ExtraIcon;
@@ -29,6 +29,9 @@ pub const NUMBERED: usize = 9;
 #[derive(Clone)]
 pub enum SidebarEvent {
     AddProject,
+    /// Files and folders dropped on the sidebar from outside the app; the
+    /// folders among them become projects.
+    DropPaths(Vec<PathBuf>),
     RemoveProject(i64),
     /// Move a project to where another one is.
     MoveProject(i64, i64),
@@ -908,10 +911,18 @@ impl Render for DraggedProject {
 impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let drop_color = appearance::palette(cx).accent_soft;
         h_flex()
             .size_full()
             .bg(theme.sidebar)
             .text_color(theme.sidebar_foreground)
+            // Folders dragged in from a file manager are added as projects.
+            // The platform only says what is dragged on the drop, so files
+            // light it up too, and are turned away then.
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_color))
+            .on_drop(cx.listener(|_, dropped: &ExternalPaths, _, cx| {
+                cx.emit(SidebarEvent::DropPaths(dropped.paths().to_vec()))
+            }))
             .child(self.render_rail(cx))
             .map(|this| match self.selected() {
                 Some(project) => this.child(self.render_list(project, cx)),
