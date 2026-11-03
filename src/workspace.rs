@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::base::InteractiveElementExt as _;
+use gpui_kit::base::{ResizeHandleRenderer, ResizeHandleState};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -15,7 +16,7 @@ use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::radio::RadioGroup;
-use gpui_kit::component::resizable::{HandleEdge, resize_handle};
+use gpui_kit::component::resizable::{HandleEdge, resize_handle, resize_handle_appearance};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Selectable as _, Sizable as _, StyledExt as _, Theme,
@@ -34,7 +35,8 @@ use crate::palette::{self, Entry, Lead, Pick};
 use crate::reports::{self, Reports};
 use crate::sessions;
 use crate::settings::{
-    Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, Settings, ThemeFamily,
+    Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SHELL_SHARE, DEFAULT_SIDEBAR_WIDTH, Settings,
+    ThemeFamily,
 };
 use crate::sidebar::{self, Filter, NUMBERED, Sidebar, SidebarEvent, Tone, home_relative};
 use crate::status::Status;
@@ -59,8 +61,8 @@ const MIN_TITLE_WIDTH: Pixels = px(200.);
 /// The most of the window's height that a chat's earlier sessions take.
 const HISTORY_SHARE: f32 = 0.45;
 
-/// How much of the window's height a project's shell takes under its chat.
-const SHELL_SHARE: f32 = 0.35;
+/// The most of the window's height the shell can be dragged to take.
+const MAX_SHELL_SHARE: f32 = 0.75;
 
 /// The least height a chat's CLI keeps when the earlier sessions and the
 /// shell crowd it. They give up their height to it, in proportion to it.
@@ -301,6 +303,56 @@ impl Render for ResizeRail {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Empty
     }
+}
+
+/// What dragging the shell's top edge carries, and draws: nothing, as for the
+/// sidebar's.
+#[derive(Clone)]
+struct ResizeShell;
+
+impl Render for ResizeShell {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// The shell's height in a window `viewport` tall, taking `share` of it but
+/// kept within the shell's limits.
+fn shell_height(share: f32, viewport: Pixels) -> Pixels {
+    (viewport * share.min(MAX_SHELL_SHARE)).max(MIN_SHELL_HEIGHT)
+}
+
+/// The share of a window `viewport` tall that a shell dragged `height` tall
+/// takes, kept within the shell's limits.
+fn shell_share(height: Pixels, viewport: Pixels) -> f32 {
+    if viewport <= px(0.) {
+        return DEFAULT_SHELL_SHARE;
+    }
+    let max = (viewport * MAX_SHELL_SHARE).max(MIN_SHELL_HEIGHT);
+    height.clamp(MIN_SHELL_HEIGHT, max) / viewport
+}
+
+/// The shell's top edge: a stronger line than the app's other borders, so a
+/// shell open under the chat reads as apart from it. Engaged, it wears the
+/// app's usual handle.
+fn shell_edge_appearance(strong: Hsla) -> ResizeHandleRenderer {
+    let usual = resize_handle_appearance();
+    Rc::new(move |handle, window, cx| {
+        // Always drawn, so its indicator's transitions keep sampling.
+        let usual = usual(handle, window, cx)?;
+        Some(
+            div()
+                .flex_none()
+                .relative()
+                .w_full()
+                .h(px(1.))
+                .child(usual)
+                .when(handle.state() == ResizeHandleState::Idle, |this| {
+                    this.child(div().absolute().inset_0().bg(strong))
+                })
+                .into_any_element(),
+        )
+    })
 }
 
 /// The most room the rail has in a window `window_width` wide: what leaves
@@ -3067,6 +3119,27 @@ impl Workspace {
         }
     }
 
+    /// Shows the shell taking `share` of the window's height, without saving
+    /// it.
+    fn resize_shell(&mut self, share: f32, cx: &mut Context<Self>) {
+        let settings = *cx.global::<Settings>();
+        if settings.shell_share == share {
+            return;
+        }
+        cx.set_global(Settings {
+            shell_share: share,
+            ..settings
+        });
+        cx.notify();
+    }
+
+    fn save_shell_share(&mut self, cx: &mut Context<Self>) {
+        let share = cx.global::<Settings>().shell_share;
+        if let Err(err) = Settings::set_shell_share(&self.db, share, cx) {
+            eprintln!("can't save the shell's height: {err}");
+        }
+    }
+
     fn save_sidebar_width(&mut self, cx: &mut Context<Self>) {
         let width = f32::from(self.sidebar_width);
         if cx.global::<Settings>().sidebar_width == width {
@@ -3179,15 +3252,17 @@ impl Render for Workspace {
                             match active {
                                 _ if self.settings_shown => this.child(render_settings(window, cx)),
                                 Some(chat) => this.child(self.render_chat(chat, window, cx)),
-                                None => this
-                                    .child(
+                                None => this.child(
+                                    self.render_over_shell(
                                         div()
-                                            .flex_1()
-                                            .min_h_0()
+                                            .size_full()
                                             .overflow_hidden()
                                             .child(self.render_empty(window, cx)),
-                                    )
-                                    .children(self.render_shell(window, cx)),
+                                        px(0.),
+                                        window,
+                                        cx,
+                                    ),
+                                ),
                             }
                         }))
                         .child(self.render_footer(window, cx)),
@@ -3202,7 +3277,7 @@ impl Workspace {
         let theme = cx.theme();
         let id = chat.id;
         let viewport = window.viewport_size().height;
-        let shell_height = viewport * SHELL_SHARE;
+        let shell_height = shell_height(cx.global::<Settings>().shell_share, viewport);
         let shell = self.shown_shell(cx);
         // Without a terminal, the history takes the sheet but for its header
         // and footer, and the shell.
@@ -3267,27 +3342,68 @@ impl Workspace {
                         ),
                 )
             })
-            // The earlier sessions and the shell ask for a share of the window,
-            // but shrink to fit what the header, notices and footer leave the
-            // CLI, which keeps its least height.
-            .children(chat.history.read(cx).height(history_max).map(|height| {
-                chat.history.clone().cached(
-                    StyleRefinement::default()
-                        .w_full()
-                        .h(height)
-                        .flex_shrink(1.)
-                        .min_h_0(),
-                )
-            }))
-            .children(chat.terminal.as_ref().map(|terminal| {
-                div()
-                    .flex_1()
-                    .min_h(MIN_TERMINAL_HEIGHT)
-                    .pl_5()
-                    .pr_2()
-                    .pt_3()
-                    .child(terminal.view.clone())
-            }))
+            .child(
+                self.render_over_shell(
+                    // The earlier sessions ask for a share of the window, but
+                    // shrink to fit what the header, notices, shell and footer
+                    // leave the CLI, which keeps its least height.
+                    v_flex()
+                        .size_full()
+                        .children(chat.history.read(cx).height(history_max).map(|height| {
+                            chat.history.clone().cached(
+                                StyleRefinement::default()
+                                    .w_full()
+                                    .h(height)
+                                    .flex_shrink(1.)
+                                    .min_h_0(),
+                            )
+                        }))
+                        .children(chat.terminal.as_ref().map(|terminal| {
+                            div()
+                                .flex_1()
+                                .min_h(MIN_TERMINAL_HEIGHT)
+                                .pl_5()
+                                .pr_2()
+                                .pt_3()
+                                .child(terminal.view.clone())
+                        })),
+                    if chat.terminal.is_some() {
+                        MIN_TERMINAL_HEIGHT
+                    } else {
+                        px(0.)
+                    },
+                    window,
+                    cx,
+                ),
+            )
+    }
+
+    /// `above` filling what the shell leaves of the room, with the shell, when
+    /// it shows, at the room's bottom. The shell keeps the height the user
+    /// dragged it to, and what's above gives up its room to it but for
+    /// `above_min`; only in a room too short for both does the shell shrink.
+    fn render_over_shell(
+        &self,
+        above: impl IntoElement,
+        above_min: Pixels,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            // Follows the pointer anywhere in the window while the shell's
+            // top edge is dragged. The shell grows up from the room's bottom,
+            // which stays put however tall it is.
+            .on_drag_move(cx.listener(
+                move |this, event: &DragMoveEvent<ResizeShell>, window, cx| {
+                    let room = event.bounds.size.height - above_min;
+                    let height = (event.bounds.bottom() - event.event.position.y).min(room);
+                    let share = shell_share(height, window.viewport_size().height);
+                    this.resize_shell(share, cx);
+                },
+            ))
+            .child(div().flex_1().min_h(above_min).child(above))
             .children(self.render_shell(window, cx))
     }
 
@@ -3295,13 +3411,14 @@ impl Workspace {
     fn render_shell(&self, window: &Window, cx: &Context<Self>) -> Option<impl IntoElement> {
         let theme = cx.theme();
         let (cwd, shell) = self.shown_shell(cx)?;
+        let viewport = window.viewport_size().height;
+        let workspace = cx.weak_entity();
         Some(
             v_flex()
+                .relative()
                 .flex_shrink(1.)
-                .h(window.viewport_size().height * SHELL_SHARE)
+                .h(shell_height(cx.global::<Settings>().shell_share, viewport))
                 .min_h(MIN_SHELL_HEIGHT)
-                .border_t_1()
-                .border_color(theme.border)
                 .child(
                     h_flex()
                         .flex_none()
@@ -3309,6 +3426,9 @@ impl Workspace {
                         .pl_5()
                         .pr_2()
                         .gap_3()
+                        .bg(theme.muted)
+                        .border_b_1()
+                        .border_color(theme.border)
                         .text_xs()
                         .font_family(theme.mono_font_family.clone())
                         .text_color(theme.muted_foreground)
@@ -3332,6 +3452,33 @@ impl Workspace {
                         .pl_5()
                         .pr_2()
                         .child(shell.view.clone()),
+                )
+                // Last, so it lies over the header it edges. It resizes the
+                // shell when dragged, saving its height once the drag ends,
+                // and restores its default height when double clicked.
+                .child(
+                    resize_handle("shell-edge", Axis::Vertical)
+                        .inside(HandleEdge::Leading)
+                        .with_appearance(shell_edge_appearance(
+                            appearance::palette(cx).border_strong,
+                        ))
+                        .on_drag(ResizeShell, move |drag, _, _, cx| {
+                            cx.stop_propagation();
+                            let workspace = workspace.clone();
+                            cx.new(|cx| {
+                                cx.on_release(move |_, cx| {
+                                    workspace
+                                        .update(cx, |this, cx| this.save_shell_share(cx))
+                                        .ok();
+                                })
+                                .detach();
+                                drag.clone()
+                            })
+                        })
+                        .on_double_click(cx.listener(|this, _, _, cx| {
+                            this.resize_shell(DEFAULT_SHELL_SHARE, cx);
+                            this.save_shell_share(cx);
+                        })),
                 ),
         )
     }
@@ -4054,12 +4201,29 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingRemoval, import_chat, take_and_remove};
+    use super::{
+        MAX_SHELL_SHARE, MIN_SHELL_HEIGHT, PendingRemoval, import_chat, shell_height, shell_share,
+        take_and_remove,
+    };
     use crate::worktree::{Removal, Worktree};
     use crate::{agent::Agent, db::Db, reports::Reports, transcript};
+    use gpui_kit::px;
     use serde_json::json;
     use std::fs;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn keeps_the_shell_within_its_limits() {
+        // As dragged, within its limits.
+        assert_eq!(shell_share(px(300.), px(1000.)), 0.3);
+        assert_eq!(shell_share(px(10.), px(1000.)), 0.096);
+        assert_eq!(shell_share(px(990.), px(1000.)), MAX_SHELL_SHARE);
+        // Drawn the share of the window it takes, never shorter than its
+        // header and a few lines.
+        assert_eq!(shell_height(0.3, px(1000.)), px(300.));
+        assert_eq!(shell_height(0.3, px(200.)), MIN_SHELL_HEIGHT);
+        assert_eq!(shell_height(0.99, px(1000.)), px(750.));
+    }
 
     fn message(id: &str, parent: Option<&str>, role: &str, text: &str) -> String {
         format!(

@@ -14,6 +14,7 @@ const SIDEBAR_WIDTH: &str = "sidebar_width";
 const WORKTREE_BY_DEFAULT: &str = "worktree_by_default";
 const PROJECT_NAMES: &str = "project_names";
 const RAIL_WIDTH: &str = "rail_width";
+const SHELL_SHARE: &str = "shell_share";
 
 /// The sidebar's width until the user drags its edge.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 340.;
@@ -21,6 +22,10 @@ pub const DEFAULT_SIDEBAR_WIDTH: f32 = 340.;
 /// The rail's width while it names the projects, until the user drags its
 /// edge.
 pub const DEFAULT_RAIL_WIDTH: f32 = 160.;
+
+/// How much of the window's height a project's shell takes under its chat,
+/// until the user drags its edge.
+pub const DEFAULT_SHELL_SHARE: f32 = 0.35;
 
 /// The mode the theme is in.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -113,6 +118,9 @@ pub struct Settings {
     /// How wide the user last dragged the rail while it names the projects,
     /// in logical pixels.
     pub rail_width: f32,
+    /// How much of the window's height the user last dragged the projects'
+    /// shell to, the same for every project.
+    pub shell_share: f32,
 }
 
 impl Default for Settings {
@@ -127,6 +135,7 @@ impl Default for Settings {
             worktree_by_default: false,
             project_names: true,
             rail_width: DEFAULT_RAIL_WIDTH,
+            shell_share: DEFAULT_SHELL_SHARE,
         }
     }
 }
@@ -166,6 +175,10 @@ impl Settings {
                 .map(|width| width as f32)
                 .filter(|width| width.is_finite() && *width > 0.)
                 .unwrap_or(defaults.rail_width),
+            shell_share: read(db.number(SHELL_SHARE))
+                .map(|share| share as f32)
+                .filter(|share| share.is_finite() && *share > 0. && *share < 1.)
+                .unwrap_or(defaults.shell_share),
         }
     }
 
@@ -218,6 +231,14 @@ impl Settings {
             ..*cx.global::<Self>()
         });
         db.set_number(RAIL_WIDTH, value.into())
+    }
+
+    pub fn set_shell_share(db: &Db, value: f32, cx: &mut App) -> rusqlite::Result<()> {
+        cx.set_global(Self {
+            shell_share: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_number(SHELL_SHARE, value.into())
     }
 
     pub fn set_sidebar_width(db: &Db, value: f32, cx: &mut App) -> rusqlite::Result<()> {
