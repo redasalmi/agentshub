@@ -58,6 +58,8 @@ pub enum SidebarEvent {
     Selected,
     /// Move a chat to where another one is.
     MoveChat(i64, i64),
+    /// Stop a running chat's agent, which opening the chat again resumes.
+    CloseChat(i64),
     DeleteChat(i64),
     OpenSettings,
     /// Name the projects in the rail, or show only their marks.
@@ -820,6 +822,7 @@ impl Sidebar {
         let title = SharedString::from(chat.title.clone().unwrap_or_else(|| "New chat".into()));
         let current_title = SharedString::from(chat.title.clone().unwrap_or_default());
         let pinned = chat.pinned;
+        let open = tone != Tone::Saved;
         let order_group = (chat.project_id, pinned);
         let dragged = DraggedChat {
             id,
@@ -933,6 +936,19 @@ impl Sidebar {
                                 cx.emit(SidebarEvent::RenameChat(id, current_title.clone()));
                             })),
                     )
+                    .when(open, |this| {
+                        this.child(
+                            Button::new("close-chat")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Close)
+                                .tooltip("Close this chat")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(SidebarEvent::CloseChat(id));
+                                })),
+                        )
+                    })
                     .child(
                         Button::new("delete-chat")
                             .ghost()

@@ -206,6 +206,7 @@ pub struct Workspace {
     _report_events: Task<()>,
     _codex_events: Task<()>,
     _theme: Subscription,
+    _focus_lost: Subscription,
     /// What the open new chat dialog listens to: its agent and its title.
     new_chat_subscriptions: Vec<Subscription>,
     /// Why the workspace can't be used: the database didn't open, or another
@@ -501,6 +502,7 @@ impl Workspace {
                     }
                     this.refresh(cx);
                 }
+                SidebarEvent::CloseChat(id) => this.confirm_close_chat(*id, window, cx),
                 SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
                 SidebarEvent::OpenSettings => this.show_settings(true, window, cx),
                 SidebarEvent::ShowProjectNames(show) => this.show_project_names(*show, window, cx),
@@ -656,6 +658,12 @@ impl Workspace {
             }
         });
 
+        // Nothing has the keyboard once what had it is gone, such as the
+        // terminal of a chat closed from a dialog, which hands the focus back
+        // to that terminal as it goes. The shortcuts would stop working, so
+        // the shown chat, or the workspace, takes it.
+        let focus_lost = cx.on_focus_lost(window, |this, window, cx| this.focus_chat(window, cx));
+
         let mut this = Self {
             sidebar,
             db,
@@ -673,6 +681,7 @@ impl Workspace {
             _report_events: report_events,
             _codex_events: codex_events,
             _theme: theme,
+            _focus_lost: focus_lost,
             new_chat_subscriptions: Vec::new(),
             broken,
             reading: Vec::new(),
@@ -985,6 +994,37 @@ impl Workspace {
                         this.refresh(cx);
                     })
                     .ok();
+                    true
+                })
+        });
+    }
+
+    /// Closes a running chat, asking first if its agent is in the middle of
+    /// something. Opening the chat again resumes its session.
+    fn confirm_close_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let working = self
+            .chats
+            .iter()
+            .any(|chat| chat.id == id && chat.status == Some(Status::Working));
+        if !working {
+            self.close_chats(vec![id], window, cx);
+            return;
+        }
+        let this = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let this = this.clone();
+            alert
+                .confirm()
+                .title("Close this chat?")
+                .description(
+                    "Its agent is working, and closing the chat stops it mid-turn. \
+                     Opening the chat again resumes its session.",
+                )
+                .ok_text("Close")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    this.update(cx, |this, cx| this.close_chats(vec![id], window, cx))
+                        .ok();
                     true
                 })
         });
