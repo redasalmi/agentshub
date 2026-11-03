@@ -233,8 +233,6 @@ pub struct Workspace {
     /// chats. Nothing about them is saved, and they run until they exit or
     /// the app quits.
     shells: HashMap<PathBuf, Shell>,
-    /// Whether the shown chat's project shell shows under it.
-    shell_shown: bool,
     /// Whether the settings show in place of the chat.
     settings_shown: bool,
     /// Whether the window is closed to the tray, so no terminal is shown.
@@ -376,6 +374,9 @@ fn clamp_sidebar_width(width: Pixels, window_width: Pixels, names: Pixels) -> Pi
 struct Shell {
     terminal: Entity<Terminal>,
     view: Entity<TerminalView>,
+    /// Whether the panel shows this shell. Each project keeps its own, so
+    /// switching projects leaves the panel as it was in each of them.
+    shown: bool,
     _exited: Subscription,
 }
 
@@ -690,7 +691,6 @@ impl Workspace {
             removals: Vec::new(),
             _lock: lock,
             shells: HashMap::new(),
-            shell_shown: false,
             settings_shown: false,
             hidden: false,
             window: window.window_handle(),
@@ -1459,7 +1459,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let shown = self.shell_cwd(cx);
         let inside: Vec<PathBuf> = self
             .shells
             .keys()
@@ -1470,9 +1469,6 @@ impl Workspace {
         for cwd in &inside {
             if let Some(shell) = self.shells.remove(cwd) {
                 waits.push(shell.terminal.read(cx).shutdown());
-            }
-            if shown.as_ref() == Some(cwd) {
-                self.shell_shown = false;
             }
         }
         if !inside.is_empty() {
@@ -2423,13 +2419,12 @@ impl Workspace {
     }
 
     fn shown_shell(&self, cx: &App) -> Option<(PathBuf, &Shell)> {
-        let cwd = self.shell_cwd(cx).filter(|_| self.shell_shown)?;
+        let cwd = self.shell_cwd(cx)?;
         let shell = self.shells.get(&cwd)?;
-        Some((cwd, shell))
+        shell.shown.then_some((cwd, shell))
     }
 
-    /// Whether the shell is on screen. The flag alone can outlast a switch
-    /// to a project whose shell isn't running.
+    /// Whether the shell is on screen.
     fn shell_visible(&self, cx: &App) -> bool {
         !self.settings_shown && self.shown_shell(cx).is_some()
     }
@@ -2470,7 +2465,7 @@ impl Workspace {
                     .set_visible(Some(each.id) == chat);
             }
         }
-        let shell = self.shell_cwd(cx).filter(|_| shown && self.shell_shown);
+        let shell = self.shown_shell(cx).map(|(cwd, _)| cwd).filter(|_| shown);
         for (cwd, each) in &self.shells {
             each.terminal
                 .read(cx)
@@ -2561,20 +2556,18 @@ impl Workspace {
         }
     }
 
-    /// Hides the shell when it has the focus. Otherwise shows and focuses the
-    /// shell of the shown chat's project, or of the selected project without
-    /// a chat, starting it if it isn't running. Settings cover the shell, so
-    /// they close and the shell shows.
+    /// Shows the shell of the shown chat's project, or of the selected project
+    /// without a chat, starting it if it isn't running, or hides it if it
+    /// shows. Settings cover the shell, so they close and the shell shows.
     fn toggle_shell(&mut self, _: &ToggleShell, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cwd) = self.shell_cwd(cx) else {
             return;
         };
         let settings_were_shown = std::mem::take(&mut self.settings_shown);
-        if !settings_were_shown
-            && let Some((_, shell)) = self.shown_shell(cx)
-            && shell.view.focus_handle(cx).is_focused(window)
-        {
-            self.shell_shown = false;
+        if !settings_were_shown && self.shells.get(&cwd).is_some_and(|shell| shell.shown) {
+            if let Some(shell) = self.shells.get_mut(&cwd) {
+                shell.shown = false;
+            }
             self.focus_chat(window, cx);
         } else {
             if !self.shells.contains_key(&cwd) {
@@ -2601,12 +2594,18 @@ impl Workspace {
                     Shell {
                         terminal,
                         view,
+                        shown: true,
                         _exited: exited,
                     },
                 );
             }
-            self.shell_shown = true;
-            self.shells[&cwd].view.focus_handle(cx).focus(window, cx);
+            let shell = self
+                .shells
+                .get_mut(&cwd)
+                .expect("the shell was just started");
+            // A shell of this project may be running hidden already.
+            shell.shown = true;
+            shell.view.focus_handle(cx).focus(window, cx);
         }
         self.sync_terminals(cx);
         // Closing the settings shows the chat, which no activation reports
@@ -2615,22 +2614,20 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Closes a shell that exited, hiding the panel if it showed it.
+    /// Closes a shell that exited. The panel goes with it, and the keyboard
+    /// moves back to the chat if the shell had it.
     fn shell_exited(&mut self, cwd: &Path, cx: &mut Context<Self>) {
-        if self.shell_cwd(cx).as_deref() == Some(cwd) && self.shell_shown {
-            self.shell_shown = false;
+        let Some(shell) = self.shells.remove(cwd) else {
+            return;
+        };
+        if shell.shown {
             // Without a window there's no focus to move.
             cx.with_window(cx.entity_id(), |window, cx| {
-                if self
-                    .shells
-                    .get(cwd)
-                    .is_some_and(|shell| shell.view.focus_handle(cx).is_focused(window))
-                {
+                if shell.view.focus_handle(cx).is_focused(window) {
                     self.focus_chat(window, cx);
                 }
             });
         }
-        self.shells.remove(cwd);
         cx.notify();
     }
 }
@@ -2801,19 +2798,6 @@ impl Workspace {
     ) {
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.select_at(action.0, cx));
-    }
-
-    /// Hides the shell, or shows it, as the header's button does whether or
-    /// not the shell has the focus.
-    fn click_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.shell_visible(cx) {
-            self.shell_shown = false;
-            self.focus_chat(window, cx);
-            self.sync_terminals(cx);
-            cx.notify();
-        } else {
-            self.toggle_shell(&ToggleShell, window, cx);
-        }
     }
 
     /// Opens the search modal over the chats of every project, the agents
@@ -3450,7 +3434,7 @@ impl Workspace {
     /// The shell, under the chat or what shows without one, when it shows.
     fn render_shell(&self, window: &Window, cx: &Context<Self>) -> Option<impl IntoElement> {
         let theme = cx.theme();
-        let (cwd, shell) = self.shown_shell(cx)?;
+        let (_, shell) = self.shown_shell(cx)?;
         let viewport = window.viewport_size().height;
         let workspace = cx.weak_entity();
         Some(
@@ -3463,26 +3447,20 @@ impl Workspace {
                     h_flex()
                         .flex_none()
                         .h_8()
-                        .pl_5()
+                        .justify_end()
                         .pr_2()
-                        .gap_3()
                         .bg(theme.muted)
                         .border_b_1()
                         .border_color(theme.border)
-                        .text_xs()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_color(theme.muted_foreground)
-                        .child("shell")
-                        .child(div().flex_1().truncate().child(home_relative(&cwd)))
                         .child(
                             Button::new("close-shell")
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::Close)
                                 .tooltip_with_action("Hide the shell", &ToggleShell, None)
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.click_shell(window, cx)),
-                                ),
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_shell(&ToggleShell, window, cx)
+                                })),
                         ),
                 )
                 .child(
@@ -3616,7 +3594,7 @@ impl Workspace {
                                         None,
                                     )
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.click_shell(window, cx)
+                                        this.toggle_shell(&ToggleShell, window, cx)
                                     })),
                             )
                             .child(
