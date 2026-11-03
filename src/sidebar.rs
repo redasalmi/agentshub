@@ -440,20 +440,13 @@ impl Sidebar {
         let id = project.id;
         let selected = self.selected == Some(id);
         let tint = appearance::project_tint(id, cx);
-        let tones: Vec<Tone> = project
+        // A single count of the project's open chats, whatever their agents
+        // say they're doing.
+        let open = project
             .chats
             .iter()
-            .map(|chat| Tone::of(self.running(chat.id)))
-            .collect();
-        let need_you = tones.iter().filter(|tone| tone.needs_you()).count();
-        // The badge is red when one of them failed.
-        let alert = (need_you > 0).then(|| {
-            if tones.contains(&Tone::Error) {
-                palette.danger
-            } else {
-                palette.warning
-            }
-        });
+            .filter(|chat| self.running.contains_key(&chat.id))
+            .count();
         let name = SharedString::from(project.name.clone());
         // The row already shows the name, so its hint tells where it is.
         let hint = if named {
@@ -472,7 +465,7 @@ impl Sidebar {
             name: name.clone(),
         };
         let drop_color = theme.drop_target;
-        let badge = |count: usize, alert: Tint| {
+        let badge = |count: usize| {
             div()
                 .flex_none()
                 .min_w(px(18.))
@@ -482,8 +475,10 @@ impl Sidebar {
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(alert.text)
-                .text_color(palette.on_accent)
+                .bg(theme.sidebar)
+                .border_1()
+                .border_color(palette.border_strong)
+                .text_color(palette.secondary_foreground)
                 .text_size(px(10.))
                 .font_medium()
                 .child(count.to_string())
@@ -526,7 +521,7 @@ impl Sidebar {
                         })
                         .child(name),
                 )
-                .when_some(alert, |this, alert| this.child(badge(need_you, alert)))
+                .when(open > 0, |this| this.child(badge(open)))
                 // On the rail's edge, past the list's padding.
                 .when(selected, |this| {
                     this.child(bar.left(px(-6.)).top(px(9.)).bottom(px(9.)))
@@ -556,15 +551,8 @@ impl Sidebar {
                     }
                 })
                 .child(mark)
-                .when_some(alert, |this, alert| {
-                    this.child(
-                        badge(need_you, alert)
-                            .absolute()
-                            .top(px(-5.))
-                            .right(px(-5.))
-                            .border_2()
-                            .border_color(theme.sidebar),
-                    )
+                .when(open > 0, |this| {
+                    this.child(badge(open).absolute().top(px(-5.)).left(px(-5.)))
                 })
                 // On the rail's edge, as the tile is centered in it.
                 .when(selected, |this| {
