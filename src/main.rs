@@ -3,6 +3,7 @@ mod alerts;
 mod appearance;
 mod db;
 mod history;
+mod instance;
 mod palette;
 mod reports;
 mod sessions;
@@ -54,7 +55,10 @@ impl AssetSource for Assets {
 }
 
 fn main() {
-    gpui_kit::application().with_assets(Assets).run(|cx| {
+    let Some(instance) = instance::claim() else {
+        return;
+    };
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
         terminal_view::init(cx);
         workspace::init(cx);
@@ -63,6 +67,7 @@ fn main() {
         let workspace = open_window(None, cx);
         alerts::init(&workspace, cx);
         tray::init(workspace, cx);
+        instance::serve(instance, cx);
     });
 }
 
