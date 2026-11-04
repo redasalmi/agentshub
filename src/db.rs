@@ -21,7 +21,7 @@ use crate::worktree::Worktree;
 
 /// Each migration takes the database from the version before it, as counted
 /// by `PRAGMA user_version`, to the next.
-const MIGRATIONS: [&str; 5] = [
+const MIGRATIONS: [&str; 6] = [
     r#"
 CREATE TABLE projects (
     id         INTEGER PRIMARY KEY,
@@ -147,6 +147,13 @@ UPDATE projects SET position = (
 ALTER TABLE chats ADD COLUMN worktree TEXT;
 ALTER TABLE chats ADD COLUMN worktree_folder TEXT;
 "#,
+    r#"
+-- When the user archived a chat or a project, which the sidebar then leaves
+-- out. The chats of an archived project go with it without being archived
+-- themselves.
+ALTER TABLE chats ADD COLUMN archived_at INTEGER;
+ALTER TABLE projects ADD COLUMN archived_at INTEGER;
+"#,
 ];
 
 /// The schema version this build writes.
@@ -234,6 +241,7 @@ pub struct Project {
     pub id: i64,
     pub path: PathBuf,
     pub name: String,
+    pub archived_at: Option<i64>,
     /// Pinned first, then in the order the user gave them.
     pub chats: Vec<Chat>,
 }
@@ -245,6 +253,7 @@ pub struct Chat {
     pub title: Option<String>,
     pub pinned: bool,
     pub updated_at: i64,
+    pub archived_at: Option<i64>,
     /// The git worktree Agents Hub made for it, which it runs in.
     pub worktree: Option<Worktree>,
 }
@@ -376,7 +385,7 @@ impl Db {
         // A chat the user didn't title is titled after the first of its
         // sessions that has a title.
         let mut stmt = conn.prepare(&format!(
-            "SELECT c.id, c.project_id, c.agent, c.updated_at, c.pinned, c.worktree, c.worktree_folder, COALESCE(c.title, (
+            "SELECT c.id, c.project_id, c.agent, c.updated_at, c.pinned, c.worktree, c.worktree_folder, c.archived_at, COALESCE(c.title, (
                 SELECT {TITLE} FROM chat_sessions cs JOIN sessions s ON s.id = cs.session_id
                 WHERE cs.chat_id = c.id AND {TITLE} IS NOT NULL
                 ORDER BY cs.first_position LIMIT 1
@@ -400,7 +409,8 @@ impl Db {
                     }),
                     _ => None,
                 },
-                title: row.get(7)?,
+                archived_at: row.get(7)?,
+                title: row.get(8)?,
             })
         })?;
         for chat in rows {
@@ -409,7 +419,7 @@ impl Db {
         }
 
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, path, name FROM projects ORDER BY {PROJECT_ORDER}"
+            "SELECT id, path, name, archived_at FROM projects ORDER BY {PROJECT_ORDER}"
         ))?;
         stmt.query_map([], |row| {
             let id = row.get(0)?;
@@ -417,6 +427,7 @@ impl Db {
                 id,
                 path: PathBuf::from(row.get::<_, String>(1)?),
                 name: row.get(2)?,
+                archived_at: row.get(3)?,
                 chats: chats.remove(&id).unwrap_or_default(),
             })
         })?
@@ -424,7 +435,8 @@ impl Db {
     }
 
     /// Adds a folder as a project at the top of the list, or finds the
-    /// project it already is, which stays where it is.
+    /// project it already is, which stays where it is unless it was archived:
+    /// then it comes back at the top.
     pub fn add_project(&self, path: &Path) -> Result<i64> {
         let conn = self.write();
         let name = path
@@ -435,7 +447,10 @@ impl Db {
         conn.execute(
             "INSERT INTO projects (path, name, created_at, position)
              VALUES (?1, ?2, ?3, (SELECT COALESCE(MIN(position), 0) - 1 FROM projects))
-             ON CONFLICT (path) DO NOTHING",
+             ON CONFLICT (path) DO UPDATE SET
+                 archived_at = NULL,
+                 position = (SELECT MIN(position) - 1 FROM projects)
+             WHERE archived_at IS NOT NULL",
             params![path, name, now()],
         )?;
         conn.query_row("SELECT id FROM projects WHERE path = ?1", [path], |row| {
@@ -495,6 +510,61 @@ impl Db {
             params![id, pinned],
         )?;
         Ok(())
+    }
+
+    /// Archives a chat, or takes it out of the archive where it was, as an
+    /// undo does.
+    pub fn set_chat_archived(&self, id: i64, archived: bool) -> Result<()> {
+        self.write().execute(
+            "UPDATE chats SET archived_at = ?2 WHERE id = ?1",
+            params![id, archived.then(now)],
+        )?;
+        Ok(())
+    }
+
+    /// Archives a project, or takes it out of the archive where it was.
+    pub fn set_project_archived(&self, id: i64, archived: bool) -> Result<()> {
+        self.write().execute(
+            "UPDATE projects SET archived_at = ?2 WHERE id = ?1",
+            params![id, archived.then(now)],
+        )?;
+        Ok(())
+    }
+
+    /// Brings back a chat and its project, whichever is archived, each at
+    /// the top of its list. Says whether either was.
+    pub fn restore_chat(&self, id: i64) -> Result<bool> {
+        let mut conn = self.write();
+        let tx = conn.transaction()?;
+        let chat = tx.execute(
+            "UPDATE chats SET archived_at = NULL, position = (
+                SELECT MIN(position) - 1 FROM chats o WHERE o.project_id = chats.project_id
+             )
+             WHERE id = ?1 AND archived_at IS NOT NULL",
+            [id],
+        )?;
+        let project = tx.execute(
+            "UPDATE projects SET archived_at = NULL, position = (
+                SELECT MIN(position) - 1 FROM projects
+             )
+             WHERE id = (SELECT project_id FROM chats WHERE id = ?1) AND archived_at IS NOT NULL",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(chat + project > 0)
+    }
+
+    /// Brings back an archived project at the top of the list. Says whether
+    /// it was archived.
+    pub fn restore_project(&self, id: i64) -> Result<bool> {
+        let changed = self.write().execute(
+            "UPDATE projects SET archived_at = NULL, position = (
+                SELECT MIN(position) - 1 FROM projects
+             )
+             WHERE id = ?1 AND archived_at IS NOT NULL",
+            [id],
+        )?;
+        Ok(changed > 0)
     }
 
     /// A setting that is on or off, or `None` while it has its default.
@@ -2071,6 +2141,56 @@ mod tests {
 
         let e = db.add_project(Path::new("/home/me/e")).unwrap();
         assert_eq!(project_order(&db), [e, a, c, b, d]);
+
+        // Adding an archived folder again brings its project back on top.
+        db.set_project_archived(b, true).unwrap();
+        assert_eq!(db.add_project(Path::new("/home/me/b")).unwrap(), b);
+        assert_eq!(project_order(&db), [b, e, a, c, d]);
+        assert!(db.projects().unwrap()[0].archived_at.is_none());
+    }
+
+    /// The ids of the first project's archived chats.
+    fn archived(db: &Db) -> Vec<i64> {
+        db.projects().unwrap()[0]
+            .chats
+            .iter()
+            .filter(|chat| chat.archived_at.is_some())
+            .map(|chat| chat.id)
+            .collect()
+    }
+
+    #[test]
+    fn an_undone_archive_keeps_a_chat_in_its_place() {
+        let db = Db::open_in_memory().unwrap();
+        let [a, b, c] = [(); 3].map(|_| chat(&db));
+        db.set_chat_archived(b, true).unwrap();
+        assert_eq!(archived(&db), [b]);
+        db.set_chat_archived(b, false).unwrap();
+        assert_eq!(archived(&db), [] as [i64; 0]);
+        assert_eq!(chat_order(&db), [c, b, a]);
+    }
+
+    #[test]
+    fn restoring_a_chat_brings_it_and_its_project_back_on_top() {
+        let db = Db::open_in_memory().unwrap();
+        let [a, b, c] = [(); 3].map(|_| chat(&db));
+        let project = db.projects().unwrap()[0].id;
+        let other = db.add_project(Path::new("/home/me/other")).unwrap();
+        db.set_chat_archived(a, true).unwrap();
+        db.set_project_archived(project, true).unwrap();
+
+        assert!(db.restore_chat(a).unwrap());
+        assert_eq!(project_order(&db), [project, other]);
+        assert_eq!(archived(&db), [] as [i64; 0]);
+        assert_eq!(chat_order(&db), [a, c, b]);
+        assert!(db.projects().unwrap()[0].archived_at.is_none());
+        // Nothing was archived anymore.
+        assert!(!db.restore_chat(a).unwrap());
+
+        db.set_project_archived(other, true).unwrap();
+        assert!(db.restore_project(other).unwrap());
+        assert_eq!(project_order(&db), [other, project]);
+        assert!(!db.restore_project(other).unwrap());
     }
 
     #[test]

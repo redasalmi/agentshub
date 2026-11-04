@@ -15,6 +15,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::DropdownMenu as _;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::resizable::{HandleEdge, resize_handle, resize_handle_appearance};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
@@ -96,6 +97,9 @@ actions!(
         RenameChat,
         TogglePin,
         DeleteChat,
+        ArchiveChat,
+        ArchiveProject,
+        ShowArchived,
         CloseAllChats,
         CloseIdleChats,
         ToggleTheme,
@@ -135,6 +139,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-,", ToggleSettings, None),
         KeyBinding::new("ctrl-shift-w", CloseAllChats, None),
         KeyBinding::new("ctrl-shift-i", CloseIdleChats, None),
+        KeyBinding::new("ctrl-shift-a", ArchiveChat, None),
     ]);
     for n in 0..NUMBERED {
         let digit = n + 1;
@@ -478,6 +483,7 @@ impl Workspace {
                 SidebarEvent::AddProject => this.add_project(window, cx),
                 SidebarEvent::DropPaths(paths) => this.add_dropped(paths, window, cx),
                 SidebarEvent::RemoveProject(id) => this.confirm_remove_project(*id, window, cx),
+                SidebarEvent::ArchiveProject(id) => this.confirm_archive_project(*id, window, cx),
                 SidebarEvent::NewChat(project_id) => {
                     this.open_new_chat_dialog(*project_id, window, cx)
                 }
@@ -505,6 +511,13 @@ impl Workspace {
                 }
                 SidebarEvent::CloseChat(id) => this.confirm_close_chat(*id, window, cx),
                 SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
+                SidebarEvent::ArchiveChat(id) => this.confirm_archive_chat(*id, window, cx),
+                SidebarEvent::RestoreChat(id) => {
+                    if let Err(err) = this.db.restore_chat(*id) {
+                        eprintln!("can't restore chat {id}: {err}");
+                    }
+                    this.refresh(cx);
+                }
                 SidebarEvent::OpenSettings => this.show_settings(true, window, cx),
                 SidebarEvent::ShowProjectNames(show) => this.show_project_names(*show, window, cx),
                 SidebarEvent::Selected => this.project_selected(window, cx),
@@ -1073,6 +1086,195 @@ impl Workspace {
         });
     }
 
+    /// Archives a chat, closing it first, and asks first if its agent is in
+    /// the middle of something.
+    fn confirm_archive_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let working = self
+            .chats
+            .iter()
+            .any(|chat| chat.id == id && chat.status == Some(Status::Working));
+        if !working {
+            self.archive_chat(id, window, cx);
+            return;
+        }
+        let this = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let this = this.clone();
+            alert
+                .confirm()
+                .title("Archive this chat?")
+                .description(
+                    "Its agent is working, and archiving the chat stops it mid-turn. \
+                     Opening the chat again resumes its session.",
+                )
+                .ok_text("Archive")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    this.update(cx, |this, cx| this.archive_chat(id, window, cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    /// Closes a chat and archives it. Opening it again brings it back and
+    /// resumes its session.
+    fn archive_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_opening(id);
+        self.close_chats(vec![id], window, cx);
+        if let Err(err) = self.db.set_chat_archived(id, true) {
+            window.push_notification(format!("Couldn't archive the chat: {err}"), cx);
+            return;
+        }
+        alerts::withdraw(id, cx);
+        self.refresh(cx);
+        self.offer_undo(
+            "Archived the chat.",
+            move |db| db.set_chat_archived(id, false),
+            window,
+            cx,
+        );
+    }
+
+    /// Archives a project, closing its chats, and asks first if any of their
+    /// agents is in the middle of something.
+    fn confirm_archive_project(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.chats_of(id, cx);
+        let working = self
+            .chats
+            .iter()
+            .any(|chat| ids.contains(&chat.id) && chat.status == Some(Status::Working));
+        if !working {
+            self.archive_project(id, window, cx);
+            return;
+        }
+        let this = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let this = this.clone();
+            alert
+                .confirm()
+                .title("Archive this project?")
+                .description(
+                    "An agent in it is working, and archiving the project stops it mid-turn. \
+                     Opening one of its chats again brings the project back and resumes the \
+                     chat's session.",
+                )
+                .ok_text("Archive")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    this.update(cx, |this, cx| this.archive_project(id, window, cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    /// Closes a project's chats and its shell, and archives it with them.
+    /// Opening one of its chats again brings it back.
+    fn archive_project(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((path, worktrees)) = self
+            .sidebar
+            .read(cx)
+            .projects()
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| {
+                let worktrees: Vec<PathBuf> = project
+                    .chats
+                    .iter()
+                    .filter_map(|chat| Some(chat.worktree.as_ref()?.root.clone()))
+                    .collect();
+                (project.path.clone(), worktrees)
+            })
+        else {
+            return;
+        };
+        let ids = self.chats_of(id, cx);
+        for id in &ids {
+            self.cancel_opening(*id);
+        }
+        self.close_chats(ids.clone(), window, cx);
+        // Dropping their terminals kills the shells, as removing the project
+        // does: its own, and the ones in its chats' worktrees.
+        let shells = self.shells.len();
+        self.shells
+            .retain(|cwd, _| *cwd != path && !worktrees.iter().any(|root| cwd.starts_with(root)));
+        if self.shells.len() != shells {
+            self.sync_terminals(cx);
+        }
+        if let Err(err) = self.db.set_project_archived(id, true) {
+            window.push_notification(format!("Couldn't archive the project: {err}"), cx);
+            return;
+        }
+        for id in ids {
+            alerts::withdraw(id, cx);
+        }
+        self.refresh(cx);
+        self.offer_undo(
+            "Archived the project.",
+            move |db| db.set_project_archived(id, false),
+            window,
+            cx,
+        );
+    }
+
+    /// The ids of a project's chats.
+    fn chats_of(&self, project_id: i64, cx: &App) -> Vec<i64> {
+        self.sidebar
+            .read(cx)
+            .projects()
+            .iter()
+            .filter(|project| project.id == project_id)
+            .flat_map(|project| &project.chats)
+            .map(|chat| chat.id)
+            .collect()
+    }
+
+    /// Keeps a chat whose last session is being read, or whose stopped CLI
+    /// is being reaped, from starting once that's done.
+    fn cancel_opening(&mut self, id: i64) {
+        if let Some(start) = self.opening.get_mut(&id) {
+            *start = false;
+        }
+        if self.requested == Some(id) {
+            self.requested = None;
+        }
+    }
+
+    /// Says `message` with a button that runs `undo` on the database.
+    fn offer_undo(
+        &self,
+        message: &'static str,
+        undo: impl Fn(&Db) -> rusqlite::Result<()> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        let undo = Rc::new(undo);
+        window.push_notification(
+            Notification::new()
+                .message(message)
+                .action(move |_, _, cx| {
+                    let (this, undo) = (this.clone(), undo.clone());
+                    Button::new("undo").label("Undo").on_click(cx.listener(
+                        move |note, _, window, cx| {
+                            this.update(cx, |this, cx| {
+                                if let Err(err) = undo(&this.db) {
+                                    eprintln!("can't undo: {err}");
+                                }
+                                this.refresh(cx);
+                            })
+                            .ok();
+                            note.dismiss(window, cx);
+                        },
+                    ))
+                })
+                // A button keeps it up unless it's told otherwise.
+                .autohide(true),
+            cx,
+        );
+    }
+
     /// What says a chat's CLI that was stopped to free what it held has
     /// been reaped, while it hasn't yet.
     fn reaping(&self, id: i64) -> Option<smol::channel::Receiver<()>> {
@@ -1395,6 +1597,11 @@ impl Workspace {
         {
             eprintln!("can't title chat {id}: {err}");
         }
+        // The project may have been archived while the chat's worktree was
+        // checked out. Starting the chat brings it back, as opening one does.
+        if let Err(err) = self.db.restore_project(project_id) {
+            eprintln!("can't restore project {project_id}: {err}");
+        }
         // Its first session report adds its first session.
         if !self.start_chat(id, agent, cwd, None, window, cx) {
             let reaped = self.stop_chat(id, cx);
@@ -1514,7 +1721,15 @@ impl Workspace {
     }
 
     /// Shows a chat, resuming its last session if its CLI doesn't run.
+    /// Shows a chat, starting its CLI unless it runs. An archived chat, or
+    /// one in an archived project, is brought back first.
     pub fn open_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_archived(id, cx) {
+            if let Err(err) = self.db.restore_chat(id) {
+                eprintln!("can't restore chat {id}: {err}");
+            }
+            self.refresh(cx);
+        }
         self.navigations += 1;
         if self.chats.iter().any(|chat| chat.id == id) {
             // Reading a chat's last session takes long enough for another
@@ -2645,8 +2860,21 @@ impl Workspace {
             .find(|chat| chat.id == id)
     }
 
+    /// Whether a chat, or its project, is archived.
+    fn is_archived(&self, id: i64, cx: &App) -> bool {
+        self.sidebar.read(cx).projects().iter().any(|project| {
+            project.chats.iter().any(|chat| {
+                chat.id == id && (chat.archived_at.is_some() || project.archived_at.is_some())
+            })
+        })
+    }
+
     fn open_search(&mut self, _: &OpenSearch, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_palette(window, cx);
+        self.open_palette(false, window, cx);
+    }
+
+    fn show_archived(&mut self, _: &ShowArchived, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(true, window, cx);
     }
 
     /// Starts an agent in the selected project, or asks for a project when
@@ -2693,6 +2921,23 @@ impl Workspace {
     fn delete_active(&mut self, _: &DeleteChat, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.active {
             self.confirm_delete_chat(id, window, cx);
+        }
+    }
+
+    fn archive_active(&mut self, _: &ArchiveChat, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.active {
+            self.confirm_archive_chat(id, window, cx);
+        }
+    }
+
+    fn archive_selected(
+        &mut self,
+        _: &ArchiveProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.sidebar.read(cx).selected().map(|project| project.id) {
+            self.confirm_archive_project(id, window, cx);
         }
     }
 
@@ -2801,12 +3046,30 @@ impl Workspace {
     }
 
     /// Opens the search modal over the chats of every project, the agents
-    /// the selected project can start, the projects and the commands.
-    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// the selected project can start, the projects, the commands, and what
+    /// is archived; or with `archived_only`, over what is archived alone.
+    fn open_palette(&mut self, archived_only: bool, window: &mut Window, cx: &mut Context<Self>) {
         let sidebar = self.sidebar.read(cx);
         let mut chats = Vec::new();
+        let mut archived = Vec::new();
         for project in sidebar.projects() {
             for chat in &project.chats {
+                // An archived project's chats are archived along with it.
+                if let Some(at) = chat.archived_at.or(project.archived_at) {
+                    let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
+                    archived.push((
+                        at,
+                        Entry::new(title, Lead::Tone(Tone::Saved), Pick::OpenChat(chat.id))
+                            .meta(format!(
+                                "{} · archived {} · {}",
+                                chat.agent.label(),
+                                sidebar::age(at),
+                                project.name
+                            ))
+                            .keywords([chat.agent.display_name(), "archived"]),
+                    ));
+                    continue;
+                }
                 let tone = Tone::of(sidebar.running(chat.id));
                 let doing = match tone {
                     Tone::Saved => sidebar::age(chat.updated_at),
@@ -2841,7 +3104,7 @@ impl Workspace {
                     .map(|agent| {
                         Entry::new(
                             agent.display_name(),
-                            Lead::Icon(IconName::Plus),
+                            Lead::Icon(IconName::Plus.into()),
                             Pick::StartAgent(project.id, agent),
                         )
                         .meta(agent.program())
@@ -2851,13 +3114,46 @@ impl Workspace {
             })
             .unwrap_or_default();
 
+        for project in sidebar.projects() {
+            if let Some(at) = project.archived_at {
+                archived.push((
+                    at,
+                    Entry::new(
+                        project.name.clone(),
+                        Lead::Icon(ExtraIcon::Archive),
+                        Pick::SelectProject(project.id),
+                    )
+                    .meta(format!(
+                        "archived {} · {}",
+                        sidebar::age(at),
+                        home_relative(&project.path)
+                    ))
+                    .keywords(["project", "archived"]),
+                ));
+            }
+        }
+        // The last archived first.
+        archived.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        let archived: Vec<_> = archived.into_iter().map(|(_, entry)| entry).collect();
+
+        let this = cx.entity().downgrade();
+        let on_pick = move |pick, window: &mut Window, cx: &mut App| {
+            this.update(cx, |this, cx| this.run_pick(pick, window, cx))
+                .ok();
+        };
+        if archived_only {
+            palette::open(vec![("Archived".into(), archived)], on_pick, window, cx);
+            return;
+        }
+
         let projects = sidebar
             .projects()
             .iter()
+            .filter(|project| project.archived_at.is_none())
             .map(|project| {
                 Entry::new(
                     project.name.clone(),
-                    Lead::Icon(IconName::FolderOpen),
+                    Lead::Icon(IconName::FolderOpen.into()),
                     Pick::SelectProject(project.id),
                 )
                 .meta(home_relative(&project.path))
@@ -2866,7 +3162,11 @@ impl Workspace {
             .collect();
 
         let run = |label: &str, icon: IconName, action: Box<dyn Action>| {
-            Entry::new(label.to_string(), Lead::Icon(icon), Pick::Run(action))
+            Entry::new(
+                label.to_string(),
+                Lead::Icon(icon.into()),
+                Pick::Run(action),
+            )
         };
         let mut commands = Vec::new();
         if let Some(chat) = self.active_entry(cx) {
@@ -2894,10 +3194,35 @@ impl Workspace {
                 IconName::Star,
                 Box::new(TogglePin),
             ));
+            commands.push(
+                Entry::new(
+                    "Archive this chat",
+                    Lead::Icon(ExtraIcon::Archive),
+                    Pick::Run(Box::new(ArchiveChat)),
+                )
+                .keywords(["hide"]),
+            );
             commands.push(run(
                 "Delete this chat",
                 IconName::Delete,
                 Box::new(DeleteChat),
+            ));
+        }
+        if selected.is_some() {
+            commands.push(
+                Entry::new(
+                    "Archive this project",
+                    Lead::Icon(ExtraIcon::Archive),
+                    Pick::Run(Box::new(ArchiveProject)),
+                )
+                .keywords(["hide"]),
+            );
+        }
+        if !archived.is_empty() {
+            commands.push(Entry::new(
+                "Show the archived chats and projects",
+                Lead::Icon(ExtraIcon::ArchiveRestore),
+                Pick::Run(Box::new(ShowArchived)),
             ));
         }
         if !self.chats.is_empty() {
@@ -2927,7 +3252,7 @@ impl Workspace {
             };
             commands.push(Entry::new(
                 label,
-                Lead::Icon(IconName::Search),
+                Lead::Icon(IconName::Search.into()),
                 Pick::Filter(each),
             ));
         }
@@ -2992,18 +3317,15 @@ impl Workspace {
             .keywords(["restore", "backup"]),
         );
 
-        let this = cx.entity().downgrade();
         palette::open(
             vec![
                 ("Chats".into(), chats),
                 (start_heading.into(), start),
                 ("Projects".into(), projects),
                 ("Commands".into(), commands),
+                ("Archived".into(), archived),
             ],
-            move |pick, window, cx| {
-                this.update(cx, |this, cx| this.run_pick(pick, window, cx))
-                    .ok();
-            },
+            on_pick,
             window,
             cx,
         );
@@ -3036,9 +3358,15 @@ impl Workspace {
                     );
                 }
             }
-            Pick::SelectProject(id) => self
-                .sidebar
-                .update(cx, |sidebar, cx| sidebar.select(id, cx)),
+            Pick::SelectProject(id) => {
+                match self.db.restore_project(id) {
+                    Ok(true) => self.refresh(cx),
+                    Ok(false) => {}
+                    Err(err) => eprintln!("can't restore project {id}: {err}"),
+                }
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.select(id, cx))
+            }
             Pick::Filter(filter) => self
                 .sidebar
                 .update(cx, |sidebar, cx| sidebar.set_filter(filter, cx)),
@@ -3201,6 +3529,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::rename_active))
             .on_action(cx.listener(Self::toggle_pin))
             .on_action(cx.listener(Self::delete_active))
+            .on_action(cx.listener(Self::archive_active))
+            .on_action(cx.listener(Self::archive_selected))
+            .on_action(cx.listener(Self::show_archived))
             .on_action(cx.listener(Self::close_all_chats))
             .on_action(cx.listener(Self::close_idle_chats))
             .on_action(cx.listener(Self::toggle_theme))
@@ -3611,6 +3942,7 @@ impl Workspace {
                                                 Box::new(TogglePin),
                                             )
                                             .separator()
+                                            .menu("Archive", Box::new(ArchiveChat))
                                             .menu("Delete", Box::new(DeleteChat))
                                     }),
                             ),
@@ -3730,7 +4062,7 @@ impl Workspace {
                                         None => "Search".into(),
                                     })
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_palette(window, cx)
+                                        this.open_palette(false, window, cx)
                                     })),
                             ),
                     )

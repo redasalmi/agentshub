@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
@@ -46,6 +47,8 @@ pub enum SidebarEvent {
     /// folders among them become projects.
     DropPaths(Vec<PathBuf>),
     RemoveProject(i64),
+    /// Archive a project, which leaves the rail with its chats.
+    ArchiveProject(i64),
     /// Move a project to where another one is.
     MoveProject(i64, i64),
     /// Start a chat in a project.
@@ -61,6 +64,10 @@ pub enum SidebarEvent {
     /// Stop a running chat's agent, which opening the chat again resumes.
     CloseChat(i64),
     DeleteChat(i64),
+    /// Archive a chat, which leaves the list, stopping its agent.
+    ArchiveChat(i64),
+    /// Take a chat out of the archive, to the top of its list.
+    RestoreChat(i64),
     OpenSettings,
     /// Name the projects in the rail, or show only their marks.
     ShowProjectNames(bool),
@@ -200,6 +207,9 @@ pub struct Sidebar {
     /// The project whose chats the list shows.
     selected: Option<i64>,
     filter: Filter,
+    /// Whether the selected project's archived chats are listed below the
+    /// others.
+    show_archived: bool,
     _age: Task<()>,
 }
 
@@ -222,20 +232,20 @@ impl Sidebar {
             active: None,
             selected: None,
             filter: Filter::default(),
+            show_archived: false,
             _age: age,
         }
     }
 
     pub fn set_projects(&mut self, projects: Vec<Project>, cx: &mut Context<Self>) {
         self.projects = projects;
-        if !self
-            .selected
-            .is_some_and(|id| self.projects.iter().any(|project| project.id == id))
-        {
+        let listed = |id: i64| self.listed().any(|project| project.id == id);
+        if !self.selected.is_some_and(listed) {
             let selected = self
                 .active
                 .and_then(|id| self.project_of(id))
-                .or_else(|| self.projects.first().map(|project| project.id));
+                .filter(|id| listed(*id))
+                .or_else(|| self.listed().next().map(|project| project.id));
             if selected != self.selected {
                 self.selected = selected;
                 cx.emit(SidebarEvent::Selected);
@@ -264,8 +274,16 @@ impl Sidebar {
         }
     }
 
+    /// Every project, the archived ones too.
     pub fn projects(&self) -> &[Project] {
         &self.projects
+    }
+
+    /// The projects the rail shows: the ones not archived.
+    fn listed(&self) -> impl Iterator<Item = &Project> {
+        self.projects
+            .iter()
+            .filter(|project| project.archived_at.is_none())
     }
 
     /// What chat `id`'s agent is doing, `None` when it doesn't run.
@@ -308,8 +326,9 @@ impl Sidebar {
 
     /// Selects the `index`th project of the rail, counting from zero.
     pub fn select_at(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(project) = self.projects.get(index) {
-            self.select(project.id, cx);
+        let id = self.listed().nth(index).map(|project| project.id);
+        if let Some(id) = id {
+            self.select(id, cx);
         }
     }
 
@@ -322,13 +341,25 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// The selected project's chats the filter lets through, pinned first.
+    /// The selected project's chats the filter lets through, pinned first,
+    /// leaving out the archived ones.
     fn shown(&self) -> Vec<&Chat> {
         self.selected()
             .into_iter()
             .flat_map(|project| &project.chats)
-            .filter(|chat| self.filter.admits(self.running(chat.id)))
+            .filter(|chat| chat.archived_at.is_none() && self.filter.admits(self.running(chat.id)))
             .collect()
+    }
+
+    /// A project's archived chats, the last one archived first.
+    fn archived(project: &Project) -> Vec<&Chat> {
+        let mut chats: Vec<_> = project
+            .chats
+            .iter()
+            .filter(|chat| chat.archived_at.is_some())
+            .collect();
+        chats.sort_by_key(|chat| std::cmp::Reverse(chat.archived_at));
+        chats
     }
 
     /// The `index`th chat of the list, counting from zero.
@@ -340,14 +371,14 @@ impl Sidebar {
         project
             .chats
             .iter()
-            .filter(|chat| filter.admits(self.running(chat.id)))
+            .filter(|chat| chat.archived_at.is_none() && filter.admits(self.running(chat.id)))
             .count()
     }
 
     fn render_rail(&self, window_width: Pixels, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (named, width) = rail(window_width, cx);
-        let marks = marks(self.projects.iter().map(|project| project.name.as_str()));
+        let marks = marks(self.listed().map(|project| project.name.as_str()));
         let settings = Button::new("settings")
             .ghost()
             .icon(ExtraIcon::Settings)
@@ -403,7 +434,7 @@ impl Sidebar {
                             this.items_center().gap_2().pt_1()
                         }
                     })
-                    .children(self.projects.iter().zip(marks).enumerate().map(
+                    .children(self.listed().zip(marks).enumerate().map(
                         |(index, (project, mark))| {
                             self.render_project(index, project, mark.into(), named, cx)
                         },
@@ -629,7 +660,10 @@ impl Sidebar {
     fn render_list(&self, project: &Project, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let id = project.id;
+        let sidebar = cx.entity();
         let shown = self.shown();
+        let archived = Self::archived(project);
+        let has_chats = project.chats.len() > archived.len();
         let (pinned, others): (Vec<_>, Vec<_>) =
             shown.iter().enumerate().partition(|(_, chat)| chat.pinned);
 
@@ -670,19 +704,30 @@ impl Sidebar {
                                     ),
                             )
                             .child(
-                                div()
-                                    .invisible()
-                                    .group_hover("project-header", |style| style.visible())
-                                    .child(
-                                        Button::new("remove-project")
-                                            .ghost()
-                                            .small()
-                                            .icon(IconName::Delete)
-                                            .tooltip("Remove this project")
-                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                cx.emit(SidebarEvent::RemoveProject(id))
-                                            })),
-                                    ),
+                                Button::new("project-menu")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Ellipsis)
+                                    .tooltip("More")
+                                    .dropdown_menu(move |menu, _, _| {
+                                        let emit = |event: SidebarEvent| {
+                                            let sidebar = sidebar.clone();
+                                            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                                sidebar.update(cx, |_, cx| cx.emit(event.clone()))
+                                            }
+                                        };
+                                        menu.item(
+                                            PopupMenuItem::new("Archive")
+                                                .icon(ExtraIcon::Archive)
+                                                .on_click(emit(SidebarEvent::ArchiveProject(id))),
+                                        )
+                                        .separator()
+                                        .item(
+                                            PopupMenuItem::new("Remove")
+                                                .icon(IconName::Delete)
+                                                .on_click(emit(SidebarEvent::RemoveProject(id))),
+                                        )
+                                    }),
                             )
                             .child(
                                 Button::new("new-chat")
@@ -710,13 +755,17 @@ impl Sidebar {
                     .px_2()
                     .pb_3()
                     .gap_px()
-                    .when(project.chats.is_empty(), |this| {
+                    .when(!has_chats, |this| {
                         this.child(self.render_none(
-                            "No chats yet. Start an agent in this folder with New chat.",
+                            if archived.is_empty() {
+                                "No chats yet. Start an agent in this folder with New chat."
+                            } else {
+                                "No chats here. Start an agent in this folder with New chat."
+                            },
                             cx,
                         ))
                     })
-                    .when(!project.chats.is_empty() && shown.is_empty(), |this| {
+                    .when(has_chats && shown.is_empty(), |this| {
                         this.child(self.render_none(
                             match self.filter {
                                 Filter::NeedsYou => "No agent here needs you.",
@@ -739,8 +788,132 @@ impl Sidebar {
                                     .iter()
                                     .map(|(index, chat)| self.render_chat(*index, chat, cx)),
                             )
+                    })
+                    .when(self.filter == Filter::All && !archived.is_empty(), |this| {
+                        this.child(self.render_archived(&archived, cx))
                     }),
             )
+    }
+
+    /// The archived chats of a project, folded under a row that counts them.
+    fn render_archived(&self, chats: &[&Chat], cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let expanded = self.show_archived;
+        v_flex()
+            .gap_px()
+            .child(
+                h_flex()
+                    .id("archived")
+                    .px_2()
+                    .pt_3()
+                    .pb_1()
+                    .gap_1()
+                    .text_xs()
+                    .font_family(theme.mono_font_family.clone())
+                    .text_color(theme.muted_foreground)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.foreground))
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall(),
+                    )
+                    .child(format!("ARCHIVED · {}", chats.len()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_archived = !this.show_archived;
+                        cx.notify();
+                    })),
+            )
+            .when(expanded, |this| {
+                this.children(chats.iter().map(|chat| self.render_archived_chat(chat, cx)))
+            })
+    }
+
+    /// An archived chat, which opening brings back.
+    fn render_archived_chat(&self, chat: &Chat, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let id = chat.id;
+        let group = SharedString::from(format!("archived-{id}"));
+        let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
+        let archived = chat.archived_at.map(age).unwrap_or_default();
+        let row_bg = theme.sidebar_accent;
+
+        h_flex()
+            .id(group.clone())
+            .group(group.clone())
+            .relative()
+            .flex_none()
+            .px_2()
+            .py(px(7.))
+            .gap(px(10.))
+            .rounded(theme.radius)
+            .cursor_pointer()
+            .hover(|style| style.bg(row_bg))
+            .child(
+                div()
+                    .w(DOT_SIZE + px(4.))
+                    .flex()
+                    .justify_center()
+                    .child(dot(Tone::Saved, cx)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_sm()
+                            .truncate()
+                            .text_color(theme.muted_foreground)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(format!("{} · archived {archived}", chat.agent.label())),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_1()
+                    .pl_2()
+                    .items_center()
+                    .bg(row_bg)
+                    .invisible()
+                    .group_hover(group, |style| style.visible())
+                    .child(
+                        Button::new("restore-chat")
+                            .ghost()
+                            .xsmall()
+                            .icon(ExtraIcon::ArchiveRestore)
+                            .tooltip("Bring this chat back")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(SidebarEvent::RestoreChat(id));
+                            })),
+                    )
+                    .child(
+                        Button::new("delete-chat")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Delete)
+                            .tooltip("Delete this chat")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(SidebarEvent::DeleteChat(id));
+                            })),
+                    ),
+            )
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::OpenChat(id))))
     }
 
     fn render_filter(&self, project: &Project, cx: &Context<Self>) -> impl IntoElement {
@@ -938,14 +1111,14 @@ impl Sidebar {
                         )
                     })
                     .child(
-                        Button::new("delete-chat")
+                        Button::new("archive-chat")
                             .ghost()
                             .xsmall()
-                            .icon(IconName::Delete)
-                            .tooltip("Delete this chat")
+                            .icon(ExtraIcon::Archive)
+                            .tooltip("Archive this chat")
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
-                                cx.emit(SidebarEvent::DeleteChat(id));
+                                cx.emit(SidebarEvent::ArchiveChat(id));
                             })),
                     ),
             )

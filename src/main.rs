@@ -23,7 +23,18 @@ use gpui_kit::*;
 use crate::workspace::Workspace;
 
 // The icons agentshub uses beyond the components' own.
-gpui_kit::assets::icon_assets!(ExtraIcons, [Clock, Pencil, Pin, PinOff, Settings]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        Archive,
+        ArchiveRestore,
+        Clock,
+        Pencil,
+        Pin,
+        PinOff,
+        Settings
+    ]
+);
 
 struct Assets;
 

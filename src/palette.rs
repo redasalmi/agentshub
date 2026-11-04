@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -43,7 +43,7 @@ impl Clone for Pick {
 #[derive(Clone)]
 pub enum Lead {
     Tone(Tone),
-    Icon(IconName),
+    Icon(gpui_kit::assets::IconName),
 }
 
 pub struct Entry {
@@ -191,16 +191,19 @@ fn row(
             .w_full()
             .min_w_0()
             .gap_3()
-            .child(div().w_4().flex_none().flex().justify_center().map(|this| {
-                match &lead {
-                    Lead::Tone(tone) => this.child(sidebar::dot(*tone, cx)),
-                    Lead::Icon(icon) => this.child(
-                        Icon::new(icon.clone())
-                            .small()
-                            .text_color(theme.muted_foreground),
-                    ),
-                }
-            }))
+            .child(
+                div()
+                    .w_4()
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .map(|this| match &lead {
+                        Lead::Tone(tone) => this.child(sidebar::dot(*tone, cx)),
+                        Lead::Icon(icon) => {
+                            this.child(Icon::new(*icon).small().text_color(theme.muted_foreground))
+                        }
+                    }),
+            )
             .child(div().flex_1().min_w_0().truncate().child(label.clone()))
             .when_some(meta.clone(), |this, meta| {
                 this.child(
