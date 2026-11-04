@@ -1785,13 +1785,24 @@ impl Workspace {
         let db = self.db.clone();
         cx.spawn_in(window, async move |this, cx| {
             let read = smol::unblock(move || -> anyhow::Result<()> {
-                if let Some(last) = db.sessions(id)?.last()
+                let mut sessions = db.sessions(id)?;
+                if let Some(last) = sessions.pop()
                     && last.transcript_path.exists()
                 {
                     transcript::read(&db, last.id)?;
                     // Opening a chat is the chat being active, which orders the
                     // sidebar. Reading its history must not do the same.
                     db.touch_session(last.id)?;
+                }
+                // The history hides a session without a prompt, so it is never
+                // read again there, even once a newer parser would find one.
+                for earlier in sessions
+                    .iter()
+                    .filter(|session| !session.prompted && session.transcript_path.exists())
+                {
+                    if let Err(err) = transcript::read(&db, earlier.id) {
+                        eprintln!("can't read session {}: {err}", earlier.id);
+                    }
                 }
                 Ok(())
             })

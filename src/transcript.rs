@@ -23,7 +23,7 @@ const TITLE_CHARS: usize = 80;
 /// The version of what a read keeps. Raising it reads every transcript that
 /// still exists again from its start, so that a change to what is kept reaches
 /// the sessions read before it.
-pub const PARSER: i64 = 1;
+pub const PARSER: i64 = 2;
 
 /// How much of a tool's output is kept at each end.
 const OUTPUT_KEEP: usize = 2048;
@@ -284,6 +284,15 @@ impl Read {
         let payload = &line["payload"];
         let item = match (line["type"].as_str(), payload["type"].as_str()) {
             (Some("compacted"), _) => Some((Kind::Compaction, json!({}))),
+            // `/review` starts a session without a user message of its own.
+            (Some("event_msg"), Some("item_completed"))
+                if payload["item"]["type"] == "EnteredReviewMode" =>
+            {
+                let hint = payload["item"]["user_facing_hint"]
+                    .as_str()
+                    .unwrap_or_default();
+                self.prompt(&json!(format!("/review {hint}")), &[])
+            }
             (Some("response_item"), Some(kind)) => match kind {
                 "message" if payload["role"] == "user" => {
                     self.prompt(&payload["content"], &CODEX_INJECTED_PROMPTS)
@@ -915,6 +924,48 @@ mod tests {
         assert_eq!(title(&db, session).as_deref(), Some("fix the bug"));
         let tool = &db.items(session, 100).unwrap()[2].payload;
         assert_eq!(tool["input"]["cmd"], "ls");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn counts_a_codex_review_as_a_prompt() {
+        let dir = temp_dir();
+        let path = dir.join("rollout.jsonl");
+        let event = |item: Value| {
+            json!({"type": "event_msg", "payload": {"type": "item_completed", "item": item}})
+                .to_string()
+        };
+        let message = |role: &str, kind: &str, text: &str| {
+            json!({"type": "response_item", "payload":
+                {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}})
+            .to_string()
+        };
+        append(
+            &path,
+            &[
+                r#"{"type":"session_meta","payload":{"id":"t2","cwd":"/p","source":"cli"}}"#.into(),
+                event(json!({"type": "EnteredReviewMode", "user_facing_hint": "current changes"})),
+                event(
+                    json!({"type": "UserMessage", "content": [{"type": "text", "text": "Review"}]}),
+                ),
+                message(
+                    "user",
+                    "input_text",
+                    "<user_action>\n  <action>review</action>",
+                ),
+                message("assistant", "output_text", "No findings"),
+            ],
+        );
+        let (db, session) = session(Agent::Codex, &path);
+        assert_eq!(
+            shown(&db, session),
+            [
+                (Kind::User, "/review current changes".into()),
+                (Kind::Assistant, "No findings".into()),
+            ]
+        );
+        let chat = db.projects().unwrap()[0].chats[0].id;
+        assert!(db.sessions(chat).unwrap()[0].prompted);
         fs::remove_dir_all(dir).unwrap();
     }
 
