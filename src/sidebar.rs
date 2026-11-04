@@ -35,7 +35,8 @@ const ROW_HEIGHT: Pixels = px(34.);
 const MARK_SIZE: Pixels = px(22.);
 /// The bar beside the selected project, on the rail's edge.
 const BAR_WIDTH: Pixels = px(3.);
-const DOT_SIZE: Pixels = px(8.);
+/// A chat's status glyph, and the room it takes in a row.
+const GLYPH_SIZE: Pixels = px(14.);
 
 /// How many chats and projects have a shortcut of their own.
 pub const NUMBERED: usize = 9;
@@ -137,6 +138,30 @@ impl Tone {
         matches!(self, Self::NeedsYou(_) | Self::Done | Self::Error)
     }
 
+    /// Where the running list puts a chat: an agent that can't go on without
+    /// the user first, one at rest last.
+    fn urgency(self) -> u8 {
+        match self {
+            Self::NeedsYou(_) => 0,
+            Self::Error => 1,
+            Self::Done => 2,
+            Self::Working => 3,
+            Self::Running => 4,
+            Self::Idle => 5,
+            Self::Saved => 6,
+        }
+    }
+
+    /// The heading of the running list's group this tone is in.
+    pub fn group(self) -> &'static str {
+        match self {
+            tone if tone.needs_you() => "Needs you",
+            Self::Working => "Working",
+            Self::Idle => "Idle",
+            _ => "Running",
+        }
+    }
+
     /// What the agent is doing, in a few words.
     pub fn label(self) -> &'static str {
         match self {
@@ -173,27 +198,114 @@ impl Tone {
     }
 }
 
-/// A chat's status dot: filled in its status color, or a ring for an agent at
-/// rest, hollow when it doesn't run.
+/// A chat's status glyph. Each status has a shape of its own as well as a
+/// color, so they tell apart at a glance and without telling colors apart:
+/// a mark in a filled circle for the ones that need the user, an open arc
+/// for an agent at work, a ring for one at rest, and a small dot for a chat
+/// that doesn't run.
 pub fn dot(tone: Tone, cx: &App) -> Div {
     let theme = cx.theme();
     let palette = appearance::palette(cx);
-    let dot = div().size(DOT_SIZE).flex_none().rounded_full();
+    let glyph = div()
+        .size(GLYPH_SIZE)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center();
+    let filled = |background: Hsla, foreground: Hsla, icon: IconName| {
+        div()
+            .size(GLYPH_SIZE)
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(background)
+            .child(Icon::new(icon).size(px(10.)).text_color(foreground))
+    };
     match tone {
-        Tone::Saved => dot.border_1().border_color(palette.border_strong),
-        Tone::Running | Tone::Idle => dot
-            .border_1()
-            .border_color(theme.muted_foreground)
-            .bg(theme.muted_foreground.opacity(0.35)),
-        Tone::Working => {
-            let tint = palette.info;
-            // A halo marks the agents at work.
-            dot.bg(tint.base)
+        Tone::Saved => glyph.child(div().size(px(5.)).rounded_full().bg(palette.border_strong)),
+        Tone::Idle => glyph.child(
+            div()
+                .size(px(10.))
+                .rounded_full()
                 .border_2()
-                .border_color(tint.soft)
-                .size(DOT_SIZE + px(4.))
-        }
-        tone => dot.bg(tone.tint(cx).map(|tint| tint.base).unwrap_or_default()),
+                .border_color(theme.muted_foreground),
+        ),
+        Tone::Running => glyph.child(
+            div()
+                .size(px(10.))
+                .rounded_full()
+                .border_2()
+                .border_color(theme.muted_foreground)
+                .bg(theme.muted_foreground.opacity(0.35)),
+        ),
+        // Still, as the sidebar draws only when what it shows changes.
+        Tone::Working => glyph.child(
+            Icon::new(ExtraIcon::LoaderCircle)
+                .size(GLYPH_SIZE)
+                .text_color(palette.info.base),
+        ),
+        Tone::NeedsYou(_) => glyph.child(
+            div()
+                .size(GLYPH_SIZE)
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.warning)
+                .text_color(theme.warning_foreground)
+                .text_size(px(11.))
+                .font_semibold()
+                .line_height(px(11.))
+                .child("!"),
+        ),
+        Tone::Done => glyph.child(filled(
+            theme.success,
+            theme.success_foreground,
+            IconName::Check,
+        )),
+        Tone::Error => glyph.child(filled(
+            theme.danger,
+            theme.danger_foreground,
+            IconName::Close,
+        )),
+    }
+}
+
+/// A count in the rail: filled when it counts chats that need the user, else
+/// a quiet outline, in the working color while one of them works.
+pub fn badge(count: usize, urgent: bool, working: bool, cx: &App) -> Div {
+    let theme = cx.theme();
+    let palette = appearance::palette(cx);
+    let badge = div()
+        .flex_none()
+        .min_w(px(18.))
+        .h(px(18.))
+        .px_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .text_size(px(10.))
+        .font_medium()
+        .child(count.to_string());
+    if urgent {
+        badge
+            .bg(theme.warning)
+            .border_color(theme.warning)
+            .text_color(theme.warning_foreground)
+            .font_semibold()
+    } else if working {
+        badge
+            .bg(theme.sidebar)
+            .border_color(palette.info.base)
+            .text_color(palette.info.text)
+    } else {
+        badge
+            .bg(theme.sidebar)
+            .border_color(palette.border_strong)
+            .text_color(palette.secondary_foreground)
     }
 }
 
@@ -272,6 +384,42 @@ impl Sidebar {
         if let Some(project) = self.project_of(chat_id) {
             self.select(project, cx);
         }
+    }
+
+    /// The running chats of every project in the rail, the most urgent first,
+    /// and in the rail's order within the same urgency, so a chat only moves
+    /// when what its agent does changes.
+    pub fn running_chats(&self) -> Vec<(&Project, &Chat, Tone)> {
+        let mut chats: Vec<_> = self
+            .listed()
+            .flat_map(|project| {
+                project
+                    .chats
+                    .iter()
+                    .filter(|chat| chat.archived_at.is_none())
+                    .filter_map(move |chat| {
+                        let running = self.running(chat.id)?;
+                        Some((project, chat, Tone::of(Some(running))))
+                    })
+            })
+            .collect();
+        chats.sort_by_key(|(_, _, tone)| tone.urgency());
+        chats
+    }
+
+    /// The chat to go to next among the ones that need the user: the one
+    /// after chat `after` in the running list, or the first.
+    pub fn next_needing_you(&self, after: Option<i64>) -> Option<i64> {
+        let needing: Vec<i64> = self
+            .running_chats()
+            .into_iter()
+            .filter(|(_, _, tone)| tone.needs_you())
+            .map(|(_, chat, _)| chat.id)
+            .collect();
+        let next = after
+            .and_then(|id| needing.iter().position(|each| *each == id))
+            .map_or(0, |at| at + 1);
+        needing.get(next).or(needing.first()).copied()
     }
 
     /// Every project, the archived ones too.
@@ -471,19 +619,32 @@ impl Sidebar {
         let id = project.id;
         let selected = self.selected == Some(id);
         let tint = appearance::project_tint(id, cx);
-        // A single count of the project's open chats, whatever their agents
-        // say they're doing.
-        let open = project
+        // How many of the project's chats need the user, or else how many
+        // are open, which a working agent among them tints.
+        let running: Vec<_> = project
             .chats
             .iter()
-            .filter(|chat| self.running.contains_key(&chat.id))
+            .filter_map(|chat| self.running.get(&chat.id))
+            .collect();
+        let open = running.len();
+        let needing = running
+            .iter()
+            .filter(|&&status| Tone::of(Some(*status)).needs_you())
             .count();
+        let working = running
+            .iter()
+            .any(|status| matches!(status, Some(Status::Working)));
         let name = SharedString::from(project.name.clone());
         // The row already shows the name, so its hint tells where it is.
         let hint = if named {
             home_relative(&project.path)
         } else {
             name.to_string()
+        };
+        let hint = if open > 0 {
+            format!("{hint}  ·  {}", summary(running.into_iter()))
+        } else {
+            hint
         };
         let hint = if index < NUMBERED {
             format!("{hint}  ·  Ctrl+{}", index + 1)
@@ -496,23 +657,12 @@ impl Sidebar {
             name: name.clone(),
         };
         let drop_color = theme.drop_target;
-        let badge = |count: usize| {
-            div()
-                .flex_none()
-                .min_w(px(18.))
-                .h(px(18.))
-                .px_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(theme.sidebar)
-                .border_1()
-                .border_color(palette.border_strong)
-                .text_color(palette.secondary_foreground)
-                .text_size(px(10.))
-                .font_medium()
-                .child(count.to_string())
+        let count = || {
+            if needing > 0 {
+                badge(needing, true, false, cx)
+            } else {
+                badge(open, false, working, cx)
+            }
         };
         let bar = div()
             .absolute()
@@ -552,7 +702,7 @@ impl Sidebar {
                         })
                         .child(name),
                 )
-                .when(open > 0, |this| this.child(badge(open)))
+                .when(open > 0, |this| this.child(count()))
                 // On the rail's edge, past the list's padding.
                 .when(selected, |this| {
                     this.child(bar.left(px(-6.)).top(px(9.)).bottom(px(9.)))
@@ -583,7 +733,7 @@ impl Sidebar {
                 })
                 .child(mark)
                 .when(open > 0, |this| {
-                    this.child(badge(open).absolute().top(px(-5.)).left(px(-5.)))
+                    this.child(count().absolute().top(px(-5.)).left(px(-5.)))
                 })
                 // On the rail's edge, as the tile is centered in it.
                 .when(selected, |this| {
@@ -852,13 +1002,7 @@ impl Sidebar {
             .rounded(theme.radius)
             .cursor_pointer()
             .hover(|style| style.bg(row_bg))
-            .child(
-                div()
-                    .w(DOT_SIZE + px(4.))
-                    .flex()
-                    .justify_center()
-                    .child(dot(Tone::Saved, cx)),
-            )
+            .child(dot(Tone::Saved, cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -1014,13 +1158,7 @@ impl Sidebar {
                     this.hover(|style| style.bg(row_bg))
                 }
             })
-            .child(
-                div()
-                    .w(DOT_SIZE + px(4.))
-                    .flex()
-                    .justify_center()
-                    .child(dot(tone, cx)),
-            )
+            .child(dot(tone, cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -1038,7 +1176,7 @@ impl Sidebar {
                             .font_family(theme.mono_font_family.clone())
                             .text_color(tone.text_color(cx))
                             .truncate()
-                            .child(subtitle(chat, tone)),
+                            .child(subtitle(chat, tone, None)),
                     ),
             )
             .when(index < NUMBERED, |this| {
@@ -1141,6 +1279,29 @@ impl Sidebar {
     }
 }
 
+/// A heading of the running list, in the color of what its chats need.
+pub fn group_heading(label: &'static str, count: usize, tone: Tone, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let color = if tone.needs_you() {
+        Tone::NeedsYou(None).text_color(cx)
+    } else {
+        tone.text_color(cx)
+    };
+    h_flex()
+        .pt_2()
+        .pb_1()
+        .gap_1p5()
+        .text_xs()
+        .font_family(theme.mono_font_family.clone())
+        .text_color(color)
+        .child(label.to_uppercase())
+        .child(
+            div()
+                .text_color(theme.muted_foreground)
+                .child(count.to_string()),
+        )
+}
+
 fn section(label: &'static str, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
@@ -1153,13 +1314,14 @@ fn section(label: &'static str, cx: &App) -> impl IntoElement {
         .child(label.to_uppercase())
 }
 
-/// A chat's agent, what it's doing while it runs, and how long ago it last
-/// changed.
-fn subtitle(chat: &Chat, tone: Tone) -> String {
-    let agent = chat.agent.label();
+/// What a chat's agent is doing while it runs, the agent or else the
+/// chat's `project`, and how long ago it last changed. What the agent does
+/// comes first, so a narrow list cuts the rest.
+pub fn subtitle(chat: &Chat, tone: Tone, project: Option<&str>) -> String {
+    let source = project.unwrap_or(chat.agent.label());
     match tone {
-        Tone::Saved => format!("{agent} · {}", age(chat.updated_at)),
-        tone => format!("{agent} · {} · {}", tone.label(), age(chat.updated_at)),
+        Tone::Saved => format!("{source} · {}", age(chat.updated_at)),
+        tone => format!("{} · {source} · {}", tone.label(), age(chat.updated_at)),
     }
 }
 
@@ -1418,7 +1580,7 @@ pub fn age(at: i64) -> String {
     }
 }
 
-/// How many agents work, need the user, sit idle, or haven't said.
+/// How many agents need the user, work, sit idle, or haven't said.
 pub fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String {
     let (mut working, mut need_you, mut idle, mut unknown) = (0, 0, 0, 0);
     for status in running {
@@ -1430,13 +1592,13 @@ pub fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String 
         }
     }
     let mut parts = Vec::new();
-    if working > 0 {
-        parts.push(format!("{working} working"));
-    }
     match need_you {
         0 => {}
         1 => parts.push("1 needs you".to_string()),
         n => parts.push(format!("{n} need you")),
+    }
+    if working > 0 {
+        parts.push(format!("{working} working"));
     }
     if idle > 0 {
         parts.push(format!("{idle} idle"));
@@ -1452,7 +1614,7 @@ pub fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String 
 }
 
 impl Sidebar {
-    /// How many agents work, need the user, sit idle, or haven't said.
+    /// How many agents need the user, work, sit idle, or haven't said.
     pub fn summary(&self) -> String {
         summary(self.running.values())
     }
@@ -1477,7 +1639,7 @@ mod tests {
                 None,
                 Some(Status::Blocked(None)),
             ]),
-            "1 working · 2 need you · 1 idle · 1 running"
+            "2 need you · 1 working · 1 idle · 1 running"
         );
         // A CLI that doesn't report may well be working, so it isn't idle.
         assert_eq!(sum(&[None, None]), "2 running");

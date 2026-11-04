@@ -27,6 +27,7 @@ use crate::workspace::Workspace;
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
+        Activity,
         Archive,
         ArchiveRestore,
         Clock,

@@ -14,8 +14,9 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::DropdownMenu as _;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::resizable::{HandleEdge, resize_handle, resize_handle_appearance};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
@@ -58,6 +59,9 @@ const MIN_MAIN_WIDTH: Pixels = px(360.);
 /// The least room a chat's title keeps beside its status and actions; with
 /// less, they move below it.
 const MIN_TITLE_WIDTH: Pixels = px(200.);
+/// The least room beside the sidebar in which the search shows its shortcut
+/// as well as what it searches.
+const MIN_SEARCH_KEYS_WIDTH: Pixels = px(600.);
 
 /// The most of the window's height that a chat's earlier sessions take.
 const HISTORY_SHARE: f32 = 0.45;
@@ -106,6 +110,8 @@ actions!(
         ExportDatabase,
         ImportDatabase,
         ToggleProjectNames,
+        ShowRunning,
+        NextNeedingYou,
     ]
 );
 
@@ -140,6 +146,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-w", CloseAllChats, None),
         KeyBinding::new("ctrl-shift-i", CloseIdleChats, None),
         KeyBinding::new("ctrl-shift-a", ArchiveChat, None),
+        KeyBinding::new("ctrl-0", ShowRunning, None),
+        KeyBinding::new("ctrl-shift-j", NextNeedingYou, None),
     ]);
     for n in 0..NUMBERED {
         let digit = n + 1;
@@ -240,6 +248,8 @@ pub struct Workspace {
     shells: HashMap<PathBuf, Shell>,
     /// Whether the settings show in place of the chat.
     settings_shown: bool,
+    /// The running chats' menu, while it is open.
+    running_menu: Option<Entity<PopupMenu>>,
     /// Whether the window is closed to the tray, so no terminal is shown.
     hidden: bool,
     /// The window last opened on the workspace, for work that finishes
@@ -705,6 +715,7 @@ impl Workspace {
             _lock: lock,
             shells: HashMap::new(),
             settings_shown: false,
+            running_menu: None,
             hidden: false,
             window: window.window_handle(),
             focus_handle: cx.focus_handle(),
@@ -3056,6 +3067,124 @@ impl Workspace {
             .update(cx, |sidebar, cx| sidebar.select_at(action.0, cx));
     }
 
+    fn show_running(&mut self, _: &ShowRunning, window: &mut Window, cx: &mut Context<Self>) {
+        if self.running_menu.take().is_some() {
+            cx.notify();
+        } else {
+            self.open_running_menu(window, cx);
+        }
+    }
+
+    /// Opens the menu of the running chats of every project, under what
+    /// their agents need, the most urgent first.
+    fn open_running_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sidebar = self.sidebar.read(cx);
+        let chats: Vec<_> = sidebar
+            .running_chats()
+            .into_iter()
+            .map(|(project, chat, tone)| {
+                let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
+                let about = sidebar::subtitle(chat, tone, Some(&project.name));
+                (
+                    chat.id,
+                    SharedString::from(title),
+                    SharedString::from(about),
+                    tone,
+                )
+            })
+            .collect();
+        let active = self.active;
+        let workspace = cx.weak_entity();
+        let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+            menu = menu.min_w(px(300.)).max_w(px(400.)).scrollable(true);
+            if chats.is_empty() {
+                return menu.item(
+                    PopupMenuItem::element(|_, cx| {
+                        div()
+                            .py_1()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No agents running")
+                    })
+                    .disabled(true),
+                );
+            }
+            let mut heading = None;
+            for (id, title, about, tone) in chats.iter().cloned() {
+                let group = tone.group();
+                if heading != Some(group) {
+                    heading = Some(group);
+                    let count = chats.iter().filter(|chat| chat.3.group() == group).count();
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            sidebar::group_heading(group, count, tone, cx).into_any_element()
+                        })
+                        .disabled(true),
+                    );
+                }
+                let workspace = workspace.clone();
+                menu = menu.item(
+                    PopupMenuItem::element(move |_, cx| {
+                        let theme = cx.theme();
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .py_1()
+                            .gap(px(10.))
+                            .child(sidebar::dot(tone, cx))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .truncate()
+                                            .when(active == Some(id), |this| this.font_medium())
+                                            .child(title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_family(theme.mono_font_family.clone())
+                                            .text_color(tone.text_color(cx))
+                                            .truncate()
+                                            .child(about.clone()),
+                                    ),
+                            )
+                    })
+                    .on_click(move |_, window, cx| {
+                        workspace
+                            .update(cx, |this, cx| this.open_chat(id, window, cx))
+                            .ok();
+                    }),
+                );
+            }
+            menu
+        });
+        cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
+            this.running_menu = None;
+            cx.notify();
+        })
+        .detach();
+        self.running_menu = Some(menu);
+        cx.notify();
+    }
+
+    /// Opens the next chat whose agent needs the user, going round them all
+    /// when pressed again.
+    fn next_needing_you(
+        &mut self,
+        _: &NextNeedingYou,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.sidebar.read(cx).next_needing_you(self.active) {
+            Some(id) => self.open_chat(id, window, cx),
+            None => window.push_notification("No agent needs you", cx),
+        }
+    }
+
     /// Opens the search modal over the chats of every project, the agents
     /// the selected project can start, the projects, the commands, and what
     /// is archived; or with `archived_only`, over what is archived alone.
@@ -3267,6 +3396,22 @@ impl Workspace {
                 Pick::Filter(each),
             ));
         }
+        commands.push(
+            Entry::new(
+                "Show the running chats of every project",
+                Lead::Icon(ExtraIcon::Activity),
+                Pick::Run(Box::new(ShowRunning)),
+            )
+            .keywords(["working", "idle", "active"]),
+        );
+        commands.push(
+            Entry::new(
+                "Open the next chat that needs you",
+                Lead::Icon(ExtraIcon::CircleAlert),
+                Pick::Run(Box::new(NextNeedingYou)),
+            )
+            .keywords(["waiting", "permission", "question", "done", "error"]),
+        );
         commands.push(run(
             "Add a project",
             IconName::FolderOpen,
@@ -3552,6 +3697,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::import_action))
             .on_action(cx.listener(Self::open_chat_at))
             .on_action(cx.listener(Self::select_project_at))
+            .on_action(cx.listener(Self::show_running))
+            .on_action(cx.listener(Self::next_needing_you))
             // Follows the pointer anywhere in the window while the sidebar's
             // edge is dragged, since it leaves the edge's thin band at once.
             .on_drag_move(
@@ -3604,35 +3751,53 @@ impl Render for Workspace {
                     .child(self.render_rail_edge(window_width, cx))
                     .child(self.render_sidebar_edge(cx)),
             )
-            // The sheet the chat is drawn on, set on the sidebar's ground.
+            // The sheet the chat is drawn on, set on the sidebar's ground
+            // under the toolbar.
             .child(
-                div().flex_1().min_w_0().h_full().p_2().child(
-                    v_flex()
-                        .size_full()
-                        .bg(theme.background)
-                        .border_1()
-                        .border_color(theme.border)
-                        .rounded(theme.radius_lg)
-                        .shadow_xs()
-                        .child(v_flex().flex_1().min_h_0().map(|this| {
-                            match active {
-                                _ if self.settings_shown => this.child(render_settings(window, cx)),
-                                Some(chat) => this.child(self.render_chat(chat, window, cx)),
-                                None => this.child(
-                                    self.render_over_shell(
-                                        div()
-                                            .size_full()
-                                            .overflow_hidden()
-                                            .child(self.render_empty(window, cx)),
-                                        px(0.),
-                                        window,
-                                        cx,
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .p_2()
+                    .gap_2()
+                    .child(self.render_toolbar(
+                        window_width
+                            - clamp_sidebar_width(self.sidebar_width, window_width, names)
+                            - names,
+                        window,
+                        cx,
+                    ))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .bg(theme.background)
+                            .border_1()
+                            .border_color(theme.border)
+                            .rounded(theme.radius_lg)
+                            .shadow_xs()
+                            .child(v_flex().flex_1().min_h_0().map(|this| {
+                                match active {
+                                    _ if self.settings_shown => {
+                                        this.child(render_settings(window, cx))
+                                    }
+                                    Some(chat) => this.child(self.render_chat(chat, window, cx)),
+                                    None => this.child(
+                                        self.render_over_shell(
+                                            div()
+                                                .size_full()
+                                                .overflow_hidden()
+                                                .child(self.render_empty(window, cx)),
+                                            px(0.),
+                                            window,
+                                            cx,
+                                        ),
                                     ),
-                                ),
-                            }
-                        }))
-                        .child(self.render_footer(window, cx)),
-                ),
+                                }
+                            }))
+                            .child(self.render_footer(window, cx)),
+                    ),
             )
             .into_any_element()
     }
@@ -3961,6 +4126,123 @@ impl Workspace {
             )
     }
 
+    /// The search, which opens the search modal, and the menu of the running
+    /// chats, over the `width` the sidebar leaves.
+    fn render_toolbar(
+        &self,
+        width: Pixels,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let palette = appearance::palette(cx);
+        let sidebar = self.sidebar.read(cx);
+        let running: Vec<_> = sidebar
+            .running_chats()
+            .into_iter()
+            .map(|(_, _, tone)| tone)
+            .collect();
+        let needing = running.iter().filter(|tone| tone.needs_you()).count();
+        let working = running.contains(&Tone::Working);
+        let count = match (needing, running.len()) {
+            (0, 0) => None,
+            (0, open) => Some(sidebar::badge(open, false, working, cx)),
+            (needing, _) => Some(sidebar::badge(needing, true, false, cx)),
+        };
+        let menu = self.running_menu.clone();
+        let workspace = cx.weak_entity();
+
+        let search = Button::new("search")
+            .outline()
+            .flex_1()
+            .min_w_0()
+            .max_w(px(480.))
+            .h_8()
+            .bg(theme.background)
+            .icon(IconName::Search)
+            .accessibility_label("Search chats, projects and commands")
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child("Search chats, projects and commands"),
+                    )
+                    // Too narrow for both, the search keeps its name.
+                    .children(
+                        palette::shortcut(&OpenSearch, window)
+                            .filter(|_| width >= MIN_SEARCH_KEYS_WIDTH)
+                            .map(|keys| {
+                                div()
+                                    .flex_none()
+                                    .px_1p5()
+                                    .rounded(px(4.))
+                                    .bg(palette.strong)
+                                    .text_xs()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_color(palette.secondary_foreground)
+                                    .child(keys)
+                            }),
+                    ),
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.open_palette(false, window, cx)));
+
+        let running = Button::new("running")
+            .ghost()
+            .h_8()
+            .icon(ExtraIcon::Activity)
+            .label("Running")
+            .children(count)
+            .dropdown_caret(true)
+            .tooltip_with_action("The running chats of every project", &ShowRunning, None);
+
+        h_flex()
+            .flex_none()
+            .w_full()
+            .gap_4()
+            .justify_between()
+            .child(search)
+            .child(
+                Popover::new("running-menu")
+                    .anchor(Anchor::TopRight)
+                    .appearance(false)
+                    // The menu closes itself on a click outside it.
+                    .overlay_closable(false)
+                    .open(menu.is_some())
+                    .when_some(menu.as_ref(), |this, menu| {
+                        this.track_focus(&menu.focus_handle(cx))
+                    })
+                    .on_open_change(move |open, window, cx| {
+                        workspace
+                            .update(cx, |this, cx| {
+                                if *open {
+                                    // Opened from the button, the popover
+                                    // took the focus before the menu was there.
+                                    this.open_running_menu(window, cx);
+                                    if let Some(menu) = &this.running_menu {
+                                        menu.focus_handle(cx).focus(window, cx);
+                                    }
+                                } else {
+                                    this.running_menu = None;
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                    })
+                    .trigger(running)
+                    .content(move |_, _, _| match &menu {
+                        Some(menu) => menu.clone().into_any_element(),
+                        None => div().into_any_element(),
+                    }),
+            )
+    }
+
     /// The shortcuts used most, and what the agents are doing.
     fn render_footer(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -3982,14 +4264,18 @@ impl Workspace {
             .text_xs()
             .font_family(theme.mono_font_family.clone())
             .text_color(theme.muted_foreground)
+            // What the agents do comes first, so a narrow window cuts the
+            // shortcuts instead.
+            .child(div().flex_none().child(summary))
+            .child(div().flex_1())
+            .children(bound(&NextNeedingYou, "next that needs you"))
+            .children(bound(&ShowRunning, "running"))
             .children(bound(&OpenSearch, "search"))
             .children(bound(&NewChat, "new chat"))
             .children(bound(&ToggleShell, "shell"))
             .child(key_hint("Ctrl+1…9".into(), "open project", cx))
             .child(key_hint("Alt+1…9".into(), "open chat", cx))
             .children(bound(&ToggleSettings, "settings"))
-            .child(div().flex_1())
-            .child(div().flex_none().child(summary))
     }
 
     /// What shows while no chat is open: how to start one, and how to read
@@ -4342,8 +4628,16 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
                     .child(keys),
             )
     };
-    let bound: [(&'static str, Box<dyn Action>); 9] = [
+    let bound: [(&'static str, Box<dyn Action>); 11] = [
         ("Search chats, projects and commands", Box::new(OpenSearch)),
+        (
+            "Show the running chats of every project",
+            Box::new(ShowRunning),
+        ),
+        (
+            "Open the next chat that needs you",
+            Box::new(NextNeedingYou),
+        ),
         ("Start an agent in the selected project", Box::new(NewChat)),
         ("Show or hide the project's shell", Box::new(ToggleShell)),
         ("Show or hide the earlier sessions", Box::new(ToggleHistory)),
