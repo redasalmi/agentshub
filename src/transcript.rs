@@ -23,7 +23,7 @@ const TITLE_CHARS: usize = 80;
 /// The version of what a read keeps. Raising it reads every transcript that
 /// still exists again from its start, so that a change to what is kept reaches
 /// the sessions read before it.
-pub const PARSER: i64 = 2;
+pub const PARSER: i64 = 3;
 
 /// How much of a tool's output is kept at each end.
 const OUTPUT_KEEP: usize = 2048;
@@ -111,6 +111,9 @@ pub struct Read {
     pub generated_title: Option<Option<String>>,
     /// The tool calls in `items`, by their call ids.
     calls: HashMap<String, usize>,
+    /// A command the user typed on the line before, which is a prompt only if
+    /// Claude expands it on the next.
+    command: Option<String>,
 }
 
 /// Reads the lines added to a session's transcript since the last read, and
@@ -197,6 +200,8 @@ impl Read {
 
         file.seek(SeekFrom::Start(offset))?;
         let mut reader = BufReader::new(file);
+        // Where the last line that left no command pending ends.
+        let (mut settled, mut lines_settled) = (offset, 0);
         loop {
             line.clear();
             let len = reader.read_until(b'\n', &mut line)?;
@@ -205,6 +210,15 @@ impl Read {
             }
             offset += len as u64;
             read.line(agent, &line);
+            if read.command.is_none() {
+                (settled, lines_settled) = (offset, read.lines.len());
+            }
+        }
+        // A command is a prompt only if Claude expands it on a later line, so
+        // it is read again together with that line.
+        if read.command.is_some() {
+            offset = settled;
+            read.lines.truncate(lines_settled);
         }
         read.offset = offset;
 
@@ -234,6 +248,11 @@ impl Read {
             return;
         }
         let content = &line["message"]["content"];
+        // Bookkeeping lines can come between a command and its expansion.
+        let command = match line["type"].as_str() {
+            Some("user" | "assistant" | "system") => self.command.take(),
+            _ => None,
+        };
         let mut items = Vec::new();
         match line["type"].as_str() {
             Some("user") => {
@@ -244,7 +263,12 @@ impl Read {
                         self.complete(call_id, &part["content"], part["is_error"] == true);
                     }
                 }
-                if line["isMeta"] != true && line["isCompactSummary"] != true {
+                if line["isMeta"] == true {
+                    if let Some(command) = command {
+                        items.extend(self.prompt(&command.into(), &[]));
+                    }
+                } else if line["isCompactSummary"] != true {
+                    self.command = typed_command(content);
                     items.extend(self.prompt(content, &INJECTED_PROMPTS));
                 }
             }
@@ -605,7 +629,16 @@ fn prompt_parts(content: &Value, injected: &[&str]) -> Vec<String> {
         .filter_map(|text| {
             let text = text.trim();
             if let Some(rest) = text.strip_prefix("<skill name=\"") {
-                return rest.split('"').next().map(|name| format!("/{name}"));
+                let name = rest.split('"').next()?;
+                // The body is the skill's file, which can show the tag itself.
+                let args = rest
+                    .rsplit_once("</skill>")
+                    .map_or("", |(_, args)| args.trim());
+                return Some(if args.is_empty() {
+                    format!("/{name}")
+                } else {
+                    format!("/{name} {args}")
+                });
             }
             let skipped = text.is_empty()
                 || injected.iter().any(|prefix| text.starts_with(prefix))
@@ -613,6 +646,27 @@ fn prompt_parts(content: &Value, injected: &[&str]) -> Vec<String> {
             (!skipped).then(|| text.to_string())
         })
         .collect()
+}
+
+/// What the user typed to run a command, from the line Claude writes for it.
+/// Skills and prompt commands are expanded on the next line, while built-in
+/// commands such as `/clear` are not.
+fn typed_command(content: &Value) -> Option<String> {
+    let text = content.as_str()?.trim_start();
+    if !text.starts_with("<command-message>") && !text.starts_with("<command-name>") {
+        return None;
+    }
+    let name = tag(text, "command-name")?;
+    Some(match tag(text, "command-args") {
+        Some(args) if !args.is_empty() => format!("{name} {args}"),
+        _ => name.to_string(),
+    })
+}
+
+fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let (_, rest) = text.split_once(&format!("<{name}>"))?;
+    let (inner, _) = rest.split_once(&format!("</{name}>"))?;
+    Some(inner.trim())
 }
 
 pub fn clean_title(text: &str) -> Option<String> {
@@ -773,6 +827,125 @@ mod tests {
         let items = shown(&db, session);
         assert_eq!(items.len(), 4);
         assert_eq!(items[3], (Kind::Tool, "Read -> [image]\ndone".into()));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn meta(uuid: &str, parent: &str, text: &str) -> String {
+        json!({
+            "type": "user",
+            "uuid": uuid,
+            "parentUuid": parent,
+            "isMeta": true,
+            "message": { "role": "user", "content": [{"type": "text", "text": text}] },
+        })
+        .to_string()
+    }
+
+    fn prompted(db: &Db, session: i64) -> bool {
+        let chat = db.projects().unwrap().remove(0).chats.remove(0);
+        db.sessions(chat.id)
+            .unwrap()
+            .into_iter()
+            .any(|s| s.id == session && s.prompted)
+    }
+
+    #[test]
+    fn keeps_skill_commands_as_prompts() {
+        let dir = temp_dir();
+        let path = dir.join("abc.jsonl");
+        append(
+            &path,
+            &[
+                claude(
+                    "1",
+                    None,
+                    "user",
+                    json!(
+                        "<command-message>design-director</command-message>\n<command-name>/design-director</command-name>\n<command-args>make the\nstatus clearer</command-args>"
+                    ),
+                ),
+                json!({"type": "api-request-blob"}).to_string(),
+                json!({"type": "api-request"}).to_string(),
+                json!({
+                    "type": "user",
+                    "uuid": "s",
+                    "parentUuid": null,
+                    "isSidechain": true,
+                    "message": { "role": "user", "content": "a subagent's task" },
+                })
+                .to_string(),
+            ],
+        );
+        let (db, session) = session(Agent::Claude, &path);
+        assert!(shown(&db, session).is_empty());
+
+        // The expansion can come in a later read, after bookkeeping lines.
+        append(
+            &path,
+            &[
+                meta(
+                    "2",
+                    "1",
+                    "Base directory for this skill: /s\n\n# Design Director",
+                ),
+                claude(
+                    "3",
+                    Some("2"),
+                    "assistant",
+                    json!([{"type": "text", "text": "On it"}]),
+                ),
+            ],
+        );
+        assert_eq!(
+            shown(&db, session),
+            [
+                (
+                    Kind::User,
+                    "/design-director make the\nstatus clearer".into()
+                ),
+                (Kind::Assistant, "On it".into()),
+            ]
+        );
+        assert!(prompted(&db, session));
+        assert_eq!(
+            title(&db, session).as_deref(),
+            Some("/design-director make the")
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drops_commands_claude_does_not_expand() {
+        let dir = temp_dir();
+        let path = dir.join("abc.jsonl");
+        append(
+            &path,
+            &[
+                claude(
+                    "1",
+                    None,
+                    "user",
+                    json!("<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"),
+                ),
+                json!({"type": "system", "subtype": "local_command", "uuid": "2", "parentUuid": "1"})
+                    .to_string(),
+                meta("3", "2", "Caveat: the messages below were generated by the user"),
+                claude("4", Some("3"), "user", json!("fix the bug")),
+            ],
+        );
+        let (db, cleared) = session(Agent::Claude, &path);
+        assert_eq!(shown(&db, cleared), [(Kind::User, "fix the bug".into())]);
+        assert_eq!(title(&db, cleared).as_deref(), Some("fix the bug"));
+
+        // A meta line with no command before it is still context.
+        let path = dir.join("def.jsonl");
+        append(
+            &path,
+            &[meta("1", "0", "Base directory for this skill: /s")],
+        );
+        let (db, meta_only) = session(Agent::Claude, &path);
+        assert!(shown(&db, meta_only).is_empty());
+        assert!(!prompted(&db, meta_only));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1043,6 +1216,28 @@ mod tests {
         shown(&db, session);
         assert_eq!(title(&db, session).as_deref(), Some("New"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keeps_what_the_user_typed_after_a_pi_skill() {
+        let skill = |args: &str| {
+            json!(format!(
+                "<skill name=\"exa\" location=\"/s\">\nbody\n</skill>{args}"
+            ))
+        };
+        assert_eq!(
+            prompt_parts(&skill("\n\nfind plugins\nplease"), &INJECTED_PROMPTS),
+            ["/exa find plugins\nplease"]
+        );
+        assert_eq!(prompt_parts(&skill("\n"), &INJECTED_PROMPTS), ["/exa"]);
+
+        let shown_tag = json!(
+            "<skill name=\"exa\" location=\"/s\">\nWrap it in `<skill>`…`</skill>`.\n\nMore steps.\n</skill>\n\nfind plugins"
+        );
+        assert_eq!(
+            prompt_parts(&shown_tag, &INJECTED_PROMPTS),
+            ["/exa find plugins"]
+        );
     }
 
     #[test]
