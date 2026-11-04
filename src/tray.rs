@@ -14,6 +14,8 @@ enum Event {
     /// Carries the tray's XDG activation token, which Wayland compositors
     /// need to let the window take focus from another app.
     Show(Option<String>),
+    /// Shows the window on the settings, with the same token as `Show`.
+    Settings(Option<String>),
     Quit,
     /// The desktop's tray came or went. While it's gone, the icon can't be
     /// seen, though the service behind it waits for it to come back.
@@ -76,6 +78,15 @@ impl ksni::Tray for Icon {
             }
             .into(),
             StandardItem {
+                label: "Settings".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let token = ksni::current_xdg_activation_token();
+                    this.events.try_send(Event::Settings(token)).ok();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Quit".into(),
                 activate: Box::new(|this: &mut Self| {
                     this.events.try_send(Event::Quit).ok();
@@ -129,6 +140,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
         while let Ok(event) = received.recv().await {
             cx.update(|cx| match event {
                 Event::Show(token) => show(token, cx),
+                Event::Settings(token) => show_settings(token, cx),
                 Event::Quit => cx.quit(),
                 Event::Available(available) => {
                     cx.global_mut::<Tray>().available = available;
@@ -228,6 +240,24 @@ pub fn show(token: Option<String>, cx: &mut App) {
                 .ok();
         }
     }
+}
+
+/// Brings the window back on the settings.
+fn show_settings(token: Option<String>, cx: &mut App) {
+    show(token, cx);
+    let (Some(workspace), Some(window)) = (
+        cx.global::<Tray>().workspace.clone(),
+        cx.windows().first().copied(),
+    ) else {
+        return;
+    };
+    window
+        .update(cx, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.show_settings(true, window, cx)
+            })
+        })
+        .ok();
 }
 
 /// Activates the window on Wayland with the token from the tray. GPUI has no

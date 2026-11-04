@@ -2725,7 +2725,7 @@ impl Workspace {
 
     /// Shows the settings in place of the chat, or the chat again. The focus
     /// leaves the covered terminals, so keys can't reach a CLI out of sight.
-    fn show_settings(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn show_settings(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_shown = shown;
         self.navigations += 1;
         if shown {
