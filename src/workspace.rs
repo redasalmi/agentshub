@@ -2151,11 +2151,18 @@ impl Workspace {
     /// The same, reloading the expanded sessions whose transcript read, in
     /// `changed`, found something.
     fn refresh_after(&mut self, changed: &[i64], cx: &mut Context<Self>) {
+        let shell = self.shell_cwd(cx);
         match self.db.projects() {
             Ok(projects) => self
                 .sidebar
                 .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx)),
             Err(err) => eprintln!("can't list the projects: {err}"),
+        }
+        // Which shell shows depends on the projects' chats, and a new chat
+        // shown before they list it got its project's shell meanwhile.
+        if self.shell_cwd(cx) != shell {
+            self.sync_terminals(cx);
+            cx.notify();
         }
         for chat in &self.chats {
             let current = chat.current_session();
@@ -2602,18 +2609,22 @@ impl Workspace {
             .map(|chat| chat.cwd.as_path())
     }
 
-    /// The folder of the shell that shows: the shown chat's project, or
-    /// without a chat, the selected project, or without one, the home folder.
+    /// The folder of the shell that shows: the selected project, or the
+    /// shown chat's folder when the chat is in it, which may be a worktree;
+    /// without a project selected, the shown chat's folder, or the home one.
     fn shell_cwd(&self, cx: &App) -> Option<PathBuf> {
-        self.active_cwd()
-            .map(Path::to_path_buf)
-            .or_else(|| {
-                self.sidebar
-                    .read(cx)
-                    .selected()
-                    .map(|project| project.path.clone())
-            })
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        let selected = self.sidebar.read(cx).selected();
+        let shows_chat_of = |project: &db::Project| {
+            project
+                .chats
+                .iter()
+                .any(|chat| Some(chat.id) == self.active)
+        };
+        match selected {
+            Some(project) if !shows_chat_of(project) => Some(project.path.clone()),
+            _ => self.active_cwd().map(Path::to_path_buf),
+        }
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
     }
 
     fn shown_shell(&self, cx: &App) -> Option<(PathBuf, &Shell)> {
@@ -2627,12 +2638,9 @@ impl Workspace {
         !self.settings_shown && self.shown_shell(cx).is_some()
     }
 
-    /// Without a chat shown, the shell is the selected project's, so it
-    /// changes with the selection, and takes the focus from the one before.
+    /// The shell is the selected project's, so it changes with the selection,
+    /// and takes the focus from the one before.
     fn project_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active.is_some() {
-            return;
-        }
         let shown = self
             .shown_shell(cx)
             .map(|(_, shell)| shell.view.focus_handle(cx));
@@ -2754,9 +2762,9 @@ impl Workspace {
         }
     }
 
-    /// Shows the shell of the shown chat's project, or of the selected project
-    /// without a chat, starting it if it isn't running, or hides it if it
-    /// shows. Settings cover the shell, so they close and the shell shows.
+    /// Shows the shell of the selected project, starting it if it isn't
+    /// running, or hides it if it shows. Settings cover the shell, so they
+    /// close and the shell shows.
     fn toggle_shell(&mut self, _: &ToggleShell, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cwd) = self.shell_cwd(cx) else {
             return;
