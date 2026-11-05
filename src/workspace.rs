@@ -80,10 +80,6 @@ const MIN_SHELL_HEIGHT: Pixels = px(96.);
 /// pauses.
 const CODEX_DELAY: Duration = Duration::from_millis(500);
 
-/// The most CLIs kept running. Past it, the chats shown longest ago stop once
-/// they're at rest, and opening one again resumes its session.
-const MAX_RUNNING: usize = 4;
-
 /// Said above a chat whose last session couldn't be resumed, and kept in that
 /// session's history.
 const TRANSCRIPT_GONE: &str = "This session's transcript is gone, so it couldn't be resumed. \
@@ -184,8 +180,8 @@ pub struct Workspace {
     sidebar: Entity<Sidebar>,
     db: Db,
     /// Open chats, including exited terminals and history whose CLI couldn't
-    /// start, the one shown longest ago first. Running processes keep running
-    /// while another chat is shown, up to `MAX_RUNNING`.
+    /// start. Running processes keep running while another chat is shown,
+    /// until the user closes them.
     chats: Vec<Chat>,
     /// The chat that is shown.
     active: Option<i64>,
@@ -1628,9 +1624,8 @@ impl Workspace {
                 .update(cx, |sidebar, cx| sidebar.select(project_id, cx));
         } else {
             // As a chat opened in the background does, it only shows in the
-            // sidebar as running, and may stop an idle one past the limit.
+            // sidebar as running.
             self.sync_sidebar(cx);
-            self.evict(cx);
             cx.notify();
         }
         self.refresh(cx);
@@ -2142,8 +2137,6 @@ impl Workspace {
                     }
                 }
                 this.refresh_after(&changed, cx);
-                // A prompt read just now can show a chat's draft was sent.
-                this.evict(cx);
             })
             .ok();
         })
@@ -2210,7 +2203,6 @@ impl Workspace {
             _ => {}
         }
         self.sync_sidebar(cx);
-        self.evict(cx);
     }
 
     /// Whether the user can see chat `id`: it's shown, nothing covers it and
@@ -2494,14 +2486,6 @@ impl Workspace {
     }
 
     /// Whether a chat's CLI can be stopped without losing anything the user
-    /// would miss: it's at rest, not shown, has nothing unseen, holds no draft,
-    /// and can resume its session. One that never said what it's doing keeps
-    /// running.
-    fn idle(&self, chat: &Chat, cx: &App) -> bool {
-        self.active != Some(chat.id) && self.at_rest(chat, cx)
-    }
-
-    /// Whether a chat's CLI can be stopped without losing anything the user
     /// would miss, shown or not: it's at rest, has nothing unseen, holds no
     /// draft, and can resume its session.
     fn at_rest(&self, chat: &Chat, cx: &App) -> bool {
@@ -2524,22 +2508,6 @@ impl Workspace {
             // that went untouched for 30 days.
             && (chat.transcript.as_ref().is_some_and(|path| path.exists())
                 || matches!(last_prompt(), Ok((false, _))))
-    }
-
-    /// Stops the CLIs of the idle chats shown longest ago while more than
-    /// `MAX_RUNNING` run.
-    fn evict(&mut self, cx: &mut Context<Self>) {
-        let running = self.chats.iter().filter(|chat| chat.running()).count();
-        let evicted: Vec<_> = self
-            .chats
-            .iter()
-            .filter(|chat| self.idle(chat, cx))
-            .take(running.saturating_sub(MAX_RUNNING))
-            .map(|chat| chat.id)
-            .collect();
-        for id in evicted {
-            self.suspend(id, cx);
-        }
     }
 
     /// Stops a chat's CLI after recording the session it's in, which opening
@@ -2609,12 +2577,6 @@ impl Workspace {
     }
 
     fn activate(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        // The chats stay in the order they were last shown in, which is the
-        // order idle ones are stopped in.
-        if let Some(index) = self.chats.iter().position(|chat| chat.id == id) {
-            let chat = self.chats.remove(index);
-            self.chats.push(chat);
-        }
         if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) {
             chat.unseen = false;
         }
@@ -2630,7 +2592,6 @@ impl Workspace {
         // into the rail's selection, so the chat list and New Chat follow it.
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.reveal(id, cx));
-        self.evict(cx);
         cx.notify();
     }
 
