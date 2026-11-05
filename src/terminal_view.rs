@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::ops::Range;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::LazyLock;
 
@@ -12,6 +13,7 @@ use libghostty_vt::style::RgbColor;
 use libghostty_vt::terminal::Scrollbar;
 use unicode_segmentation::UnicodeSegmentation as _;
 
+use crate::appearance;
 use crate::terminal::{Frame, GridSize, KeyInput, MouseInput, Run, Terminal};
 
 const CONTEXT: &str = "Terminal";
@@ -256,6 +258,23 @@ impl TerminalView {
         }
     }
 
+    /// Pastes the paths of files dropped from outside the app, escaped as
+    /// terminals do, so the CLIs attach the images among them as they would
+    /// from a paste. Each is followed by a space, so the next drop is a
+    /// separate argument.
+    fn drop_paths(&mut self, dropped: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let text: String = dropped
+            .paths()
+            .iter()
+            .filter_map(|path| shell_escape(path))
+            .map(|path| path + " ")
+            .collect();
+        if !text.is_empty() {
+            self.terminal.read(cx).paste(text);
+            self.focus_handle.focus(window, cx);
+        }
+    }
+
     fn marked_text_range_utf16(&self) -> Option<Range<usize>> {
         let text = self.marked_text.as_ref()?;
         Some(0..text.encode_utf16().count())
@@ -370,6 +389,7 @@ impl Render for TerminalView {
         let view = cx.entity();
         let focus_handle = self.focus_handle.clone();
         let marked_text = self.marked_text.clone();
+        let drop_color = appearance::palette(cx).accent_soft;
 
         div()
             .id("terminal")
@@ -386,6 +406,8 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::paste))
             .on_any_mouse_down(cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_color))
+            .on_drop(cx.listener(Self::drop_paths))
             .child(
                 canvas(
                     move |grid_bounds, window, cx| {
@@ -868,12 +890,52 @@ fn shifted_key_code(name: &str) -> Option<(Key, char)> {
     key_code(&unshifted.to_string())
 }
 
+/// The characters a shell reads specially, which a backslash goes before in
+/// dropped paths.
+const SHELL_SPECIAL: &str = "\\ \"'`$!#&()*;<>?[]{}|~";
+
+/// `None` for a path with a control character in it: a backslash can't keep a
+/// newline from ending the command line, so pasting it could run commands.
+fn shell_escape(path: &Path) -> Option<String> {
+    let mut escaped = String::new();
+    for c in path.to_string_lossy().chars() {
+        if c.is_control() {
+            return None;
+        }
+        if SHELL_SPECIAL.contains(c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    Some(escaped)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use gpui_kit::{Keystroke, Modifiers};
     use libghostty_vt::key::{self, Key};
 
-    use super::{key_code, key_input};
+    use super::{key_code, key_input, shell_escape};
+
+    #[test]
+    fn escapes_dropped_paths_for_a_shell() {
+        assert_eq!(
+            shell_escape(Path::new("/tmp/shot.png")).as_deref(),
+            Some("/tmp/shot.png")
+        );
+        assert_eq!(
+            shell_escape(Path::new("/home/me/My Shots/it's (1).png")).as_deref(),
+            Some(r"/home/me/My\ Shots/it\'s\ \(1\).png")
+        );
+    }
+
+    #[test]
+    fn refuses_dropped_paths_with_control_characters() {
+        assert_eq!(shell_escape(Path::new("/tmp/shot\npwd\nimage.png")), None);
+        assert_eq!(shell_escape(Path::new("/tmp/a\tb.png")), None);
+    }
 
     fn keystroke(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> Keystroke {
         Keystroke {
