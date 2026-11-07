@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::base::InteractiveElementExt as _;
@@ -79,6 +79,9 @@ const MIN_SHELL_HEIGHT: Pixels = px(96.);
 /// Codex writes its session files in bursts, so they're looked at once it
 /// pauses.
 const CODEX_DELAY: Duration = Duration::from_millis(500);
+/// How often the time the shown chat's prompt has taken so far is brought up
+/// to date.
+const TURN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Said above a chat whose last session couldn't be resumed, and kept in that
 /// session's history.
@@ -214,6 +217,8 @@ pub struct Workspace {
     _sidebar_events: Subscription,
     _report_events: Task<()>,
     _codex_events: Task<()>,
+    /// Brings the shown chat's turn up to date while it's under way.
+    turn_tick: Option<Task<()>>,
     _theme: Subscription,
     _focus_lost: Subscription,
     /// What the open new chat dialog listens to: its agent and its title.
@@ -409,6 +414,8 @@ struct Chat {
     transcript: Option<PathBuf>,
     /// What the CLI last reported doing, if it reports that at all.
     status: Option<Status>,
+    /// How long the CLI has been on the last prompt, or took on it.
+    turn: Option<Turn>,
     /// Whether the CLI finished while another chat was shown, and hasn't been
     /// looked at since.
     unseen: bool,
@@ -700,6 +707,7 @@ impl Workspace {
             _sidebar_events: sidebar_events,
             _report_events: report_events,
             _codex_events: codex_events,
+            turn_tick: None,
             _theme: theme,
             _focus_lost: focus_lost,
             new_chat_subscriptions: Vec::new(),
@@ -2188,6 +2196,7 @@ impl Workspace {
             _ => false,
         };
         chat.status = status;
+        chat.turn = Turn::after(chat.turn, was_busy, busy(status), Instant::now());
         // The session is read after each turn, so the chat's title follows it.
         if was_busy
             && !busy(status)
@@ -2249,6 +2258,29 @@ impl Workspace {
         let active = self.active;
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_chats(running, active, cx));
+        self.tick_turn(cx);
+    }
+
+    /// Keeps the shown chat's turn up to date while it's under way, and only
+    /// then.
+    fn tick_turn(&mut self, cx: &mut Context<Self>) {
+        let under_way = self.chats.iter().any(|chat| {
+            self.active == Some(chat.id)
+                && chat.running()
+                && matches!(chat.turn, Some(Turn::Since(_)))
+        });
+        if !under_way {
+            self.turn_tick = None;
+        } else if self.turn_tick.is_none() {
+            self.turn_tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(TURN_INTERVAL).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
     }
 
     /// Starts a chat's CLI, resuming `session` if given. The chat stays hidden
@@ -2345,6 +2377,7 @@ impl Workspace {
             session: session.map(|session| session.id),
             transcript,
             status: None,
+            turn: None,
             unseen: false,
             codex_lookup: 0,
             codex_pending: false,
@@ -4034,7 +4067,9 @@ impl Workspace {
                     .justify_end()
                     .gap_x_4()
                     .gap_y_2()
-                    .when(chat.running(), |this| this.child(status_pill(tone, cx)))
+                    .when(chat.running(), |this| {
+                        this.child(status_pill(tone, chat.turn, cx))
+                    })
                     .child(
                         h_flex()
                             .flex_none()
@@ -4374,9 +4409,48 @@ fn key_hint(keys: SharedString, label: &'static str, cx: &App) -> impl IntoEleme
         .child(label)
 }
 
-/// What the agent is doing, on its status color.
-fn status_pill(tone: Tone, cx: &App) -> impl IntoElement {
+/// How long an agent has been on the user's last prompt, waiting on the user
+/// included, or how long it took.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Turn {
+    Since(Instant),
+    Took(Duration),
+}
+
+impl Turn {
+    /// The turn after an agent's status changes, from busy (working or
+    /// waiting on the user) or not to busy or not.
+    fn after(turn: Option<Self>, was_busy: bool, busy: bool, now: Instant) -> Option<Self> {
+        match (was_busy, busy, turn) {
+            (false, true, _) => Some(Self::Since(now)),
+            (true, false, Some(Self::Since(start))) => Some(Self::Took(now - start)),
+            (_, _, turn) => turn,
+        }
+    }
+}
+
+/// A duration in its two largest units, padded so it keeps its width while
+/// it counts up.
+fn duration(time: Duration) -> String {
+    let seconds = time.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
+/// What the agent is doing, on its status color, and how long its `turn` has
+/// taken.
+fn status_pill(tone: Tone, turn: Option<Turn>, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
     let palette = appearance::palette(cx);
+    let label = capitalized(tone.label());
+    let (label, time) = match turn {
+        Some(Turn::Since(start)) => (format!("{label} ·"), Some(duration(start.elapsed()))),
+        Some(Turn::Took(took)) => (format!("{label} · took"), Some(duration(took))),
+        None => (label, None),
+    };
     let (background, foreground) = tone
         .tint(cx)
         .map(|tint| (tint.soft, tint.text))
@@ -4392,7 +4466,15 @@ fn status_pill(tone: Tone, cx: &App) -> impl IntoElement {
         .text_xs()
         .font_medium()
         .child(sidebar::dot(tone, cx))
-        .child(capitalized(tone.label()))
+        .child(h_flex().gap_1().child(label).when_some(time, |this, time| {
+            // Figures of the same width, so the pill doesn't jitter as
+            // they count up.
+            this.child(
+                div()
+                    .font_family(theme.mono_font_family.clone())
+                    .child(time),
+            )
+        }))
 }
 
 fn capitalized(text: &str) -> String {
@@ -4826,8 +4908,8 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SHELL_SHARE, MIN_SHELL_HEIGHT, PendingRemoval, import_chat, shell_height, shell_share,
-        take_and_remove,
+        MAX_SHELL_SHARE, MIN_SHELL_HEIGHT, PendingRemoval, Turn, duration, import_chat,
+        shell_height, shell_share, take_and_remove,
     };
     use crate::worktree::{Removal, Worktree};
     use crate::{agent::Agent, db::Db, reports::Reports, transcript};
@@ -4835,6 +4917,38 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn times_turns_from_busy_to_at_rest() {
+        let start = Instant::now();
+        let later = start + Duration::from_secs(90);
+        let since = Some(Turn::Since(start));
+        let took = Some(Turn::Took(Duration::from_secs(5)));
+        assert_eq!(Turn::after(None, false, true, start), since);
+        // A new prompt starts over.
+        assert_eq!(Turn::after(took, false, true, start), since);
+        // Waiting on the user, or back at work, is still the same turn.
+        assert_eq!(Turn::after(since, true, true, later), since);
+        assert_eq!(
+            Turn::after(since, true, false, later),
+            Some(Turn::Took(Duration::from_secs(90)))
+        );
+        // At rest, the last turn stays.
+        assert_eq!(Turn::after(took, false, false, later), took);
+        assert_eq!(Turn::after(None, false, false, later), None);
+    }
+
+    #[test]
+    fn gives_durations_in_two_units() {
+        let of = |seconds| duration(Duration::from_secs(seconds));
+        assert_eq!(of(0), "0s");
+        assert_eq!(of(59), "59s");
+        assert_eq!(of(60), "1m 00s");
+        assert_eq!(of(192), "3m 12s");
+        assert_eq!(of(3599), "59m 59s");
+        assert_eq!(of(3840), "1h 04m");
+    }
 
     #[test]
     fn keeps_the_shell_within_its_limits() {
