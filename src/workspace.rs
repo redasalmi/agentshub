@@ -2197,28 +2197,91 @@ impl Workspace {
         };
         chat.status = status;
         chat.turn = Turn::after(chat.turn, was_busy, busy(status), Instant::now());
+        let ended = was_busy && !busy(status);
+        let took = match chat.turn {
+            Some(Turn::Took(took)) if ended => Some(took),
+            _ => None,
+        };
         // The session is read after each turn, so the chat's title follows it.
-        if was_busy
-            && !busy(status)
-            && let Some(session) = chat.session
-        {
-            self.read_sessions(vec![session], true, cx).detach();
+        let read = chat
+            .session
+            .filter(|_| ended)
+            .map(|session| self.read_sessions(vec![session], true, cx));
+        // Nobody needs telling about the chat they're looking at.
+        let alert = alert
+            .zip(status)
+            .filter(|_| !self.in_view(id, cx.active_window().is_some()));
+        match alert {
+            Some((alert, status)) => self.alert(id, agent, alert, status, took, read, cx),
+            None => {
+                if let Some(read) = read {
+                    read.detach();
+                }
+                // Once the agent is back at work, what it needed has been
+                // seen to.
+                if status == Some(Status::Working) {
+                    alerts::withdraw(id, cx);
+                }
+            }
         }
-        match (alert, status) {
-            // Nobody needs telling about the chat they're looking at.
-            (Some(alert), Some(status)) if !self.in_view(id, cx.active_window().is_some()) => {
-                let body = self
+        self.sync_sidebar(cx);
+    }
+
+    /// Tells the user what chat `id`'s agent did, once its session is read,
+    /// so the alert has the chat's title and quotes the agent. `read` is the
+    /// read already under way, if any.
+    #[allow(clippy::too_many_arguments)]
+    fn alert(
+        &mut self,
+        id: i64,
+        agent: Agent,
+        alert: Alert,
+        status: Status,
+        took: Option<Duration>,
+        read: Option<Task<()>>,
+        cx: &mut Context<Self>,
+    ) {
+        /// A turn's last reply or tool call is never further back than this.
+        const TURN_ITEMS: usize = 50;
+
+        let hold = alerts::hold(id, cx);
+        let session = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .and_then(|chat| chat.session);
+        let read =
+            read.or_else(|| session.map(|session| self.read_sessions(vec![session], false, cx)));
+        let db = self.db.clone();
+        cx.spawn(async move |this, cx| {
+            if let Some(read) = read {
+                read.await;
+            }
+            let items = match session {
+                Some(session) => smol::unblock(move || db.items(session, TURN_ITEMS))
+                    .await
+                    .inspect_err(|err| eprintln!("can't read session {session}: {err}"))
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            this.update(cx, |this, cx| {
+                if this.in_view(id, cx.active_window().is_some()) {
+                    return;
+                }
+                let mut body = this
                     .sidebar
                     .read(cx)
                     .describe(id)
                     .unwrap_or_else(|| "A chat in Agents Hub".into());
-                alerts::alert(id, agent, alert, status, body, cx);
-            }
-            // Once the agent is back at work, what it needed has been seen to.
-            (_, Some(Status::Working)) => alerts::withdraw(id, cx),
-            _ => {}
-        }
-        self.sync_sidebar(cx);
+                if let Some(details) = alerts::details(alert, &items) {
+                    body.push('\n');
+                    body.push_str(&details);
+                }
+                alerts::alert(id, hold, agent, alert, status, took, body, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Whether the user can see chat `id`: it's shown, nothing covers it and
@@ -4431,7 +4494,7 @@ impl Turn {
 
 /// A duration in its two largest units, padded so it keeps its width while
 /// it counts up.
-fn duration(time: Duration) -> String {
+pub fn duration(time: Duration) -> String {
     let seconds = time.as_secs();
     match seconds {
         0..60 => format!("{seconds}s"),

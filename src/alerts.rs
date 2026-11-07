@@ -16,9 +16,11 @@ use smol::stream::StreamExt as _;
 use zbus::zvariant::Value;
 
 use crate::agent::Agent;
+use crate::db::Item;
 use crate::settings::Settings;
 use crate::status::Status;
-use crate::workspace::Workspace;
+use crate::transcript::Kind;
+use crate::workspace::{self, Workspace};
 
 const BUS_NAME: &str = "org.freedesktop.Notifications";
 const OBJECT_PATH: &str = "/org/freedesktop/Notifications";
@@ -31,6 +33,9 @@ const DEFAULT_ACTION: &str = "default";
 /// Sounds closer together than this play once, so agents finishing together
 /// don't make a racket.
 const SOUND_GAP: Duration = Duration::from_millis(1500);
+
+/// How much of a reply or a tool call a notification quotes.
+const DETAIL_CHARS: usize = 160;
 
 /// What happened to an agent that the user should hear about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +126,8 @@ struct Bus {
 struct Note {
     summary: String,
     body: String,
+    /// Whether it stays on screen until the user sees to it.
+    urgent: bool,
 }
 
 /// Where a chat's notification is at.
@@ -175,12 +182,35 @@ struct Tracker {
     tokens: HashMap<u32, String>,
     /// The last ticket given to a notification on its way.
     ticket: u64,
+    /// The alert each chat has waiting on what it will say, by its hold.
+    held: HashMap<i64, u64>,
+    /// The last hold given.
+    hold: u64,
 }
 
 impl Tracker {
     /// Whether there's anything about `chat` to take back.
     fn tracks(&self, chat: i64) -> bool {
-        self.chats.contains_key(&chat)
+        self.chats.contains_key(&chat) || self.held.contains_key(&chat)
+    }
+
+    /// Holds a place for an alert about `chat` that waits on what it will
+    /// say. Holding another, or taking back the chat's notification, gives
+    /// it up.
+    fn hold(&mut self, chat: i64) -> u64 {
+        self.hold += 1;
+        self.held.insert(chat, self.hold);
+        self.hold
+    }
+
+    /// Whether the alert with `hold` is still wanted, which it's not once
+    /// it has been asked for.
+    fn release(&mut self, chat: i64, hold: u64) -> bool {
+        let held = self.held.get(&chat) == Some(&hold);
+        if held {
+            self.held.remove(&chat);
+        }
+        held
     }
 
     /// The chat whose notification on screen the server knows as `id`.
@@ -226,6 +256,7 @@ impl Tracker {
     /// Takes back the notification about `chat`, along with any still on
     /// its way.
     fn withdraw(&mut self, chat: i64) -> Option<Effect> {
+        self.held.remove(&chat);
         let shown = self.chats.get_mut(&chat)?;
         shown.wanted = false;
         shown.queued = None;
@@ -355,9 +386,30 @@ pub fn init(workspace: &Entity<Workspace>, cx: &mut App) {
     .detach();
 }
 
+/// Holds a place for an alert about `chat` that waits on what it will say,
+/// so that it isn't sent once the user has seen the chat or a newer alert
+/// about it has taken its place.
+pub fn hold(chat: i64, cx: &mut App) -> u64 {
+    cx.global_mut::<Alerts>().tracker.hold(chat)
+}
+
 /// Lets the user know `chat`'s agent did what `status` says, which made the
-/// `kind` of alert given. `body` says which chat it is.
-pub fn alert(chat: i64, agent: Agent, kind: Alert, status: Status, body: String, cx: &mut App) {
+/// `kind` of alert given, after a turn that `took` this long if it ended.
+/// `body` says which chat it is. Nothing is sent unless `hold` still is.
+#[allow(clippy::too_many_arguments)]
+pub fn alert(
+    chat: i64,
+    hold: u64,
+    agent: Agent,
+    kind: Alert,
+    status: Status,
+    took: Option<Duration>,
+    body: String,
+    cx: &mut App,
+) {
+    if !cx.global_mut::<Alerts>().tracker.release(chat, hold) {
+        return;
+    }
     let settings = *cx.global::<Settings>();
     if settings.notification_sound {
         play(kind, cx);
@@ -368,8 +420,98 @@ pub fn alert(chat: i64, agent: Agent, kind: Alert, status: Status, body: String,
             Status::Idle => Status::Done,
             status => status,
         };
-        let summary = crate::sidebar::activity(agent, Some(Some(status)));
-        show(chat, Note { summary, body }, cx);
+        let mut summary = crate::sidebar::activity(agent, Some(Some(status)));
+        if let Some(took) = took {
+            summary = format!("{summary} · {}", workspace::duration(took));
+        }
+        let urgent = kind != Alert::Finished;
+        show(
+            chat,
+            Note {
+                summary,
+                body,
+                urgent,
+            },
+            cx,
+        );
+    }
+}
+
+/// What the agent's last turn, at the end of `items`, says about the `kind`
+/// of alert it made: the tool call it needs the user to allow or answer,
+/// or else the last thing it said.
+pub fn details(kind: Alert, items: &[Item]) -> Option<String> {
+    let start = items
+        .iter()
+        .rposition(|item| item.kind == Kind::User)
+        .map_or(0, |at| at + 1);
+    let turn = &items[start..];
+    let waiting = turn
+        .iter()
+        .rev()
+        .filter(|_| kind == Alert::NeedsYou)
+        .find(|item| item.kind == Kind::Tool && item.payload["output"].is_null())
+        .map(|item| call(&item.payload));
+    let said = || {
+        turn.iter()
+            .rev()
+            .find(|item| item.kind == Kind::Assistant)
+            .and_then(|item| item.payload["text"].as_str())
+            .map(str::to_owned)
+    };
+    let text = clip(&waiting.or_else(said)?);
+    (!text.is_empty()).then_some(text)
+}
+
+/// A tool call as its name and what it acts on, or the question it asks.
+fn call(payload: &serde_json::Value) -> String {
+    use serde_json::Value;
+
+    let name = payload["name"].as_str().unwrap_or("tool");
+    let input = &payload["input"];
+    if let Some(question) = input["questions"][0]["question"].as_str() {
+        return question.to_owned();
+    }
+    let target = [
+        "command",
+        "cmd",
+        "file_path",
+        "path",
+        "url",
+        "pattern",
+        "query",
+    ]
+    .into_iter()
+    .find_map(|key| match &input[key] {
+        Value::String(text) => Some(text.clone()),
+        // Codex gives commands as their arguments.
+        Value::Array(parts) => Some(
+            parts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        _ => None,
+    })
+    .unwrap_or_else(|| match input {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        input => input.to_string(),
+    });
+    if target.trim().is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}: {target}")
+    }
+}
+
+/// `text` on one line, cut short at `DETAIL_CHARS`.
+fn clip(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(DETAIL_CHARS) {
+        Some((at, _)) => format!("{}…", line[..at].trim_end()),
+        None => line,
     }
 }
 
@@ -402,6 +544,7 @@ pub fn test(cx: &mut App) {
         let note = Note {
             summary: "Notifications are on".into(),
             body: "Agents Hub tells you like this when an agent finishes or needs you.".into(),
+            urgent: false,
         };
         cx.background_spawn(async move {
             let shown = async {
@@ -604,6 +747,7 @@ fn notify_args(note: Note, replaces: u32, open: bool, markup: bool) -> NotifyArg
         ("desktop-entry", Value::from("agentshub")),
         // The sound plays here, as its own setting asks.
         ("suppress-sound", Value::from(true)),
+        ("urgency", Value::U8(if note.urgent { 2 } else { 1 })),
     ]);
     (
         "Agents Hub",
@@ -896,15 +1040,39 @@ fn chime(kind: Alert) -> Vec<f32> {
 mod tests {
     // Not a glob: GPUI's `test` attribute would take the place of the
     // standard one.
-    use super::{Alert, Click, Effect, Note, Signal, Tracker, chime, escape};
+    use serde_json::json;
+
+    use super::{Alert, Click, Effect, Note, Signal, Tracker, chime, details, escape};
     use crate::agent::Agent;
+    use crate::db::Item;
     use crate::status::{Need, Status};
+    use crate::transcript::Kind;
 
     fn note(text: &str) -> Note {
         Note {
             summary: text.into(),
             body: text.into(),
+            urgent: false,
         }
+    }
+
+    fn item(kind: Kind, payload: serde_json::Value) -> Item {
+        Item {
+            id: 0,
+            kind,
+            payload,
+        }
+    }
+
+    fn text(kind: Kind, text: &str) -> Item {
+        item(kind, json!({ "text": text }))
+    }
+
+    fn tool(name: &str, input: serde_json::Value, output: Option<&str>) -> Item {
+        item(
+            Kind::Tool,
+            json!({ "id": "1", "name": name, "input": input, "output": output }),
+        )
     }
 
     /// Shows `text` about `chat` and returns the ticket it was sent with,
@@ -1061,6 +1229,31 @@ mod tests {
     }
 
     #[test]
+    fn held_alerts_go_once_seen_or_replaced() {
+        let mut tracker = tracker();
+        let first = tracker.hold(7);
+        // A newer alert takes its place.
+        let second = tracker.hold(7);
+        assert!(!tracker.release(7, first));
+        assert!(tracker.release(7, second));
+        assert!(!tracker.release(7, second));
+        assert!(!tracker.tracks(7));
+
+        // The user saw the chat while it waited.
+        let held = tracker.hold(7);
+        assert!(tracker.tracks(7));
+        assert_eq!(tracker.withdraw(7), None);
+        assert!(!tracker.release(7, held));
+
+        // Other chats' alerts and a change of server don't touch it.
+        let held = tracker.hold(7);
+        tracker.hold(8);
+        tracker.withdraw(8);
+        tracker.owner_changed(Some(":1.2".into()));
+        assert!(tracker.release(7, held));
+    }
+
+    #[test]
     fn alerts_on_what_needs_the_user() {
         let working = Some(Status::Working);
         let of = |old, new| Alert::of(Agent::Claude, old, new);
@@ -1101,6 +1294,69 @@ mod tests {
             assert!(!samples.is_empty());
             assert!(samples.iter().all(|s| s.abs() <= 0.3 + f32::EPSILON));
         }
+    }
+
+    #[test]
+    fn details_quote_the_last_reply_of_the_turn() {
+        let items = [
+            text(Kind::User, "first"),
+            text(Kind::Assistant, "old reply"),
+            text(Kind::User, "second"),
+            text(Kind::Assistant, "Looking."),
+            tool("Read", json!({ "file_path": "a.rs" }), Some("…")),
+            text(Kind::Assistant, "Fixed it.\n\n  Tests   pass."),
+        ];
+        assert_eq!(
+            details(Alert::Finished, &items).as_deref(),
+            Some("Fixed it. Tests pass.")
+        );
+        // Nothing said since the prompt.
+        assert_eq!(details(Alert::Finished, &items[..3]), None);
+        assert_eq!(details(Alert::Finished, &[]), None);
+    }
+
+    #[test]
+    fn details_say_what_the_agent_waits_on() {
+        let mut items = vec![
+            text(Kind::User, "clean up"),
+            text(Kind::Assistant, "Removing the build."),
+            tool("Bash", json!({ "command": "rm -rf target" }), None),
+        ];
+        assert_eq!(
+            details(Alert::NeedsYou, &items).as_deref(),
+            Some("Bash: rm -rf target")
+        );
+        // Only a call that hasn't run is waited on.
+        assert_eq!(
+            details(Alert::Finished, &items).as_deref(),
+            Some("Removing the build.")
+        );
+        items.push(tool(
+            "AskUserQuestion",
+            json!({ "questions": [{ "question": "Keep the cache?" }] }),
+            None,
+        ));
+        assert_eq!(
+            details(Alert::NeedsYou, &items).as_deref(),
+            Some("Keep the cache?")
+        );
+        items.push(tool(
+            "shell",
+            json!({ "command": ["bash", "-lc", "ls"] }),
+            None,
+        ));
+        assert_eq!(
+            details(Alert::NeedsYou, &items).as_deref(),
+            Some("shell: bash -lc ls")
+        );
+    }
+
+    #[test]
+    fn details_are_cut_short() {
+        let long = "word ".repeat(100);
+        let clipped = details(Alert::Finished, &[text(Kind::Assistant, &long)]).unwrap();
+        assert_eq!(clipped.chars().count(), 160);
+        assert!(clipped.ends_with("word…"));
     }
 
     #[test]
