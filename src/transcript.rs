@@ -145,6 +145,20 @@ pub fn read(db: &Db, session_id: i64) -> anyhow::Result<bool> {
     }
 }
 
+/// The sessions whose transcripts hold something the database doesn't, which
+/// the search can't find until they're read.
+pub fn behind(db: &Db) -> anyhow::Result<Vec<i64>> {
+    Ok(db
+        .read_states()?
+        .into_iter()
+        .filter(|(_, path, offset, parser)| {
+            path.metadata()
+                .is_ok_and(|file| *parser < PARSER || file.len() != *offset)
+        })
+        .map(|(id, ..)| id)
+        .collect())
+}
+
 /// The CLI's id for the session in a transcript. Claude and pi name their
 /// files after it, and Codex keeps it in its first line. Pi keeps it in its
 /// header too, which an extension's title can come before.

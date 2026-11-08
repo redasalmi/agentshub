@@ -729,7 +729,28 @@ impl Workspace {
         };
         this.update_codex_watch();
         this.refresh(cx);
+        this.catch_up(cx);
         this
+    }
+
+    /// Reads what the CLIs wrote since the transcripts were last read, so
+    /// that the search finds it without each chat having to be opened first.
+    fn catch_up(&self, cx: &mut Context<Self>) {
+        let db = self.db.clone();
+        cx.spawn(async move |this, cx| {
+            match smol::unblock(move || transcript::behind(&db)).await {
+                Ok(sessions) => this
+                    .update(cx, |this, cx| {
+                        this.read_sessions(sessions, false, cx).detach()
+                    })
+                    .ok(),
+                Err(err) => {
+                    eprintln!("can't list the transcripts to read: {err}");
+                    None
+                }
+            };
+        })
+        .detach();
     }
 
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3257,11 +3278,16 @@ impl Workspace {
         let sidebar = self.sidebar.read(cx);
         let mut chats = Vec::new();
         let mut archived = Vec::new();
+        let mut places = HashMap::new();
         for project in sidebar.projects() {
             for chat in &project.chats {
                 // An archived project's chats are archived along with it.
                 if let Some(at) = chat.archived_at.or(project.archived_at) {
                     let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
+                    places.insert(
+                        chat.id,
+                        SharedString::from(format!("archived · {title} · {}", project.name)),
+                    );
                     archived.push((
                         at,
                         Entry::new(title, Lead::Tone(Tone::Saved), Pick::OpenChat(chat.id))
@@ -3281,6 +3307,10 @@ impl Workspace {
                     tone => tone.label().to_string(),
                 };
                 let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
+                places.insert(
+                    chat.id,
+                    SharedString::from(format!("{title} · {}", project.name)),
+                );
                 chats.push((
                     tone.needs_you(),
                     Entry::new(title, Lead::Tone(tone), Pick::OpenChat(chat.id))
@@ -3347,7 +3377,13 @@ impl Workspace {
                 .ok();
         };
         if archived_only {
-            palette::open(vec![("Archived".into(), archived)], on_pick, window, cx);
+            palette::open(
+                vec![("Archived".into(), archived)],
+                None,
+                on_pick,
+                window,
+                cx,
+            );
             return;
         }
 
@@ -3546,10 +3582,44 @@ impl Workspace {
                 ("Commands".into(), commands),
                 ("Archived".into(), archived),
             ],
+            Some(self.message_search(places)),
             on_pick,
             window,
             cx,
         );
+    }
+
+    /// Finds what was said in the chats, off the UI thread. `places` says
+    /// where each chat is, to show beside what was found in it.
+    fn message_search(&self, places: HashMap<i64, SharedString>) -> palette::Search {
+        let db = self.db.clone();
+        let places = Rc::new(places);
+        Rc::new(move |query, cx| {
+            let db = db.clone();
+            let places = places.clone();
+            cx.spawn(async move |_| {
+                let hits = smol::unblock(move || db.search(&query))
+                    .await
+                    .unwrap_or_else(|err| {
+                        eprintln!("can't search the messages: {err}");
+                        Vec::new()
+                    });
+                hits.into_iter()
+                    .filter_map(|hit| {
+                        let place = places.get(&hit.chat_id)?.clone();
+                        let lead = if hit.prompt {
+                            ExtraIcon::User
+                        } else {
+                            ExtraIcon::Bot
+                        };
+                        Some(
+                            Entry::new(hit.snippet, Lead::Icon(lead), Pick::OpenChat(hit.chat_id))
+                                .meta(place),
+                        )
+                    })
+                    .collect()
+            })
+        })
     }
 
     fn run_pick(&mut self, pick: Pick, window: &mut Window, cx: &mut Context<Self>) {
@@ -4227,7 +4297,7 @@ impl Workspace {
             .h_8()
             .bg(theme.background)
             .icon(IconName::Search)
-            .accessibility_label("Search chats, projects and commands")
+            .accessibility_label("Search chats, messages, projects and commands")
             .child(
                 h_flex()
                     .flex_1()
@@ -4239,7 +4309,7 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child("Search chats, projects and commands"),
+                            .child("Search chats, messages, projects and commands"),
                     )
                     // Too narrow for both, the search keeps its name.
                     .children(
@@ -4743,7 +4813,10 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
             )
     };
     let bound: [(&'static str, Box<dyn Action>); 11] = [
-        ("Search chats, projects and commands", Box::new(OpenSearch)),
+        (
+            "Search chats, messages, projects and commands",
+            Box::new(OpenSearch),
+        ),
         (
             "Show the running chats of every project",
             Box::new(ShowRunning),

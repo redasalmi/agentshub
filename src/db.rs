@@ -21,7 +21,7 @@ use crate::worktree::Worktree;
 
 /// Each migration takes the database from the version before it, as counted
 /// by `PRAGMA user_version`, to the next.
-const MIGRATIONS: [&str; 6] = [
+const MIGRATIONS: [&str; 7] = [
     r#"
 CREATE TABLE projects (
     id         INTEGER PRIMARY KEY,
@@ -154,6 +154,28 @@ ALTER TABLE chats ADD COLUMN worktree_folder TEXT;
 ALTER TABLE chats ADD COLUMN archived_at INTEGER;
 ALTER TABLE projects ADD COLUMN archived_at INTEGER;
 "#,
+    r#"
+-- What the search finds of an item: what the user and the agent said. Only a
+-- tool call's payload is ever updated, so the index needs no update trigger.
+ALTER TABLE items ADD COLUMN search_text TEXT GENERATED ALWAYS AS (
+    CASE WHEN kind IN ('user', 'assistant') THEN json_extract(payload, '$.text') END
+) VIRTUAL;
+CREATE VIRTUAL TABLE items_fts USING fts5(
+    search_text,
+    content = 'items',
+    content_rowid = 'id',
+    tokenize = 'unicode61 remove_diacritics 2',
+    prefix = '2 3'
+);
+CREATE TRIGGER items_fts_insert AFTER INSERT ON items BEGIN
+    INSERT INTO items_fts (rowid, search_text) VALUES (new.id, new.search_text);
+END;
+CREATE TRIGGER items_fts_delete AFTER DELETE ON items BEGIN
+    INSERT INTO items_fts (items_fts, rowid, search_text)
+    VALUES ('delete', old.id, old.search_text);
+END;
+INSERT INTO items_fts (items_fts) VALUES ('rebuild');
+"#,
 ];
 
 /// The schema version this build writes.
@@ -166,6 +188,13 @@ const CHAT_ORDER: &str = "pinned DESC, position, id DESC";
 
 /// The order of the projects.
 const PROJECT_ORDER: &str = "position, id DESC";
+
+/// How many messages a search finds, and how many of them can be in one chat.
+const SEARCH_HITS: i64 = 30;
+const SEARCH_HITS_PER_CHAT: i64 = 3;
+
+/// How many words of a message show around what a search found in it.
+const SNIPPET_WORDS: i64 = 16;
 
 /// Where the database lives: `$XDG_DATA_HOME/agentshub/agentshub.db`.
 pub fn path() -> Option<PathBuf> {
@@ -295,6 +324,15 @@ pub struct Item {
     pub id: i64,
     pub kind: Kind,
     pub payload: Value,
+}
+
+/// A message a search found.
+pub struct Hit {
+    pub chat_id: i64,
+    /// Whether the user said it, rather than the agent.
+    pub prompt: bool,
+    /// The part of it around what was found, on one line.
+    pub snippet: String,
 }
 
 #[derive(Clone)]
@@ -850,6 +888,67 @@ impl Db {
             .optional()
     }
 
+    /// Where every session's transcript is, how far it was read, and by which
+    /// version of the parser.
+    pub fn read_states(&self) -> Result<Vec<(i64, PathBuf, u64, i64)>> {
+        let conn = self.read();
+        let mut stmt =
+            conn.prepare("SELECT id, transcript_path, read_offset, parser_version FROM sessions")?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+                row.get::<_, i64>(2)? as u64,
+                row.get(3)?,
+            ))
+        })?
+        .collect()
+    }
+
+    /// The messages that have everything `input` asks for, which mustn't be
+    /// blank: the user's first, then the most relevant.
+    pub fn search(&self, input: &str) -> Result<Vec<Hit>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "WITH found AS (
+                 SELECT f.rowid AS id, cs.chat_id, i.kind = 'user' AS prompt, f.rank AS score,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY cs.chat_id ORDER BY i.kind = 'user' DESC, f.rank
+                        ) AS nth
+                 FROM items_fts f
+                 JOIN items i ON i.id = f.rowid
+                 JOIN chat_sessions cs ON cs.session_id = i.session_id
+                 WHERE items_fts MATCH ?1
+             ), kept AS (
+                 SELECT * FROM found WHERE nth <= ?2 ORDER BY prompt DESC, score LIMIT ?3
+             )
+             SELECT k.chat_id, k.prompt, snippet(items_fts, 0, '', '', '…', ?4)
+             FROM kept k JOIN items_fts ON items_fts.rowid = k.id
+             WHERE items_fts MATCH ?1
+             ORDER BY k.prompt DESC, k.score",
+        )?;
+        stmt.query_map(
+            params![
+                match_query(input),
+                SEARCH_HITS_PER_CHAT,
+                SEARCH_HITS,
+                SNIPPET_WORDS
+            ],
+            |row| {
+                Ok(Hit {
+                    chat_id: row.get(0)?,
+                    prompt: row.get(1)?,
+                    snippet: row
+                        .get::<_, String>(2)?
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                })
+            },
+        )?
+        .collect()
+    }
+
     /// Saves a read, and says whether the history shows anything new. The
     /// session can be gone, deleted with its chat while its transcript was
     /// being parsed; then nothing is saved.
@@ -1239,6 +1338,16 @@ fn ancestor(
         current = parents.get(id).and_then(|parent| parent.as_deref());
     }
     None
+}
+
+/// What the user typed as an FTS5 query. Each word is quoted, as FTS5 would
+/// otherwise read `foo-bar` as syntax, and the last may be half typed.
+fn match_query(input: &str) -> String {
+    let words: Vec<_> = input
+        .split_whitespace()
+        .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
+        .collect();
+    format!("{}*", words.join(" "))
 }
 
 fn item_row(row: &rusqlite::Row<'_>) -> Result<Option<Item>> {
@@ -1643,6 +1752,227 @@ mod tests {
             parent = Some(id);
         }
         read
+    }
+
+    fn message(id: &str, kind: Kind, text: &str) -> transcript::Item {
+        transcript::Item {
+            source_id: Some(id.into()),
+            parent_id: None,
+            kind,
+            at: None,
+            payload: json!({ "text": text }),
+        }
+    }
+
+    fn save(db: &Db, session: i64, items: Vec<transcript::Item>) {
+        let mut read = transcript::Read::default();
+        for item in items {
+            push(&mut read, item);
+        }
+        db.save_read_state(session, &read).unwrap();
+    }
+
+    fn found(db: &Db, input: &str) -> Vec<String> {
+        db.search(input)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.snippet)
+            .collect()
+    }
+
+    fn check_index(db: &Db) {
+        db.write()
+            .execute(
+                "INSERT INTO items_fts (items_fts, rank) VALUES ('integrity-check', 1)",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn search_finds_words_and_the_start_of_the_last_one() {
+        let db = Db::open_in_memory().unwrap();
+        let chat_id = chat(&db);
+        let session = record(&db, chat_id, "a", "startup").session_id;
+        save(
+            &db,
+            session,
+            vec![message(
+                "1",
+                Kind::User,
+                "fix the\nopen_chat Résumé migration",
+            )],
+        );
+
+        let hit = db.search("migr").unwrap().pop().unwrap();
+        assert_eq!(hit.chat_id, chat_id);
+        assert!(hit.prompt);
+        assert_eq!(hit.snippet, "fix the open_chat Résumé migration");
+        assert_eq!(found(&db, "open_chat").len(), 1);
+        assert_eq!(found(&db, "chat open").len(), 1);
+        assert_eq!(found(&db, "resume").len(), 1);
+        assert!(found(&db, "igration").is_empty());
+        assert!(found(&db, "fix absent").is_empty());
+    }
+
+    #[test]
+    fn search_reads_nothing_typed_as_syntax() {
+        let db = Db::open_in_memory().unwrap();
+        let session = record(&db, chat(&db), "a", "startup").session_id;
+        save(&db, session, vec![message("1", Kind::User, "foo bar")]);
+
+        assert_eq!(found(&db, "foo-bar").len(), 1);
+        for input in [
+            "a:b",
+            "AND",
+            "\"unbalanced",
+            "(x",
+            "NEAR(",
+            "-",
+            "*",
+            "\"\"",
+        ] {
+            assert!(db.search(input).is_ok(), "{input}");
+        }
+    }
+
+    #[test]
+    fn search_leaves_out_tools_and_reasoning() {
+        let db = Db::open_in_memory().unwrap();
+        let session = record(&db, chat(&db), "a", "startup").session_id;
+        save(
+            &db,
+            session,
+            vec![
+                message("1", Kind::Reasoning, "needle"),
+                message("2", Kind::Tool, "needle"),
+                message("3", Kind::Notice, "needle"),
+            ],
+        );
+        assert!(found(&db, "needle").is_empty());
+    }
+
+    #[test]
+    fn search_puts_prompts_first_and_limits_each_chat() {
+        let db = Db::open_in_memory().unwrap();
+        let (first, second) = (chat(&db), chat(&db));
+        let session = record(&db, first, "a", "startup").session_id;
+        save(
+            &db,
+            session,
+            vec![
+                message("1", Kind::Assistant, "needle reply"),
+                message("2", Kind::Assistant, "needle reply"),
+                message("3", Kind::User, "needle prompt"),
+                message("4", Kind::User, "needle prompt"),
+                message("5", Kind::User, "needle prompt"),
+                message("6", Kind::User, "needle prompt"),
+            ],
+        );
+        let session = record(&db, second, "b", "startup").session_id;
+        save(
+            &db,
+            session,
+            vec![message("1", Kind::Assistant, "needle reply")],
+        );
+
+        let hits = db.search("needle").unwrap();
+        let of = |chat| hits.iter().filter(|hit| hit.chat_id == chat).count();
+        assert_eq!((of(first), of(second)), (3, 1));
+        let prompts: Vec<_> = hits.iter().map(|hit| hit.prompt).collect();
+        assert_eq!(prompts, [true, true, true, false]);
+    }
+
+    #[test]
+    fn search_stops_at_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+        for id in 0..SEARCH_HITS + 5 {
+            let id = id.to_string();
+            let session = record(&db, chat(&db), &id, "startup").session_id;
+            save(&db, session, vec![message("1", Kind::User, "needle")]);
+        }
+        assert_eq!(found(&db, "needle").len(), SEARCH_HITS as usize);
+    }
+
+    #[test]
+    fn the_index_follows_rereads_and_deletions() {
+        let db = Db::open_in_memory().unwrap();
+        let chat_id = chat(&db);
+        let session = record(&db, chat_id, "a", "startup").session_id;
+        save(
+            &db,
+            session,
+            vec![
+                message("1", Kind::User, "before"),
+                message("2", Kind::Tool, "tool"),
+            ],
+        );
+        check_index(&db);
+
+        let mut read = transcript::Read::default();
+        read.reset = true;
+        push(&mut read, message("3", Kind::User, "after"));
+        db.save_read_state(session, &read).unwrap();
+        assert!(found(&db, "before").is_empty());
+        assert_eq!(found(&db, "after").len(), 1);
+        check_index(&db);
+
+        db.delete_chat(chat_id).unwrap();
+        assert!(found(&db, "after").is_empty());
+        check_index(&db);
+    }
+
+    #[test]
+    fn migrating_indexes_what_was_already_read() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for migration in &MIGRATIONS[..6] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.execute_batch(
+            r#"INSERT INTO projects (id, path, name, created_at) VALUES (1, '/p', 'p', 0);
+               INSERT INTO chats (id, project_id, agent, created_at, updated_at)
+               VALUES (1, 1, 'claude', 0, 0);
+               INSERT INTO sessions (id, agent, agent_id, transcript_path, started_at)
+               VALUES (1, 'claude', 'a', '/t', 0);
+               INSERT INTO chat_sessions (chat_id, session_id, position, first_position)
+               VALUES (1, 1, 0, 0);
+               INSERT INTO items (id, session_id, kind, payload) VALUES
+                   (1, 1, 'user', '{"text":"needle"}'),
+                   (2, 1, 'tool', '{"name":"grep","input":"needle"}');"#,
+        )
+        .unwrap();
+        migrate(&mut conn, 6).unwrap();
+
+        let db = Db {
+            write: Arc::new(Mutex::new(conn)),
+            read: None,
+            reads: Arc::default(),
+            dir: None,
+        };
+        assert_eq!(found(&db, "needle"), ["needle"]);
+        check_index(&db);
+    }
+
+    #[test]
+    fn a_database_with_the_index_can_be_exported_and_imported() {
+        let dir = temp_dir();
+        let db = Db::open(&dir.join("agentshub.db")).unwrap();
+        let session = record(&db, chat(&db), "a", "startup").session_id;
+        save(&db, session, vec![message("1", Kind::User, "needle")]);
+
+        let exports = dir.join("exports");
+        fs::create_dir(&exports).unwrap();
+        let export = exports.join("export.db");
+        db.export(&export).unwrap();
+        let conn = Connection::open_with_flags(&export, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        check_import(&conn).unwrap();
+        drop(conn);
+
+        let (_, projects) = prepare_import_beside(&dir.join("other").join("db"), &export).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(found(&Db::open(&export).unwrap(), "needle"), ["needle"]);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
