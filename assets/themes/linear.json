@@ -4,8 +4,8 @@
     {
       "name": "Linear Light",
       "mode": "light",
-      "font.family": "Atkinson Hyperlegible Next",
-      "mono_font.family": "Atkinson Hyperlegible Mono",
+      "font.family": "Inter",
+      "mono_font.family": "JetBrains Mono",
       "radius": 8,
       "radius.lg": 14,
       "colors": {
@@ -68,8 +68,8 @@
     {
       "name": "Linear Dark",
       "mode": "dark",
-      "font.family": "Atkinson Hyperlegible Next",
-      "mono_font.family": "Atkinson Hyperlegible Mono",
+      "font.family": "Inter",
+      "mono_font.family": "JetBrains Mono",
       "radius": 8,
       "radius.lg": 14,
       "colors": {

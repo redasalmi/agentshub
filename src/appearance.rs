@@ -17,17 +17,20 @@ use crate::terminal_view::rgb_color;
 const LINEAR: &str = include_str!("../assets/themes/linear.json");
 const PRIMER: &str = include_str!("../assets/themes/primer.json");
 
-const FONTS: [&[u8]; 6] = [
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-Regular.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-Medium.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-SemiBold.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleMono-Regular.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleMono-Medium.ttf"),
-    include_bytes!("../assets/fonts/YoungSerif-Regular.ttf"),
+const FONTS: [&[u8]; 9] = [
+    include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+    include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/InterDisplay-Medium.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
 ];
 
 /// The display face, for titles.
-pub const SERIF: &str = "Young Serif";
+pub const DISPLAY: &str = "Inter Display";
 
 const fn hex(rgb: u32) -> RgbColor {
     RgbColor {

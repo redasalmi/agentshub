@@ -4175,7 +4175,7 @@ impl Workspace {
                     .min_w(MIN_TITLE_WIDTH)
                     .child(
                         div()
-                            .font_family(appearance::SERIF)
+                            .font_family(appearance::DISPLAY)
                             .text_xl()
                             .truncate()
                             .child(title),
@@ -4445,7 +4445,7 @@ impl Workspace {
                     .child(
                         v_flex()
                             .gap_2()
-                            .child(div().font_family(appearance::SERIF).text_3xl().child(
+                            .child(div().font_family(appearance::DISPLAY).text_3xl().child(
                                 match selected {
                                     Some(_) => "Start an agent",
                                     None => "Add a project to begin",
@@ -4847,7 +4847,7 @@ fn render_settings(window: &Window, cx: &Context<Workspace>) -> impl IntoElement
                 .justify_between()
                 .child(
                     div()
-                        .font_family(appearance::SERIF)
+                        .font_family(appearance::DISPLAY)
                         .text_3xl()
                         .child("Settings"),
                 )
