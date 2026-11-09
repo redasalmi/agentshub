@@ -101,6 +101,8 @@ impl ksni::Tray for Icon {
 struct Tray {
     /// Held so the agents keep running while no window shows the workspace.
     workspace: Option<Entity<Workspace>>,
+    /// The window's size and state when it last closed.
+    bounds: Option<WindowBounds>,
     handle: Option<ksni::Handle<Icon>>,
     /// Whether the desktop's tray shows the icon.
     available: bool,
@@ -114,6 +116,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let (events, received) = smol::channel::unbounded();
     cx.set_global(Tray {
         workspace: Some(workspace),
+        bounds: None,
         handle: None,
         available: false,
         spawning: false,
@@ -217,6 +220,12 @@ fn sync(cx: &mut App) {
     .detach();
 }
 
+/// Keeps the window's bounds for when it opens again. They can't be read once
+/// it has closed.
+pub fn remember_bounds(bounds: WindowBounds, cx: &mut App) {
+    cx.global_mut::<Tray>().bounds = Some(bounds);
+}
+
 /// Brings the window back, opening it again on the same workspace if it was
 /// closed.
 pub fn show(token: Option<String>, cx: &mut App) {
@@ -233,7 +242,8 @@ pub fn show(token: Option<String>, cx: &mut App) {
             })
             .ok();
     } else if let Some(workspace) = cx.global::<Tray>().workspace.clone() {
-        crate::open_window(Some(workspace), cx);
+        let bounds = cx.global::<Tray>().bounds;
+        crate::open_window(Some(workspace), bounds, cx);
         if let (Some(token), Some(window)) = (token, cx.windows().first()) {
             window
                 .update(cx, |_, window, _| activate_with_token(window, token))

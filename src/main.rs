@@ -65,17 +65,24 @@ fn main() {
         workspace::init(cx);
         // The tray decides whether closing the window quits.
         cx.set_quit_mode(QuitMode::Explicit);
-        let workspace = open_window(None, cx);
+        let workspace = open_window(None, None, cx);
         alerts::init(&workspace, cx);
         tray::init(workspace, cx);
         instance::serve(instance, cx);
     });
 }
 
-/// Opens the window on `workspace`, or on a new one the first time.
-pub fn open_window(workspace: Option<Entity<Workspace>>, cx: &mut App) -> Entity<Workspace> {
+/// Opens the window on `workspace`, or on a new one the first time, with the
+/// `bounds` it was closed with, if any.
+pub fn open_window(
+    workspace: Option<Entity<Workspace>>,
+    bounds: Option<WindowBounds>,
+    cx: &mut App,
+) -> Entity<Workspace> {
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(1280.), px(800.)), cx)),
+        window_bounds: Some(
+            bounds.unwrap_or_else(|| WindowBounds::centered(size(px(1280.), px(800.)), cx)),
+        ),
         titlebar: Some(TitlebarOptions {
             title: Some("Agents Hub".into()),
             ..Default::default()
@@ -86,6 +93,10 @@ pub fn open_window(workspace: Option<Entity<Workspace>>, cx: &mut App) -> Entity
         ..Default::default()
     };
     let (_, workspace) = gpui_kit::open_window(options, cx, |window, cx| {
+        window.on_window_should_close(cx, |window, cx| {
+            tray::remember_bounds(window.window_bounds(), cx);
+            true
+        });
         // Each window observes the system's mode, as the observer goes with
         // the window when it's closed to the tray.
         window
