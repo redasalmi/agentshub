@@ -3959,13 +3959,16 @@ impl Workspace {
             viewport * HISTORY_SHARE
         };
 
+        // A spinner only earns its frames while the window is on screen. The
+        // sidebar's glyphs stay still: each tick would rebuild the whole list.
+        let spin = window.is_visible() && !self.hidden;
         // A window too short for even the least heights clips the chat
         // rather than drawing it under the footer.
         v_flex()
             .size_full()
             .overflow_hidden()
             .track_focus(&self.chat_focus)
-            .child(self.render_chat_header(chat, cx))
+            .child(self.render_chat_header(chat, spin, cx))
             .when_some(chat.notice.clone(), |this, notice| {
                 this.child(
                     div()
@@ -4145,7 +4148,7 @@ impl Workspace {
 
     /// The chat's title and folder, what its agent is doing, and what can be
     /// done with it.
-    fn render_chat_header(&self, chat: &Chat, cx: &Context<Self>) -> impl IntoElement {
+    fn render_chat_header(&self, chat: &Chat, spin: bool, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let entry = self.active_entry(cx);
         let title = entry
@@ -4201,7 +4204,7 @@ impl Workspace {
                     .gap_x_4()
                     .gap_y_2()
                     .when(chat.running(), |this| {
-                        this.child(status_pill(tone, chat.turn, cx))
+                        this.child(status_pill(tone, chat.turn, spin, cx))
                     })
                     .child(
                         h_flex()
@@ -4575,7 +4578,7 @@ pub fn duration(time: Duration) -> String {
 
 /// What the agent is doing, on its status color, and how long its `turn` has
 /// taken.
-fn status_pill(tone: Tone, turn: Option<Turn>, cx: &App) -> impl IntoElement {
+fn status_pill(tone: Tone, turn: Option<Turn>, spin: bool, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let palette = appearance::palette(cx);
     let label = capitalized(tone.label());
@@ -4598,7 +4601,11 @@ fn status_pill(tone: Tone, turn: Option<Turn>, cx: &App) -> impl IntoElement {
         .text_color(foreground)
         .text_xs()
         .font_medium()
-        .child(sidebar::dot(tone, cx))
+        .child(if spin {
+            sidebar::live_dot(tone, cx)
+        } else {
+            sidebar::dot(tone, cx)
+        })
         .child(h_flex().gap_1().child(label).when_some(time, |this, time| {
             // Figures of the same width, so the pill doesn't jitter as
             // they count up.

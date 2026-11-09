@@ -119,6 +119,12 @@ pub fn open_window(
                 workspace
             }
         };
+        // The header's spinner only runs while the window is on screen.
+        // Redraw when that changes so it starts and stops with the window.
+        workspace.update(cx, |_, cx| {
+            cx.observe_window_visibility(window, |_, _, _, cx| cx.notify())
+                .detach();
+        });
         // The chat on screen may have had a notification while the window
         // was out of the user's sight.
         workspace.update(cx, |_, cx| {

@@ -37,6 +37,14 @@ const MARK_SIZE: Pixels = px(22.);
 const BAR_WIDTH: Pixels = px(3.);
 /// A chat's status glyph, and the room it takes in a row.
 const GLYPH_SIZE: Pixels = px(14.);
+/// A working glyph's rotation. One slow turn still reads as motion when it
+/// advances a step at a time, and a cap this low keeps the whole-window frame
+/// it costs to a small share of a core.
+const SPIN_PERIOD: Duration = Duration::from_millis(2500);
+const SPIN_FPS: f32 = 8.;
+/// The working glyph, drawn rather than taken from the icon set: a quiet ring
+/// with a bright head reads better than a uniform arc when it steps.
+const WORKING_GLYPH: &[u8] = include_bytes!("../assets/working.svg");
 
 /// How many chats and projects have a shortcut of their own.
 pub const NUMBERED: usize = 9;
@@ -200,10 +208,22 @@ impl Tone {
 
 /// A chat's status glyph. Each status has a shape of its own as well as a
 /// color, so they tell apart at a glance and without telling colors apart:
-/// a mark in a filled circle for the ones that need the user, an open arc
-/// for an agent at work, a ring for one at rest, and a small dot for a chat
-/// that doesn't run.
+/// a mark in a filled circle for the ones that need the user, a ring with a
+/// bright head for an agent at work, a plain ring for one at rest, and a
+/// small dot for a chat that doesn't run.
 pub fn dot(tone: Tone, cx: &App) -> Div {
+    status_glyph(tone, false, cx)
+}
+
+/// A status glyph that spins while its agent works, where it says what a
+/// chat is doing now. Only the header's status pill should use this: a tick
+/// re-renders the view that holds it, and rebuilding the sidebar for a glyph
+/// costs more than the whole animation is worth.
+pub fn live_dot(tone: Tone, cx: &App) -> Div {
+    status_glyph(tone, true, cx)
+}
+
+fn status_glyph(tone: Tone, animate: bool, cx: &App) -> Div {
     let theme = cx.theme();
     let palette = appearance::palette(cx);
     let glyph = div()
@@ -239,12 +259,25 @@ pub fn dot(tone: Tone, cx: &App) -> Div {
                 .border_color(theme.muted_foreground)
                 .bg(theme.muted_foreground.opacity(0.35)),
         ),
-        // Still, as the sidebar draws only when what it shows changes.
-        Tone::Working => glyph.child(
-            Icon::new(ExtraIcon::LoaderCircle)
+        Tone::Working => {
+            let icon = Icon::default()
+                .data(WORKING_GLYPH)
                 .size(GLYPH_SIZE)
-                .text_color(palette.info.base),
-        ),
+                .text_color(palette.info.base);
+            if animate {
+                glyph.child(
+                    icon.with_animation(
+                        "working",
+                        Animation::new(SPIN_PERIOD)
+                            .repeat_synced()
+                            .with_max_fps(SPIN_FPS),
+                        |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+                    ),
+                )
+            } else {
+                glyph.child(icon)
+            }
+        }
         Tone::NeedsYou(_) => glyph.child(
             div()
                 .size(GLYPH_SIZE)
