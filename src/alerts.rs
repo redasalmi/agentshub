@@ -49,7 +49,7 @@ pub enum Alert {
 impl Alert {
     /// What going from `old` to `new` tells the user, if anything. Reports
     /// that repeat the status tell them nothing new.
-    pub fn of(agent: Agent, old: Option<Status>, new: Option<Status>) -> Option<Self> {
+    pub fn of(old: Option<Status>, new: Option<Status>) -> Option<Self> {
         if old == new {
             return None;
         }
@@ -57,14 +57,7 @@ impl Alert {
             Status::Blocked(_) => Some(Self::NeedsYou),
             Status::Done => Some(Self::Finished),
             Status::Error => Some(Self::Failed),
-            // Codex goes back to idle without saying it's done. The others
-            // go back to idle when a turn is cancelled, which the user did.
-            Status::Idle
-                if agent == Agent::Codex
-                    && matches!(old, Some(Status::Working | Status::Blocked(_))) =>
-            {
-                Some(Self::Finished)
-            }
+            // Going back to idle is a cancelled turn, which the user did.
             Status::Idle | Status::Working => None,
         }
     }
@@ -415,11 +408,6 @@ pub fn alert(
         play(kind, cx);
     }
     if settings.notification_popups {
-        // Codex says it's finished by going back to idle.
-        let status = match status {
-            Status::Idle => Status::Done,
-            status => status,
-        };
         let mut summary = crate::sidebar::activity(agent, Some(Some(status)));
         if let Some(took) = took {
             summary = format!("{summary} · {}", workspace::duration(took));
@@ -1043,7 +1031,6 @@ mod tests {
     use serde_json::json;
 
     use super::{Alert, Click, Effect, Note, Signal, Tracker, chime, details, escape};
-    use crate::agent::Agent;
     use crate::db::Item;
     use crate::status::{Need, Status};
     use crate::transcript::Kind;
@@ -1256,7 +1243,7 @@ mod tests {
     #[test]
     fn alerts_on_what_needs_the_user() {
         let working = Some(Status::Working);
-        let of = |old, new| Alert::of(Agent::Claude, old, new);
+        let of = Alert::of;
         assert_eq!(of(working, Some(Status::Done)), Some(Alert::Finished));
         assert_eq!(
             of(working, Some(Status::Blocked(Some(Need::Permission)))),
@@ -1275,16 +1262,6 @@ mod tests {
         assert_eq!(of(working, Some(Status::Idle)), None);
         assert_eq!(of(Some(Status::Idle), working), None);
         assert_eq!(of(working, None), None);
-    }
-
-    #[test]
-    fn codex_finishes_by_going_idle() {
-        let of = |old, new| Alert::of(Agent::Codex, old, new);
-        assert_eq!(
-            of(Some(Status::Working), Some(Status::Idle)),
-            Some(Alert::Finished)
-        );
-        assert_eq!(of(None, Some(Status::Idle)), None);
     }
 
     #[test]

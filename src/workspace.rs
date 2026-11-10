@@ -2207,13 +2207,13 @@ impl Workspace {
         };
         let busy = |status| matches!(status, Some(Status::Working | Status::Blocked(_)));
         let was_busy = busy(chat.status);
-        let alert = Alert::of(chat.agent, chat.status, status);
+        let alert = Alert::of(chat.status, status);
         let agent = chat.agent;
         chat.unseen = match status {
             Some(Status::Done | Status::Error) => !shown,
-            // Codex goes back to idle without saying it's done. The others
-            // say so, and go back to idle when a turn is cancelled.
-            Some(Status::Idle) => chat.unseen || (chat.agent == Agent::Codex && was_busy && !shown),
+            // Done goes back to idle once the CLI sees the user, and a
+            // cancelled turn ends in idle without a result to see.
+            Some(Status::Idle) => chat.unseen,
             _ => false,
         };
         chat.status = status;
