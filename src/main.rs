@@ -67,6 +67,7 @@ fn main() {
         cx.set_quit_mode(QuitMode::Explicit);
         let workspace = open_window(None, None, cx);
         alerts::init(&workspace, cx);
+        appearance::watch_desktop_motion(cx);
         tray::init(workspace, cx);
         instance::serve(instance, cx);
     });
@@ -90,6 +91,8 @@ pub fn open_window(
         // Wayland has no per-window icon: the compositor looks up
         // agentshub.desktop by this id and uses its Icon=.
         app_id: Some("agentshub".into()),
+        // The workspace draws the title bar, with the search in it.
+        window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
     let (_, workspace) = gpui_kit::open_window(options, cx, |window, cx| {
@@ -131,6 +134,8 @@ pub fn open_window(
             cx.observe_window_activation(window, |workspace, window, cx| {
                 if window.is_window_active() {
                     workspace.withdraw_seen(true, cx);
+                } else {
+                    workspace.release_modifiers(cx);
                 }
             })
             .detach();

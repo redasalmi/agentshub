@@ -14,17 +14,17 @@ use libghostty_vt::terminal::Scrollbar;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::appearance;
+use crate::settings::Settings;
 use crate::terminal::{Frame, GridSize, KeyInput, MouseInput, Run, Terminal};
 
 const CONTEXT: &str = "Terminal";
 const FONT_FAMILY: &str = "JetBrains Mono";
 const FONT_FALLBACKS: [&str; 4] = ["DejaVu Sans Mono", "Noto Sans Mono", "Menlo", "Consolas"];
-const FONT_SIZE: Pixels = px(14.);
 const LINE_HEIGHT: f32 = 1.3;
 const SCROLLBAR_WIDTH: Pixels = px(6.);
 const MIN_THUMB_HEIGHT: Pixels = px(24.);
 
-actions!(terminal, [Copy, Paste]);
+actions!(terminal, [Copy, Paste, ZoomIn, ZoomOut, ResetZoom]);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -64,6 +64,8 @@ pub struct TerminalView {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Trackpads scroll by fractions of a line.
     pending_scroll: f32,
+    /// Scrolled with Ctrl held, which zooms instead, by fractions of a step.
+    pending_zoom: f32,
     /// The buttons that went down on the grid and haven't been released.
     pressed: Vec<mouse::Button>,
     /// While the scrollbar thumb is dragged, how far below its top it was
@@ -83,6 +85,7 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             bounds: Rc::default(),
             pending_scroll: 0.,
+            pending_zoom: 0.,
             pressed: Vec::new(),
             thumb_grab: None,
             marked_text: None,
@@ -106,7 +109,30 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let line_height = cell_size(window).height;
+        let line_height = cell_size(window, cx).height;
+        if event.modifiers.control {
+            // A wheel's notch is one step, however many lines it scrolls; a
+            // trackpad takes a line's worth of travel for each.
+            let steps = match event.delta {
+                ScrollDelta::Lines(lines) if lines.y == 0. => 0.,
+                ScrollDelta::Lines(lines) => lines.y.signum(),
+                ScrollDelta::Pixels(pixels) => {
+                    self.pending_zoom += pixels.y / line_height;
+                    let steps = self.pending_zoom.trunc();
+                    self.pending_zoom -= steps;
+                    steps
+                }
+            };
+            for _ in 0..steps.abs() as usize {
+                if steps > 0. {
+                    window.dispatch_action(Box::new(ZoomIn), cx);
+                } else {
+                    window.dispatch_action(Box::new(ZoomOut), cx);
+                }
+            }
+            cx.stop_propagation();
+            return;
+        }
         self.pending_scroll += event.delta.pixel_delta(line_height).y / line_height;
         let lines = self.pending_scroll.trunc();
         self.pending_scroll -= lines;
@@ -352,7 +378,7 @@ impl EntityInputHandler for TerminalView {
     ) -> Option<Bounds<Pixels>> {
         let frame = self.terminal.read(cx).frame()?;
         let cursor = frame.cursor.as_ref()?;
-        let cell = cell_size(window);
+        let cell = cell_size(window, cx);
         let origin = self.bounds.get().origin
             + point(
                 cell.width * cursor.col as f32,
@@ -411,7 +437,7 @@ impl Render for TerminalView {
             .child(
                 canvas(
                     move |grid_bounds, window, cx| {
-                        let cell = cell_size(window);
+                        let cell = cell_size(window, cx);
                         terminal.update(cx, |terminal, _| {
                             terminal.resize(GridSize {
                                 cols: (grid_bounds.size.width / cell.width).max(1.) as u16,
@@ -481,13 +507,19 @@ fn terminal_font() -> Font {
     TERMINAL_FONT.clone()
 }
 
-fn cell_size(window: &Window) -> Size<Pixels> {
+/// The terminals' text size, which the user zooms.
+fn font_size(cx: &App) -> Pixels {
+    px(cx.global::<Settings>().terminal_font_size)
+}
+
+fn cell_size(window: &Window, cx: &App) -> Size<Pixels> {
+    let font_size = font_size(cx);
     let text_system = window.text_system();
     let font_id = text_system.resolve_font(&terminal_font());
     let width = text_system
-        .advance(font_id, FONT_SIZE, 'm')
-        .map_or(FONT_SIZE * 0.6, |advance| advance.width);
-    size(width, (FONT_SIZE * LINE_HEIGHT).round())
+        .advance(font_id, font_size, 'm')
+        .map_or(font_size * 0.6, |advance| advance.width);
+    size(width, (font_size * LINE_HEIGHT).round())
 }
 
 /// Where the scrollbar thumb sits, in the padding right of the grid, when
@@ -633,7 +665,7 @@ fn paint_marked_text(
     };
     let line = window
         .text_system()
-        .shape_line(text.into(), FONT_SIZE, &[text_run], None);
+        .shape_line(text.into(), font_size(cx), &[text_run], None);
     window.paint_quad(fill(
         Bounds::new(origin, size(line.width(), cell.height)),
         color(frame.background),
@@ -682,7 +714,7 @@ fn paint_text(
     let force_width = (!run.wide).then_some(cell.width);
     let line = window
         .text_system()
-        .shape_line(text, FONT_SIZE, &[text_run], force_width);
+        .shape_line(text, font_size(cx), &[text_run], force_width);
     line.paint(origin, cell.height, TextAlign::Left, None, window, cx)
         .ok();
 }

@@ -15,6 +15,8 @@ const WORKTREE_BY_DEFAULT: &str = "worktree_by_default";
 const PROJECT_NAMES: &str = "project_names";
 const RAIL_WIDTH: &str = "rail_width";
 const SHELL_SHARE: &str = "shell_share";
+const MOTION: &str = "motion";
+const TERMINAL_FONT_SIZE: &str = "terminal_font_size";
 
 /// The sidebar's width until the user drags its edge.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 340.;
@@ -26,6 +28,11 @@ pub const DEFAULT_RAIL_WIDTH: f32 = 160.;
 /// How much of the window's height a project's shell takes under its chat,
 /// until the user drags its edge.
 pub const DEFAULT_SHELL_SHARE: f32 = 0.35;
+
+/// The terminals' text size until the user zooms them, and how far they zoom.
+pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 14.;
+pub const MIN_TERMINAL_FONT_SIZE: f32 = 9.;
+pub const MAX_TERMINAL_FONT_SIZE: f32 = 28.;
 
 /// The mode the theme is in.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -96,6 +103,41 @@ impl ThemeFamily {
     }
 }
 
+/// How much the app animates.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Motion {
+    /// As the desktop's reduced-motion preference says, changing when it does.
+    #[default]
+    System,
+    Full,
+    Reduced,
+}
+
+impl Motion {
+    pub const ALL: [Self; 3] = [Self::System, Self::Full, Self::Reduced];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Full => "Full",
+            Self::Reduced => "Reduced",
+        }
+    }
+
+    /// How the database spells it.
+    fn key(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Full => "full",
+            Self::Reduced => "reduced",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|motion| motion.key() == key)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Settings {
     /// Whether closing the window leaves the app running in the tray.
@@ -121,6 +163,8 @@ pub struct Settings {
     /// How much of the window's height the user last dragged the projects'
     /// shell to, the same for every project.
     pub shell_share: f32,
+    pub motion: Motion,
+    pub terminal_font_size: f32,
 }
 
 impl Default for Settings {
@@ -136,6 +180,8 @@ impl Default for Settings {
             project_names: true,
             rail_width: DEFAULT_RAIL_WIDTH,
             shell_share: DEFAULT_SHELL_SHARE,
+            motion: Motion::default(),
+            terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
         }
     }
 }
@@ -179,6 +225,13 @@ impl Settings {
                 .map(|share| share as f32)
                 .filter(|share| share.is_finite() && *share > 0. && *share < 1.)
                 .unwrap_or(defaults.shell_share),
+            motion: read(db.text(MOTION))
+                .and_then(|key| Motion::from_key(&key))
+                .unwrap_or(defaults.motion),
+            terminal_font_size: read(db.number(TERMINAL_FONT_SIZE))
+                .map(|size| size as f32)
+                .filter(|size| (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(size))
+                .unwrap_or(defaults.terminal_font_size),
         }
     }
 
@@ -258,6 +311,25 @@ impl Settings {
         db.set_text(APPEARANCE, value.key())
     }
 
+    /// Callers make it take effect with `appearance::apply_motion`.
+    pub fn set_motion(db: &Db, value: Motion, cx: &mut App) -> rusqlite::Result<()> {
+        cx.set_global(Self {
+            motion: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_text(MOTION, value.key())
+    }
+
+    /// Kept within the sizes the terminals zoom to.
+    pub fn set_terminal_font_size(db: &Db, value: f32, cx: &mut App) -> rusqlite::Result<()> {
+        let value = value.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE);
+        cx.set_global(Self {
+            terminal_font_size: value,
+            ..*cx.global::<Self>()
+        });
+        db.set_number(TERMINAL_FONT_SIZE, value.into())
+    }
+
     /// Callers put the theme in the new family with `appearance::apply`.
     pub fn set_theme(db: &Db, value: ThemeFamily, cx: &mut App) -> rusqlite::Result<()> {
         cx.set_global(Self {
@@ -270,7 +342,7 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{Appearance, ThemeFamily};
+    use super::{Appearance, Motion, ThemeFamily};
 
     #[test]
     fn appearances_read_back_as_saved() {
@@ -286,5 +358,13 @@ mod tests {
             assert_eq!(ThemeFamily::from_key(family.key()), Some(family));
         }
         assert_eq!(ThemeFamily::from_key("solarized"), None);
+    }
+
+    #[test]
+    fn motions_read_back_as_saved() {
+        for motion in Motion::ALL {
+            assert_eq!(Motion::from_key(motion.key()), Some(motion));
+        }
+        assert_eq!(Motion::from_key("wobbly"), None);
     }
 }

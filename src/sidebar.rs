@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{
+    ContextMenu, ContextMenuExt as _, DropdownMenu as _, PopupMenuItem,
+};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
@@ -42,9 +44,29 @@ const GLYPH_SIZE: Pixels = px(14.);
 /// it costs to a small share of a core.
 const SPIN_PERIOD: Duration = Duration::from_millis(2500);
 const SPIN_FPS: f32 = 8.;
+/// How many seconds a working glyph takes to step round under reduced motion.
+const REDUCED_SPIN_STEPS: u64 = 8;
 /// The working glyph, drawn rather than taken from the icon set: a quiet ring
 /// with a bright head reads better than a uniform arc when it steps.
 const WORKING_GLYPH: &[u8] = include_bytes!("../assets/working.svg");
+
+/// How the selection bar and the filter's thumb travel to what was picked: a
+/// quick spring that overshoots a little before it settles.
+const SLIDE: SpringConfig = SpringConfig::new(420., 32., 1.);
+/// How long a status glyph that has just come to need the user pops for, and
+/// how much bigger it gets at its fullest.
+const POP: Duration = Duration::from_millis(420);
+const POP_GROWTH: f32 = 0.35;
+/// How long each archived chat waits after the one above it to fade in when
+/// the archive opens.
+const STAGGER: Duration = Duration::from_millis(30);
+const REVEAL: Duration = Duration::from_millis(180);
+/// How long a chat takes to grow into the list when it joins it, and to fold
+/// out of it when it's archived or deleted.
+const JOIN: Duration = Duration::from_millis(220);
+const LEAVE: Duration = Duration::from_millis(180);
+/// At least as tall as a chat's row, which grows from nothing to this.
+const CHAT_ROW_HEIGHT: Pixels = px(60.);
 
 /// How many chats and projects have a shortcut of their own.
 pub const NUMBERED: usize = 9;
@@ -111,6 +133,14 @@ impl Filter {
             Self::Running => running.is_some(),
         }
     }
+}
+
+/// Which shortcut numbers the sidebar shows, while the modifier that opens
+/// them is held: Alt for the chats, Ctrl for the projects.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Held {
+    Chats,
+    Projects,
 }
 
 /// What a chat's dot says about its agent.
@@ -212,7 +242,69 @@ impl Tone {
 /// bright head for an agent at work, a plain ring for one at rest, and a
 /// small dot for a chat that doesn't run.
 pub fn dot(tone: Tone, cx: &App) -> Div {
-    status_glyph(tone, false, cx)
+    status_glyph(tone, false, None, cx)
+}
+
+/// A chat's status glyph whose circle swells and settles back when its agent
+/// has just come to need the user, `since` then.
+fn popping_dot(tone: Tone, since: Option<Instant>, cx: &App) -> Div {
+    // Named after when it popped, so a later pop starts again.
+    status_glyph(tone, false, since.map(name_of), cx)
+}
+
+/// An animation's name that changes with the moment it starts at.
+fn name_of(at: Instant) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(&at, &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
+/// `row` growing into the list from nothing, or, when it `leaves`, folding
+/// out of it to nothing.
+fn fold(row: impl IntoElement + 'static, name: (&'static str, u64), leaves: bool) -> AnyElement {
+    let animation = if leaves {
+        Animation::new(LEAVE).with_easing(ease_in_out)
+    } else {
+        Animation::new(JOIN).with_easing(ease_out_quint())
+    };
+    div()
+        .child(row)
+        .with_animation(name, animation, move |wrapper, delta| {
+            let shown = if leaves { 1. - delta } else { delta };
+            if shown < 1. {
+                wrapper
+                    .max_h(CHAT_ROW_HEIGHT * shown)
+                    .overflow_hidden()
+                    .opacity(shown)
+            } else {
+                wrapper
+            }
+        })
+        .into_any_element()
+}
+
+/// A row of the chats' list: a chat, with its place in the list, or one
+/// that is leaving it.
+enum Row<'a> {
+    Chat(usize, &'a Chat),
+    Leaving(&'a Leaving),
+}
+
+impl Row<'_> {
+    fn id(&self) -> i64 {
+        match self {
+            Row::Chat(_, chat) => chat.id,
+            Row::Leaving(leaving) => leaving.chat.id,
+        }
+    }
+}
+
+/// A chat folding out of the list since it was archived or deleted, below
+/// the chat it was `after` in its group, if any.
+struct Leaving {
+    chat: Chat,
+    after: Option<i64>,
+    since: Instant,
 }
 
 /// A status glyph that spins while its agent works, where it says what a
@@ -220,10 +312,12 @@ pub fn dot(tone: Tone, cx: &App) -> Div {
 /// re-renders the view that holds it, and rebuilding the sidebar for a glyph
 /// costs more than the whole animation is worth.
 pub fn live_dot(tone: Tone, cx: &App) -> Div {
-    status_glyph(tone, true, cx)
+    status_glyph(tone, true, None, cx)
 }
 
-fn status_glyph(tone: Tone, animate: bool, cx: &App) -> Div {
+/// `pop` names the swell a glyph that needs the user gives when it has just
+/// come to, if it has.
+fn status_glyph(tone: Tone, animate: bool, pop: Option<u64>, cx: &App) -> Div {
     let theme = cx.theme();
     let palette = appearance::palette(cx);
     let glyph = div()
@@ -232,15 +326,29 @@ fn status_glyph(tone: Tone, animate: bool, cx: &App) -> Div {
         .flex()
         .items_center()
         .justify_center();
+    // A glyph that needs the user: its circle, swelling if it pops. It
+    // outgrows the glyph's room rather than moving what's beside it.
+    let swell = |circle: Div| match pop {
+        Some(key) => circle
+            .with_animation(("pop", key), Animation::new(POP), |circle, delta| {
+                // One hump up and back, so nothing flashes.
+                let grow = (delta * std::f32::consts::PI).sin() * POP_GROWTH;
+                circle.size(GLYPH_SIZE * (1. + grow)).flex_none()
+            })
+            .into_any_element(),
+        None => circle.into_any_element(),
+    };
     let filled = |background: Hsla, foreground: Hsla, icon: IconName| {
-        div()
-            .size(GLYPH_SIZE)
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(background)
-            .child(Icon::new(icon).size(px(10.)).text_color(foreground))
+        swell(
+            div()
+                .size(GLYPH_SIZE)
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(background)
+                .child(Icon::new(icon).size(px(10.)).text_color(foreground)),
+        )
     };
     match tone {
         Tone::Saved => glyph.child(div().size(px(5.)).rounded_full().bg(palette.border_strong)),
@@ -264,7 +372,17 @@ fn status_glyph(tone: Tone, animate: bool, cx: &App) -> Div {
                 .data(WORKING_GLYPH)
                 .size(GLYPH_SIZE)
                 .text_color(palette.info.base);
-            if animate {
+            if animate && cx.reduce_motion() {
+                // Reduced motion stills the animation, which would leave a
+                // working agent looking stuck. The pill redraws every second
+                // while a turn is under way, so the head steps round slowly.
+                let step = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs() % REDUCED_SPIN_STEPS);
+                glyph.child(icon.transform(Transformation::rotate(radians(
+                    std::f32::consts::TAU * step as f32 / REDUCED_SPIN_STEPS as f32,
+                ))))
+            } else if animate {
                 glyph.child(
                     icon.with_animation(
                         "working",
@@ -278,7 +396,7 @@ fn status_glyph(tone: Tone, animate: bool, cx: &App) -> Div {
                 glyph.child(icon)
             }
         }
-        Tone::NeedsYou(_) => glyph.child(
+        Tone::NeedsYou(_) => glyph.child(swell(
             div()
                 .size(GLYPH_SIZE)
                 .rounded_full()
@@ -291,7 +409,7 @@ fn status_glyph(tone: Tone, animate: bool, cx: &App) -> Div {
                 .font_semibold()
                 .line_height(px(11.))
                 .child("!"),
-        ),
+        )),
         Tone::Done => glyph.child(filled(
             theme.success,
             theme.success_foreground,
@@ -355,6 +473,14 @@ pub struct Sidebar {
     /// Whether the selected project's archived chats are listed below the
     /// others.
     show_archived: bool,
+    held: Option<Held>,
+    /// When each chat's agent last came to need the user, for the pop its
+    /// glyph gives then.
+    popped: HashMap<i64, Instant>,
+    /// When each chat joined the list, for the way it grows into it.
+    joined: HashMap<i64, Instant>,
+    leaving: Vec<Leaving>,
+    _leave: Option<Task<()>>,
     _age: Task<()>,
 }
 
@@ -378,12 +504,23 @@ impl Sidebar {
             selected: None,
             filter: Filter::default(),
             show_archived: false,
+            held: None,
+            popped: HashMap::new(),
+            joined: HashMap::new(),
+            leaving: Vec::new(),
+            _leave: None,
             _age: age,
         }
     }
 
     pub fn set_projects(&mut self, projects: Vec<Project>, cx: &mut Context<Self>) {
-        self.projects = projects;
+        let was_selected = self.selected;
+        let was_shown: Vec<_> = self
+            .shown()
+            .iter()
+            .map(|chat| (chat.id, chat.pinned))
+            .collect();
+        let mut old = std::mem::replace(&mut self.projects, projects);
         let listed = |id: i64| self.listed().any(|project| project.id == id);
         if !self.selected.is_some_and(listed) {
             let selected = self
@@ -396,7 +533,96 @@ impl Sidebar {
                 cx.emit(SidebarEvent::Selected);
             }
         }
+
+        let now = Instant::now();
+        let unarchived = |projects: &[Project]| -> HashSet<i64> {
+            projects
+                .iter()
+                .flat_map(|project| &project.chats)
+                .filter(|chat| chat.archived_at.is_none())
+                .map(|chat| chat.id)
+                .collect()
+        };
+        let chats = unarchived(&self.projects);
+        // The ones there from the start were already there.
+        if !old.is_empty() {
+            let had = unarchived(&old);
+            self.joined
+                .extend(chats.difference(&had).map(|id| (*id, now)));
+        }
+        self.joined.retain(|_, at| now - *at < JOIN);
+        self.leaving
+            .retain(|leaving| now - leaving.since < LEAVE && !chats.contains(&leaving.chat.id));
+        if self.selected == was_selected {
+            let mut above = [None, None];
+            for (id, pinned) in was_shown {
+                if !chats.contains(&id)
+                    && let Some(chat) = old.iter_mut().find_map(|project| {
+                        let at = project.chats.iter().position(|chat| chat.id == id)?;
+                        Some(project.chats.swap_remove(at))
+                    })
+                {
+                    self.leaving.push(Leaving {
+                        chat,
+                        after: above[pinned as usize],
+                        since: now,
+                    });
+                }
+                above[pinned as usize] = Some(id);
+            }
+        }
+        if !self.leaving.is_empty() {
+            self._leave = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(LEAVE).await;
+                this.update(cx, |this, cx| {
+                    this.leaving
+                        .retain(|leaving| leaving.since.elapsed() < LEAVE);
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
         cx.notify();
+    }
+
+    /// `chats` of one group of the list, pinned or not, with those leaving
+    /// it where they were.
+    fn rows<'a>(&'a self, chats: &[(usize, &'a Chat)], pinned: bool) -> Vec<Row<'a>> {
+        let mut rows: Vec<_> = chats
+            .iter()
+            .map(|(index, chat)| Row::Chat(*index, chat))
+            .collect();
+        for leaving in self.leaving.iter().filter(|leaving| {
+            leaving.chat.pinned == pinned && Some(leaving.chat.project_id) == self.selected
+        }) {
+            let at = rows
+                .iter()
+                .position(|row| Some(row.id()) == leaving.after)
+                .map_or(0, |at| at + 1);
+            rows.insert(at, Row::Leaving(leaving));
+        }
+        rows
+    }
+
+    fn render_row(&self, row: &Row, cx: &Context<Self>) -> AnyElement {
+        match row {
+            Row::Chat(index, chat) => {
+                let rendered = self.render_chat(*index, chat, cx);
+                match self.joined.get(&chat.id).filter(|at| at.elapsed() < JOIN) {
+                    Some(at) => fold(rendered, ("chat-in", name_of(*at)), false),
+                    None => rendered.into_any_element(),
+                }
+            }
+            Row::Leaving(leaving) => fold(
+                div()
+                    .relative()
+                    .child(self.render_chat(NUMBERED, &leaving.chat, cx))
+                    // Gone from the data, it no longer answers the pointer.
+                    .child(div().absolute().inset_0().occlude()),
+                ("chat-out", leaving.chat.id as u64),
+                true,
+            ),
+        }
     }
 
     /// Marks what each running chat is doing and which one is shown. The
@@ -407,6 +633,15 @@ impl Sidebar {
         active: Option<i64>,
         cx: &mut Context<Self>,
     ) {
+        let now = Instant::now();
+        for (id, status) in &running {
+            let tone = Tone::of(Some(*status));
+            let was = Tone::of(self.running.get(id).copied());
+            if tone.needs_you() && tone != was {
+                self.popped.insert(*id, now);
+            }
+        }
+        self.popped.retain(|_, at| now - *at < POP);
         self.running = running;
         self.active = active;
         cx.notify();
@@ -513,6 +748,13 @@ impl Sidebar {
         }
     }
 
+    pub fn set_held(&mut self, held: Option<Held>, cx: &mut Context<Self>) {
+        if self.held != held {
+            self.held = held;
+            cx.notify();
+        }
+    }
+
     pub fn filter(&self) -> Filter {
         self.filter
     }
@@ -590,15 +832,7 @@ impl Sidebar {
             .border_r_1()
             .border_color(theme.sidebar_border)
             .when(named, |this| {
-                this.child(
-                    div()
-                        .px_3()
-                        .pt_1()
-                        .text_xs()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_color(theme.muted_foreground)
-                        .child("PROJECTS"),
-                )
+                this.child(heading("Projects", cx).px_3().pt_1())
             })
             .child(
                 v_flex()
@@ -615,12 +849,14 @@ impl Sidebar {
                             this.items_center().gap_2().pt_1()
                         }
                     })
+                    .relative()
                     .children(self.listed().zip(marks).enumerate().map(
                         |(index, (project, mark))| {
                             self.render_project(index, project, mark.into(), named, cx)
                         },
                     ))
-                    .child(self.render_add_project(named, cx)),
+                    .child(self.render_add_project(named, cx))
+                    .children(self.render_selection_bar(named, cx)),
             )
             .child(if named {
                 h_flex()
@@ -635,6 +871,39 @@ impl Sidebar {
                     .child(toggle)
                     .child(settings)
             })
+    }
+
+    /// The bar on the rail's edge beside the selected project, which slides to
+    /// the project selected next.
+    fn render_selection_bar(&self, named: bool, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let index = self
+            .listed()
+            .position(|project| Some(project.id) == self.selected)?;
+        // Where the rows or tiles are, as the list lays them out, and the
+        // bar's length beside one.
+        let (first, pitch, inset, left) = if named {
+            (px(0.), ROW_HEIGHT + px(1.), px(9.), px(0.))
+        } else {
+            (px(4.), TILE_SIZE + px(8.), px(10.), px(1.))
+        };
+        let length = if named { ROW_HEIGHT } else { TILE_SIZE } - inset * 2.;
+        let top = first + pitch * index as f32 + inset;
+        Some(
+            div()
+                .absolute()
+                .left(left)
+                .w(BAR_WIDTH)
+                .h(length)
+                .rounded_r(px(2.))
+                .bg(appearance::palette(cx).accent)
+                // Its own spring for each layout, so it doesn't fly between
+                // them when the rail folds.
+                .with_spring(
+                    ("selection-bar", named as u64),
+                    SpringAnimation::new(SLIDE).to(top),
+                    |bar, top| bar.top(top),
+                ),
+        )
     }
 
     /// A project in the rail, with how many of its chats need the user: a
@@ -686,10 +955,18 @@ impl Sidebar {
         };
         let dragged = DraggedProject {
             id,
+            index,
             mark: mark.clone(),
             name: name.clone(),
         };
         let drop_color = theme.drop_target;
+        // While Ctrl is held, the mark gives way to the number that selects
+        // the project, so nothing moves.
+        let mark = if index < NUMBERED && self.held == Some(Held::Projects) {
+            SharedString::from((index + 1).to_string())
+        } else {
+            mark
+        };
         let count = || {
             if needing > 0 {
                 badge(needing, true, false, cx)
@@ -697,11 +974,8 @@ impl Sidebar {
                 badge(open, false, working, cx)
             }
         };
-        let bar = div()
-            .absolute()
-            .w(BAR_WIDTH)
-            .rounded_r(px(2.))
-            .bg(palette.accent);
+        let accent = palette.accent;
+        let sidebar = cx.entity();
 
         let item = if named {
             h_flex()
@@ -714,7 +988,7 @@ impl Sidebar {
                 .rounded(theme.radius)
                 .map(|this| {
                     if selected {
-                        this.bg(palette.accent_soft)
+                        this.bg(theme.sidebar_accent)
                     } else {
                         this.hover(|style| style.bg(theme.sidebar_accent))
                     }
@@ -736,10 +1010,6 @@ impl Sidebar {
                         .child(name),
                 )
                 .when(open > 0, |this| this.child(count()))
-                // On the rail's edge, past the list's padding.
-                .when(selected, |this| {
-                    this.child(bar.left(px(-6.)).top(px(9.)).bottom(px(9.)))
-                })
         } else {
             div()
                 .id(("project", id as u64))
@@ -768,10 +1038,6 @@ impl Sidebar {
                 .when(open > 0, |this| {
                     this.child(count().absolute().top(px(-5.)).left(px(-5.)))
                 })
-                // On the rail's edge, as the tile is centered in it.
-                .when(selected, |this| {
-                    this.child(bar.left(px(-9.)).top(px(10.)).bottom(px(10.)))
-                })
         };
 
         item.cursor_pointer()
@@ -779,10 +1045,12 @@ impl Sidebar {
             // Projects are reordered by dropping one on another.
             .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
             .drag_over::<DraggedProject>(move |style, dragged, _, _| {
-                if dragged.id != id {
-                    style.bg(drop_color)
-                } else {
+                if dragged.id == id {
                     style
+                } else if named {
+                    drop_line(style, dragged.index < index, accent)
+                } else {
+                    style.bg(drop_color)
                 }
             })
             .on_drop(cx.listener(move |_, dragged: &DraggedProject, _, cx| {
@@ -791,6 +1059,25 @@ impl Sidebar {
                 }
             }))
             .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx)))
+            .context_menu(move |menu, _, _| {
+                let emit = |event| emit(&sidebar, event);
+                menu.item(
+                    PopupMenuItem::new("New chat…")
+                        .icon(IconName::Plus)
+                        .on_click(emit(SidebarEvent::NewChat(id))),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Archive")
+                        .icon(ExtraIcon::Archive)
+                        .on_click(emit(SidebarEvent::ArchiveProject(id))),
+                )
+                .item(
+                    PopupMenuItem::new("Remove")
+                        .icon(IconName::Delete)
+                        .on_click(emit(SidebarEvent::RemoveProject(id))),
+                )
+            })
     }
 
     fn render_add_project(&self, named: bool, cx: &Context<Self>) -> impl IntoElement {
@@ -841,14 +1128,19 @@ impl Sidebar {
     }
 
     fn render_list(&self, project: &Project, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let id = project.id;
         let sidebar = cx.entity();
         let shown = self.shown();
         let archived = Self::archived(project);
         let has_chats = project.chats.len() > archived.len();
-        let (pinned, others): (Vec<_>, Vec<_>) =
-            shown.iter().enumerate().partition(|(_, chat)| chat.pinned);
+        let (pinned, others): (Vec<_>, Vec<_>) = shown
+            .iter()
+            .enumerate()
+            .map(|(index, chat)| (index, *chat))
+            .partition(|(_, chat)| chat.pinned);
+        let pinned = self.rows(&pinned, true);
+        let others = self.rows(&others, false);
+        let quiet = pinned.is_empty() && others.is_empty();
 
         v_flex()
             .flex_1()
@@ -877,14 +1169,7 @@ impl Sidebar {
                                             .truncate()
                                             .child(project.name.clone()),
                                     )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_family(theme.mono_font_family.clone())
-                                            .text_color(theme.muted_foreground)
-                                            .truncate()
-                                            .child(home_relative(&project.path)),
-                                    ),
+                                    .child(path_line(&project.path, cx)),
                             )
                             .child(
                                 Button::new("project-menu")
@@ -938,7 +1223,7 @@ impl Sidebar {
                     .px_2()
                     .pb_3()
                     .gap_px()
-                    .when(!has_chats, |this| {
+                    .when(!has_chats && quiet, |this| {
                         this.child(self.render_none(
                             if archived.is_empty() {
                                 "No chats yet. Start an agent in this folder with New chat."
@@ -948,7 +1233,7 @@ impl Sidebar {
                             cx,
                         ))
                     })
-                    .when(has_chats && shown.is_empty(), |this| {
+                    .when(has_chats && quiet, |this| {
                         this.child(self.render_none(
                             match self.filter {
                                 Filter::NeedsYou => "No agent here needs you.",
@@ -958,19 +1243,12 @@ impl Sidebar {
                         ))
                     })
                     .when(!pinned.is_empty(), |this| {
-                        this.child(section("Pinned", cx)).children(
-                            pinned
-                                .iter()
-                                .map(|(index, chat)| self.render_chat(*index, chat, cx)),
-                        )
+                        this.child(section("Pinned", cx))
+                            .children(pinned.iter().map(|row| self.render_row(row, cx)))
                     })
                     .when(!others.is_empty(), |this| {
                         this.when(!pinned.is_empty(), |this| this.child(section("Chats", cx)))
-                            .children(
-                                others
-                                    .iter()
-                                    .map(|(index, chat)| self.render_chat(*index, chat, cx)),
-                            )
+                            .children(others.iter().map(|row| self.render_row(row, cx)))
                     })
                     .when(self.filter == Filter::All && !archived.is_empty(), |this| {
                         this.child(self.render_archived(&archived, cx))
@@ -992,31 +1270,54 @@ impl Sidebar {
                     .pb_1()
                     .gap_1()
                     .text_xs()
-                    .font_family(theme.mono_font_family.clone())
+                    .font_medium()
                     .text_color(theme.muted_foreground)
                     .cursor_pointer()
                     .hover(|style| style.text_color(theme.foreground))
+                    .child(Icon::new(IconName::ChevronRight).xsmall().with_spring(
+                        "archived-chevron",
+                        SpringAnimation::new(SLIDE).to(if expanded { 0.25 } else { 0. }),
+                        // In radians, as the spring overshoots past a straight arrow, below
+                        // the 0 that a percentage of a turn can't go under.
+                        |chevron, turn| {
+                            chevron.transform(Transformation::rotate(radians(
+                                turn * std::f32::consts::TAU,
+                            )))
+                        },
+                    ))
+                    .child("Archived")
                     .child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .xsmall(),
+                        div()
+                            .font_family(theme.mono_font_family.clone())
+                            .child(chats.len().to_string()),
                     )
-                    .child(format!("ARCHIVED · {}", chats.len()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_archived = !this.show_archived;
                         cx.notify();
                     })),
             )
             .when(expanded, |this| {
-                this.children(chats.iter().map(|chat| self.render_archived_chat(chat, cx)))
+                this.children(chats.iter().enumerate().map(|(index, chat)| {
+                    // Each one a little after the one above, so they read as
+                    // unfolding from the heading.
+                    let delay = STAGGER.as_secs_f32() * index.min(10) as f32;
+                    let total = REVEAL.as_secs_f32() + delay;
+                    self.render_archived_chat(chat, cx).with_animation(
+                        ("archived-in", chat.id as u64),
+                        Animation::new(Duration::from_secs_f32(total)),
+                        move |row, delta| {
+                            let shown =
+                                ((delta * total - delay) / REVEAL.as_secs_f32()).clamp(0., 1.);
+                            let shown = 1. - (1. - shown).powi(3);
+                            row.opacity(shown).top(px(-6. * (1. - shown)))
+                        },
+                    )
+                }))
             })
     }
 
     /// An archived chat, which opening brings back.
-    fn render_archived_chat(&self, chat: &Chat, cx: &Context<Self>) -> impl IntoElement {
+    fn render_archived_chat(&self, chat: &Chat, cx: &Context<Self>) -> Stateful<Div> {
         let theme = cx.theme();
         let id = chat.id;
         let group = SharedString::from(format!("archived-{id}"));
@@ -1096,47 +1397,70 @@ impl Sidebar {
     fn render_filter(&self, project: &Project, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let palette = appearance::palette(cx);
-        h_flex()
+        let segments = Filter::ALL.len() as f32;
+        let at = Filter::ALL
+            .iter()
+            .position(|filter| *filter == self.filter)
+            .unwrap_or_default() as f32;
+        div()
             .p(px(3.))
-            .gap(px(2.))
             .rounded(theme.radius)
             .bg(palette.strong)
-            .children(Filter::ALL.map(|filter| {
-                let active = self.filter == filter;
-                div()
-                    .id(filter.label())
-                    .flex_1()
-                    .h(px(26.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .rounded(theme.radius - px(2.))
-                    .text_xs()
-                    .cursor_pointer()
-                    .map(|this| {
-                        if active {
-                            this.bg(theme.background)
-                                .text_color(theme.foreground)
-                                .font_medium()
-                                .shadow_xs()
-                        } else {
-                            this.text_color(palette.secondary_foreground)
-                                .hover(|style| style.text_color(theme.foreground))
-                        }
-                    })
-                    .child(filter.label())
-                    .map(|this| match self.count(project, filter) {
-                        0 => this,
-                        count => this.child(
-                            div()
-                                .font_family(theme.mono_font_family.clone())
-                                .text_color(theme.muted_foreground)
-                                .child(count.to_string()),
-                        ),
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_filter(filter, cx)))
-            }))
+            .child(
+                h_flex()
+                    .relative()
+                    // The thumb under the chosen filter, which slides to the
+                    // one chosen next.
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .w(relative(1. / segments))
+                            .rounded(theme.radius - px(2.))
+                            .bg(theme.background)
+                            .shadow_xs()
+                            .with_spring(
+                                "filter-thumb",
+                                SpringAnimation::new(SLIDE).to(at),
+                                move |thumb, at| thumb.left(relative(at / segments)),
+                            ),
+                    )
+                    .children(Filter::ALL.map(|filter| {
+                        let active = self.filter == filter;
+                        div()
+                            .id(filter.label())
+                            .flex_1()
+                            .h(px(26.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .text_xs()
+                            .cursor_pointer()
+                            .map(|this| {
+                                if active {
+                                    this.text_color(theme.foreground).font_medium()
+                                } else {
+                                    this.text_color(palette.secondary_foreground)
+                                        .hover(|style| style.text_color(theme.foreground))
+                                }
+                            })
+                            .child(filter.label())
+                            .map(|this| match self.count(project, filter) {
+                                0 => this,
+                                count => this.child(
+                                    div()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_color(theme.muted_foreground)
+                                        .child(count.to_string()),
+                                ),
+                            })
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.set_filter(filter, cx)),
+                            )
+                    })),
+            )
     }
 
     fn render_none(&self, text: &'static str, cx: &Context<Self>) -> impl IntoElement {
@@ -1150,7 +1474,12 @@ impl Sidebar {
     }
 
     /// A chat in the list, `index` being its place in it.
-    fn render_chat(&self, index: usize, chat: &Chat, cx: &Context<Self>) -> impl IntoElement {
+    fn render_chat(
+        &self,
+        index: usize,
+        chat: &Chat,
+        cx: &Context<Self>,
+    ) -> ContextMenu<Stateful<Div>> {
         let theme = cx.theme();
         let palette = appearance::palette(cx);
         let id = chat.id;
@@ -1164,15 +1493,23 @@ impl Sidebar {
         let order_group = (chat.project_id, pinned);
         let dragged = DraggedChat {
             id,
+            index,
             group: order_group,
             title: title.clone(),
         };
-        let drop_color = theme.drop_target;
-        let row_bg = if active {
-            palette.accent_soft
-        } else {
-            theme.sidebar_accent
-        };
+        let drop_color = palette.accent;
+        let row_bg = theme.sidebar_accent;
+        let sidebar = cx.entity();
+        let menu_title = current_title.clone();
+        let meaning = SharedString::from(match tone {
+            Tone::Saved => format!("{} isn't running", chat.agent.display_name()),
+            _ => activity(chat.agent, self.running(id)),
+        });
+        let popped = self
+            .popped
+            .get(&id)
+            .copied()
+            .filter(|at| at.elapsed() < POP);
 
         h_flex()
             .id(group.clone())
@@ -1191,7 +1528,26 @@ impl Sidebar {
                     this.hover(|style| style.bg(row_bg))
                 }
             })
-            .child(dot(tone, cx))
+            // On the list's edge, past its padding, as the projects' is.
+            .when(active, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(-8.))
+                        .top(px(10.))
+                        .bottom(px(10.))
+                        .w(BAR_WIDTH)
+                        .rounded_r(px(2.))
+                        .bg(palette.accent),
+                )
+            })
+            // What the glyph means, for the one the user doesn't know yet.
+            .child(
+                div()
+                    .id(("tone", id as u64))
+                    .child(popping_dot(tone, popped, cx))
+                    .tooltip(move |window, cx| Tooltip::new(meaning.clone()).build(window, cx)),
+            )
             .child(
                 v_flex()
                     .flex_1()
@@ -1212,20 +1568,8 @@ impl Sidebar {
                             .child(subtitle(chat, tone, None)),
                     ),
             )
-            .when(index < NUMBERED, |this| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .px_1p5()
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_xs()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_color(theme.muted_foreground)
-                        .group_hover(group.clone(), |style| style.invisible())
-                        .child((index + 1).to_string()),
-                )
+            .when(index < NUMBERED && self.held == Some(Held::Chats), |this| {
+                this.child(key_number(index, cx))
             })
             .child(
                 h_flex()
@@ -1298,7 +1642,7 @@ impl Sidebar {
             .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
             .drag_over::<DraggedChat>(move |style, dragged, _, _| {
                 if dragged.group == order_group && dragged.id != id {
-                    style.bg(drop_color)
+                    drop_line(style, dragged.index < index, drop_color)
                 } else {
                     style
                 }
@@ -1309,6 +1653,67 @@ impl Sidebar {
                 }
             }))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::OpenChat(id))))
+            .context_menu(move |menu, _, _| {
+                let emit = |event| emit(&sidebar, event);
+                menu.item(
+                    PopupMenuItem::new("Open")
+                        .icon(IconName::ExternalLink)
+                        .on_click(emit(SidebarEvent::OpenChat(id))),
+                )
+                .item(
+                    PopupMenuItem::new("Rename…")
+                        .icon(ExtraIcon::Pencil)
+                        .on_click(emit(SidebarEvent::RenameChat(id, menu_title.clone()))),
+                )
+                .item(
+                    PopupMenuItem::new(if pinned { "Unpin" } else { "Pin to the top" })
+                        .icon(if pinned {
+                            ExtraIcon::PinOff
+                        } else {
+                            ExtraIcon::Pin
+                        })
+                        .on_click(emit(SidebarEvent::PinChat(id, !pinned))),
+                )
+                .when(open, |menu| {
+                    menu.item(
+                        PopupMenuItem::new("Close")
+                            .icon(IconName::Close)
+                            .on_click(emit(SidebarEvent::CloseChat(id))),
+                    )
+                })
+                .separator()
+                .item(
+                    PopupMenuItem::new("Archive")
+                        .icon(ExtraIcon::Archive)
+                        .on_click(emit(SidebarEvent::ArchiveChat(id))),
+                )
+                .item(
+                    PopupMenuItem::new("Delete")
+                        .icon(IconName::Delete)
+                        .on_click(emit(SidebarEvent::DeleteChat(id))),
+                )
+            })
+    }
+}
+
+/// A click handler that sends `event` from the sidebar.
+fn emit(
+    sidebar: &Entity<Sidebar>,
+    event: SidebarEvent,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let sidebar = sidebar.clone();
+    move |_, _, cx| sidebar.update(cx, |_, cx| cx.emit(event.clone()))
+}
+
+/// A row being dragged over, with a line on the edge the dragged one will land
+/// at: below the row when it comes from above, and above it otherwise. The
+/// line takes the room of the gap beside it, so the rows stay put.
+fn drop_line(style: StyleRefinement, after: bool, color: Hsla) -> StyleRefinement {
+    let style = style.rounded_none().border_color(color);
+    if after {
+        style.border_b_2().mb(px(-2.))
+    } else {
+        style.border_t_2().mt(px(-2.))
     }
 }
 
@@ -1325,26 +1730,29 @@ pub fn group_heading(label: &'static str, count: usize, tone: Tone, cx: &App) ->
         .pb_1()
         .gap_1p5()
         .text_xs()
-        .font_family(theme.mono_font_family.clone())
+        .font_medium()
         .text_color(color)
-        .child(label.to_uppercase())
+        .child(label)
         .child(
             div()
+                .font_family(theme.mono_font_family.clone())
                 .text_color(theme.muted_foreground)
                 .child(count.to_string()),
         )
 }
 
 fn section(label: &'static str, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
+    heading(label, cx).px_2().pt_3().pb_1()
+}
+
+/// A label over a group of rows: quieter than the rows, in the text face so
+/// the mono face is left to paths, keys and figures.
+pub fn heading(label: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .px_2()
-        .pt_3()
-        .pb_1()
         .text_xs()
-        .font_family(theme.mono_font_family.clone())
-        .text_color(theme.muted_foreground)
-        .child(label.to_uppercase())
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child(label.into())
 }
 
 /// What a chat's agent is doing while it runs, the agent or else the
@@ -1387,6 +1795,22 @@ fn fit_rail(named: bool, wanted: Pixels, room: Pixels) -> (bool, Pixels) {
 /// sidebar's edge accounts for.
 pub fn names_width(window_width: Pixels, cx: &App) -> Pixels {
     rail(window_width, cx).1 - RAIL_WIDTH
+}
+
+/// The number that opens the `index`th chat or project with its modifier.
+fn key_number(index: usize, cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .flex_none()
+        .px_1p5()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(appearance::palette(cx).border_strong)
+        .bg(theme.background)
+        .text_xs()
+        .font_family(theme.mono_font_family.clone())
+        .text_color(theme.foreground)
+        .child((index + 1).to_string())
 }
 
 /// A project's mark, drawn in its color.
@@ -1463,6 +1887,25 @@ fn initials(name: &str) -> String {
     letters.to_lowercase()
 }
 
+/// `path` on one line, cut from its start when it doesn't fit, since its end
+/// says the most, and whole in a tooltip.
+pub fn path_line(path: &Path, cx: &App) -> Stateful<Div> {
+    let theme = cx.theme();
+    let shown = home_relative(path);
+    let whole = SharedString::from(path.display().to_string());
+    div()
+        .id(SharedString::from(format!("path:{whole}")))
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis_start()
+        .text_xs()
+        .font_family(theme.mono_font_family.clone())
+        .text_color(theme.muted_foreground)
+        .tooltip(move |window, cx| Tooltip::new(whole.clone()).build(window, cx))
+        .child(shown)
+}
+
 /// `path`, starting with `~` when it is in the home folder.
 pub fn home_relative(path: &Path) -> String {
     match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_owned)) {
@@ -1476,6 +1919,8 @@ pub fn home_relative(path: &Path) -> String {
 #[derive(Clone)]
 struct DraggedChat {
     id: i64,
+    /// Where it is in the list.
+    index: usize,
     /// Its project, and whether it is pinned.
     group: (i64, bool),
     title: SharedString,
@@ -1502,6 +1947,8 @@ impl Render for DraggedChat {
 #[derive(Clone)]
 struct DraggedProject {
     id: i64,
+    /// Where it is in the rail.
+    index: usize,
     mark: SharedString,
     name: SharedString,
 }
