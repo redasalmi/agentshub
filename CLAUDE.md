@@ -7,7 +7,7 @@ Non-goals: orchestration, fleet management, PR/CI/diff panes. Use each CLI's nat
 ## Verify before saying done
 
 ```sh
-cargo fmt --check && cargo clippy --all-targets && cargo test
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
 Show the output. UI changes also get a screenshot from a dev build run in isolation next to the installed one: its own session bus (`dbus-run-session --`), `XDG_RUNTIME_DIR` and `XDG_DATA_HOME`.

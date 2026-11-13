@@ -145,6 +145,7 @@ fn stop(git: &Mutex<Git>, kill: bool) -> bool {
         let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
         // Git isn't reaped while it is held here, so its process group is
         // still its own.
+        // SAFETY: killpg takes no pointers.
         unsafe { libc::killpg(child.id() as libc::pid_t, signal) };
     }
     #[cfg(not(unix))]
@@ -202,7 +203,7 @@ fn create_in(project: &Path, dir: &Path, state: &Mutex<Git>) -> anyhow::Result<W
         .with_context(|| format!("Couldn't create {}", parent.display()))?;
     // A name nothing else has, for both the folder and the branch.
     let (name, path, branch) = loop {
-        let name = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let name = format!("{:08x}", uuid::Uuid::new_v4().as_fields().0);
         let path = parent.join(&name);
         let branch = branch_of(&path);
         if !path.exists() && !branch_exists(&repo.root, &branch) {
@@ -401,7 +402,7 @@ fn unreachable_head(root: &Path) -> Option<String> {
 /// Puts a branch on `head`, named after the worktree, and returns its name.
 fn rescue(root: &Path, head: &str) -> anyhow::Result<String> {
     let name = project_dir_name(root);
-    let short = &head[..head.len().min(8)];
+    let short = head.get(..8).unwrap_or(head);
     let branch = [
         format!("{BRANCH_PREFIX}{name}-detached"),
         format!("{BRANCH_PREFIX}{name}-detached-{short}"),
@@ -410,8 +411,8 @@ fn rescue(root: &Path, head: &str) -> anyhow::Result<String> {
     .find(|branch| !branch_exists(root, branch))
     .unwrap_or_else(|| {
         format!(
-            "{BRANCH_PREFIX}{name}-detached-{}",
-            &uuid::Uuid::new_v4().simple().to_string()[..8]
+            "{BRANCH_PREFIX}{name}-detached-{:08x}",
+            uuid::Uuid::new_v4().as_fields().0
         )
     });
     let output = git(root)

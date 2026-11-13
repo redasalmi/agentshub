@@ -6,7 +6,7 @@
 
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, LazyLock, Mutex};
+use std::sync::{Condvar, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use zbus::blocking::Connection;
@@ -63,13 +63,13 @@ pub struct Scope {
 pub struct Stopping(());
 
 pub fn stopping() -> Stopping {
-    *STOPPING.0.lock().unwrap() += 1;
+    *STOPPING.0.lock().unwrap_or_else(PoisonError::into_inner) += 1;
     Stopping(())
 }
 
 impl Drop for Stopping {
     fn drop(&mut self) {
-        *STOPPING.0.lock().unwrap() -= 1;
+        *STOPPING.0.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
         STOPPING.1.notify_all();
     }
 }
@@ -79,13 +79,18 @@ impl Drop for Stopping {
 /// Agents Hub is still running.
 pub fn wait_stopped() {
     let (count, stopped) = &STOPPING;
-    let _ = stopped.wait_timeout_while(count.lock().unwrap(), QUIT_TIMEOUT, |count| *count > 0);
+    let count = count.lock().unwrap_or_else(PoisonError::into_inner);
+    stopped
+        .wait_timeout_while(count, QUIT_TIMEOUT, |count| *count > 0)
+        .ok();
 }
 
 /// A pidfd for `pid`, which must not have been reaped yet. It goes on
 /// referring to that process once the pid belongs to another.
 pub fn pidfd(pid: u32) -> Option<OwnedFd> {
+    // SAFETY: pidfd_open takes no pointers.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0 as libc::c_uint) };
+    // SAFETY: a descriptor pidfd_open returns is new, and nothing else owns it.
     (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) })
 }
 

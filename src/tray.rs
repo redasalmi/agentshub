@@ -308,6 +308,8 @@ fn activate_with_token(window: &Window, token: String) -> anyhow::Result<()> {
     let connection = Connection::from_backend(unsafe {
         Backend::from_foreign_display(display.display.as_ptr().cast())
     });
+    // SAFETY: the pointer is GPUI's live wl_surface proxy, of the interface
+    // given.
     let surface = WlSurface::from_id(&connection, unsafe {
         ObjectId::from_ptr(WlSurface::interface(), surface.surface.as_ptr().cast())?
     })?;

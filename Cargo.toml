@@ -24,6 +24,27 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 zbus = "5"
 
+[lints.clippy]
+string_slice = "warn"
+unwrap_used = "warn"
+get_unwrap = "warn"
+panic = "warn"
+panic_in_result_fn = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+unchecked_time_subtraction = "warn"
+let_underscore_must_use = "warn"
+map_err_ignore = "warn"
+await_holding_refcell_ref = "warn"
+mem_forget = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+
 # Dependencies are built optimized even in dev builds: GPUI and the terminal
 # are far too slow unoptimized, and they rarely need a debugger.
 [profile.dev.package."*"]

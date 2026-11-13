@@ -1683,7 +1683,10 @@ impl Workspace {
     /// Starts an agent in a new chat of a project, in a new worktree of its
     /// own when `worktree` is set. An empty `title` leaves the chat titled
     /// after its agent's sessions.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPUI's context arguments count toward the limit"
+    )]
     fn new_chat(
         &mut self,
         project_id: i64,
@@ -1777,7 +1780,10 @@ impl Workspace {
     /// made for it, which goes again if the chat can't start. The chat is
     /// titled `title`, unless it's empty, and shown if `show` is set, and
     /// otherwise runs in the background.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPUI's context arguments count toward the limit"
+    )]
     fn add_chat(
         &mut self,
         project_id: i64,
@@ -2423,7 +2429,10 @@ impl Workspace {
     /// Tells the user what chat `id`'s agent did, once its session is read,
     /// so the alert has the chat's title and quotes the agent. `read` is the
     /// read already under way, if any.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPUI's context arguments count toward the limit"
+    )]
     fn alert(
         &mut self,
         id: i64,
@@ -2597,7 +2606,10 @@ impl Workspace {
 
     /// Adds a chat to the view, with the history of the sessions it has: with
     /// its terminal, or with why its CLI didn't start.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPUI's context arguments count toward the limit"
+    )]
     fn push_chat(
         &mut self,
         id: i64,

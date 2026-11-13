@@ -9,7 +9,7 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -277,7 +277,7 @@ impl Pty {
             let mut child = child;
             let success = loop {
                 {
-                    let mut pid = reaper_pid.lock().unwrap();
+                    let mut pid = reaper_pid.lock().unwrap_or_else(PoisonError::into_inner);
                     match child.try_wait() {
                         Ok(None) => {}
                         status => {
@@ -288,7 +288,11 @@ impl Pty {
                 }
                 match stop_rx.recv_timeout(EXIT_POLL) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        match reaper_pid.lock().unwrap().take() {
+                        match reaper_pid
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .take()
+                        {
                             #[cfg(unix)]
                             Some(pid) => kill_session(pid),
                             _ => {
@@ -353,6 +357,7 @@ pub fn wait_reaped(reaped: impl IntoIterator<Item = smol::channel::Receiver<()>>
 #[cfg(unix)]
 fn kill_session(pid: u32) {
     for group in session_groups(pid) {
+        // SAFETY: killpg takes no pointers.
         unsafe { libc::killpg(group, libc::SIGHUP) };
     }
     let deadline = Instant::now() + KILL_GRACE;
@@ -360,6 +365,7 @@ fn kill_session(pid: u32) {
         thread::sleep(KILL_POLL);
     }
     for group in session_groups(pid) {
+        // SAFETY: killpg takes no pointers.
         unsafe { libc::killpg(group, libc::SIGKILL) };
     }
 }
@@ -396,7 +402,9 @@ fn session_groups(session: u32) -> Vec<libc::pid_t> {
 /// Whether the child has exited, leaving it to be reaped.
 #[cfg(unix)]
 fn has_exited(pid: u32) -> bool {
+    // SAFETY: siginfo_t is plain data, for which all zeroes is a valid value.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a valid siginfo_t that outlives the call.
     let result = unsafe {
         libc::waitid(
             libc::P_PID,
@@ -406,6 +414,8 @@ fn has_exited(pid: u32) -> bool {
         )
     };
     // A child that is still running leaves `info` zeroed.
+    // SAFETY: waitid with WEXITED fills in `info` for a child, which sets
+    // si_pid, or leaves it zeroed.
     result != 0 || unsafe { info.si_pid() } != 0
 }
 
@@ -548,7 +558,10 @@ impl Terminal {
     /// Calls `f` with the CLI's pid, unless it has been reaped. The pid can't
     /// be reaped, and so can't belong to another process, until `f` returns.
     pub fn with_pid<T>(&self, f: impl FnOnce(u32) -> Option<T>) -> Option<T> {
-        self.pid.lock().unwrap().and_then(f)
+        self.pid
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .and_then(f)
     }
 
     pub fn resize(&mut self, size: GridSize) {
@@ -687,7 +700,9 @@ fn run(
     let mut dirty = false;
     let mut visible = true;
     let mut exiting = None;
-    let mut last_frame = Instant::now() - FRAME_INTERVAL;
+    let mut last_frame = Instant::now()
+        .checked_sub(FRAME_INTERVAL)
+        .unwrap_or_else(Instant::now);
 
     loop {
         let timeout = [
@@ -1221,12 +1236,11 @@ fn build_frame<'alloc>(
             }
 
             let wide = width == CellWide::Wide;
-            let extends_run = runs.last().is_some_and(|run| {
+            if let Some(run) = runs.last_mut().filter(|run| {
                 !wide && !run.wide && run.fg == fg && run.bg == bg && run.attrs == attrs
-            });
-            if extends_run {
+            }) {
                 run_text.push_str(&text);
-                runs.last_mut().unwrap().cells += 1;
+                run.cells += 1;
             } else {
                 if let Some(run) = runs.last_mut() {
                     run.text = std::mem::take(&mut run_text).into();

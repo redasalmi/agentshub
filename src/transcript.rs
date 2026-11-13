@@ -564,6 +564,10 @@ fn output_text(content: &Value) -> String {
 }
 
 /// Keeps the first and last `OUTPUT_KEEP` bytes of a long output.
+#[expect(
+    clippy::string_slice,
+    reason = "`head` and `tail` are rounded to char boundaries"
+)]
 fn cut(text: String) -> (String, bool) {
     if text.len() <= 2 * OUTPUT_KEEP {
         return (text, false);

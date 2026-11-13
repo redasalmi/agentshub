@@ -389,7 +389,10 @@ pub fn hold(chat: i64, cx: &mut App) -> u64 {
 /// Lets the user know `chat`'s agent did what `status` says, which made the
 /// `kind` of alert given, after a turn that `took` this long if it ended.
 /// `body` says which chat it is. Nothing is sent unless `hold` still is.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GPUI's context arguments count toward the limit"
+)]
 pub fn alert(
     chat: i64,
     hold: u64,
@@ -495,6 +498,7 @@ fn call(payload: &serde_json::Value) -> String {
 }
 
 /// `text` on one line, cut short at `DETAIL_CHARS`.
+#[expect(clippy::string_slice, reason = "`at` comes from `char_indices`")]
 fn clip(text: &str) -> String {
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     match line.char_indices().nth(DETAIL_CHARS) {
@@ -967,8 +971,8 @@ fn play_blocking(kind: Alert) -> anyhow::Result<()> {
     sink.log_on_drop(false);
     let player = rodio::Player::connect_new(sink.mixer());
     player.append(rodio::buffer::SamplesBuffer::new(
-        NonZero::new(1).unwrap(),
-        NonZero::new(SAMPLE_RATE).unwrap(),
+        const { NonZero::new(1).unwrap() },
+        const { NonZero::new(SAMPLE_RATE).unwrap() },
         chime(kind),
     ));
     player.sleep_until_end();
