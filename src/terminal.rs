@@ -198,7 +198,7 @@ pub struct Pty {
     /// Asks for the CLI to be killed, without going through the terminal
     /// thread, which blocks while the CLI isn't reading its input.
     stop: mpsc::Sender<()>,
-    /// Closes once the CLI has been reaped.
+    /// Closes once the CLI has been reaped, and nothing is left in its scope.
     reaped: smol::channel::Receiver<()>,
 }
 
@@ -254,24 +254,13 @@ impl Pty {
         let (reaped_tx, reaped) = smol::channel::bounded::<()>(1);
         let exit_tx = tx.clone();
         let reaper_pid = pid.clone();
-        // The CLI's scope is stopped once the reaper is done, on a thread of
-        // its own so that a slow systemd never holds up the reaper. The CLI
-        // is only moved there after it starts, so what it starts in the
-        // meantime stays out of the scope.
+        // The CLI's scope is stopped once the reaper is done, and the CLI only
+        // counts as reaped once nothing is left in it: what it started can go
+        // on writing in its folder until then. The CLI is only moved there
+        // after it starts, so what it starts in the meantime stays out of the
+        // scope.
         #[cfg(target_os = "linux")]
-        let reaper_done = {
-            let (reaper_done, done) = mpsc::channel::<scope::Stopping>();
-            let program = program.to_owned();
-            thread::spawn(move || {
-                let scope = pidfd.and_then(|pidfd| scope::start(&program, pidfd));
-                // Held until the scope is stopped, which quitting waits for.
-                let _stopping = done.recv();
-                if let Some(scope) = scope {
-                    scope.stop();
-                }
-            });
-            reaper_done
-        };
+        let reaper_done = scope::watch(program.to_owned(), pidfd, reaped_tx.clone());
         thread::spawn(move || {
             let _reaped_tx = reaped_tx;
             let mut child = child;
@@ -308,10 +297,8 @@ impl Pty {
                 }
             };
             exit_tx.send(Msg::Exited(success)).ok();
-            // Before the CLI counts as reaped, so that quitting once it is
-            // waits for its scope to be stopped too.
             #[cfg(target_os = "linux")]
-            reaper_done.send(scope::stopping()).ok();
+            reaper_done.send(()).ok();
         });
 
         let failed_tx = updates_tx.clone();
@@ -640,8 +627,8 @@ impl Terminal {
         self.tx.send(Msg::Copy).ok();
     }
 
-    /// Kills the CLI. The returned channel closes once it has been reaped,
-    /// which `wait_reaped` waits for.
+    /// Kills the CLI. The returned channel closes once it has been reaped, and
+    /// nothing is left in its scope, which `wait_reaped` waits for.
     pub fn shutdown(&self) -> smol::channel::Receiver<()> {
         self.tx.send(Msg::Shutdown).ok();
         self.stop.send(()).ok();
@@ -2010,6 +1997,76 @@ mod tests {
         let pty = Pty::spawn("true", &[], &[], Path::new("/"), colors()).unwrap();
         pty.reaped.recv_blocking().unwrap_err();
         assert_eq!(*pty.pid.lock().unwrap(), None);
+    }
+
+    /// The pid a CLI prints, which only a frame shows.
+    #[cfg(target_os = "linux")]
+    fn printed_pid(pty: &Pty) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "no frame with the pid");
+            let Ok(Update::Frame(frame)) = smol::block_on(pty.updates.recv()) else {
+                continue;
+            };
+            if let Ok(pid) = row_text(&frame).trim().parse::<u32>() {
+                break pid;
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn gone(pid: u32) -> bool {
+        !fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !stat.contains(") Z "))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn counts_as_reaped_once_what_left_the_session_is_gone() {
+        if !scope::available() {
+            eprintln!("skipped: systemd can't put the CLI in a scope");
+            return;
+        }
+        // What it leaves ignores SIGTERM, so it lasts until systemd kills it.
+        let pty = Pty::spawn(
+            "sh",
+            &[
+                "-c".into(),
+                "sleep 0.2; setsid sh -c \"trap '' TERM; exec sleep 100\" & echo $!; sleep 0.1"
+                    .into(),
+            ],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        let pid = printed_pid(&pty);
+        pty.reaped.recv_blocking().unwrap_err();
+        assert!(gone(pid), "{pid} outlived the CLI");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "stops every scope of the tests running with it: cargo test -- --ignored"]
+    fn quitting_stops_the_scope_of_a_cli_not_reaped_yet() {
+        if !scope::available() {
+            eprintln!("skipped: systemd can't put the CLI in a scope");
+            return;
+        }
+        let pty = Pty::spawn(
+            "sh",
+            &[
+                "-c".into(),
+                "sleep 0.2; setsid sleep 100 & echo $!; exec sleep 100".into(),
+            ],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+        let pid = printed_pid(&pty);
+        scope::stop_all();
+        scope::wait_stopped();
+        assert!(gone(pid), "{pid} outlived quitting");
     }
 
     #[cfg(target_os = "linux")]

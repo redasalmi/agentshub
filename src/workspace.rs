@@ -666,7 +666,10 @@ impl Workspace {
                 .collect();
             terminal::wait_reaped(reaped);
             #[cfg(target_os = "linux")]
-            scope::wait_stopped();
+            {
+                scope::stop_all();
+                scope::wait_stopped();
+            }
             worktree::abandon(std::mem::take(&mut this.checkouts));
             // The worktrees of deleted chats, whose tasks won't run anymore.
             // One being removed already is waited for.
