@@ -103,12 +103,7 @@ impl TerminalView {
         }
     }
 
-    fn scroll_wheel(
-        &mut self,
-        event: &ScrollWheelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn scroll_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let line_height = cell_size(window, cx).height;
         if event.modifiers.control {
             // A wheel's notch is one step, however many lines it scrolls; a
@@ -427,7 +422,7 @@ impl Render for TerminalView {
             .py_2()
             .bg(background)
             .on_key_down(cx.listener(Self::key_down))
-            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            .on_scroll(cx.listener(Self::scroll_wheel))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .on_any_mouse_down(cx.listener(Self::mouse_down))

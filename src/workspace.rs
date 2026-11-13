@@ -177,11 +177,16 @@ pub fn init(cx: &mut App) {
         // which they undo with.
         KeyBinding::new("ctrl-?", ShowShortcuts, None),
     ]);
-    for n in 0..NUMBERED {
-        let digit = n + 1;
+    let open_chat: [&str; NUMBERED] = [
+        "alt-1", "alt-2", "alt-3", "alt-4", "alt-5", "alt-6", "alt-7", "alt-8", "alt-9",
+    ];
+    let select_project: [&str; NUMBERED] = [
+        "ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8", "ctrl-9",
+    ];
+    for (n, (open_chat, select_project)) in open_chat.into_iter().zip(select_project).enumerate() {
         cx.bind_keys([
-            KeyBinding::new(&format!("alt-{digit}"), OpenChatAt(n), None),
-            KeyBinding::new(&format!("ctrl-{digit}"), SelectProjectAt(n), None),
+            KeyBinding::new(open_chat, OpenChatAt(n), None),
+            KeyBinding::new(select_project, SelectProjectAt(n), None),
         ]);
     }
 }
