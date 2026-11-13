@@ -209,11 +209,11 @@ pub fn path() -> Option<PathBuf> {
 /// keeps a second Agents Hub off it, and returns that lock with it, and what
 /// became of a database the user imported before the restart. The error says
 /// why Agents Hub can't be used.
-pub fn open_locked() -> anyhow::Result<(Db, Option<fs::File>, Option<Imported>)> {
+pub fn open_locked() -> anyhow::Result<(Db, fs::File, Option<Imported>)> {
+    let path = path().context("There is no home folder to keep the database in.")?;
     // The lock comes first: a second instance must not migrate the database
     // under the first one, or replace it.
-    let lock = instance_lock()?;
-    let path = path().context("There is no home folder to keep the database in.")?;
+    let lock = lock_dir(path.parent().unwrap_or(&path))?;
     let imported = take_import(&path);
     let dir = path.parent().unwrap_or(&path).display().to_string();
     let db = Db::open(&path)
@@ -221,42 +221,27 @@ pub fn open_locked() -> anyhow::Result<(Db, Option<fs::File>, Option<Imported>)>
     Ok((db, lock, imported))
 }
 
-/// Takes the process-wide lock, in the runtime folder when it exists, then
-/// beside the database, then in the temp folder. The kernel releases it if
-/// this process dies. Without any of them, Agents Hub still starts, unguarded.
-fn instance_lock() -> anyhow::Result<Option<fs::File>> {
-    let name = "agentshub.lock";
-    let mut paths = Vec::new();
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        paths.push(PathBuf::from(dir).join(name));
-    }
-    if let Some(dir) = path().and_then(|path| path.parent().map(PathBuf::from)) {
-        paths.push(dir.join(name));
-    }
-    paths.push(std::env::temp_dir().join(name));
-
-    for path in paths {
-        let Ok(file) = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(path)
-        else {
-            continue;
-        };
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd as _;
-            // SAFETY: the descriptor stays open for the life of `file`, and
-            // flock needs nothing else from it.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                bail!("Agents Hub is already running.");
-            }
+/// Takes the lock that keeps a second Agents Hub off the database in `dir`.
+/// It is kept beside the database, so two copies keep each other out exactly
+/// when they would share one. The kernel releases it if this process dies.
+fn lock_dir(dir: &Path) -> anyhow::Result<fs::File> {
+    fs::create_dir_all(dir)
+        .with_context(|| format!("Couldn't create {} to keep the database in", dir.display()))?;
+    restrict(dir, 0o700);
+    let path = dir.join("agentshub.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("Couldn't open the lock file {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => bail!("Agents Hub is already running."),
+        Err(fs::TryLockError::Error(err)) => {
+            Err(err).with_context(|| format!("Couldn't lock {}", path.display()))
         }
-        return Ok(Some(file));
     }
-    eprintln!("can't write the lock file; another instance would not be kept out");
-    Ok(None)
 }
 
 /// Seconds since the Unix epoch, which is how the database keeps time.
@@ -1787,6 +1772,18 @@ mod tests {
                 [],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn keeps_a_second_copy_off_the_same_database_only() {
+        let base = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
+        let first = lock_dir(&base.join("one")).unwrap();
+        let err = lock_dir(&base.join("one")).unwrap_err();
+        assert_eq!(err.to_string(), "Agents Hub is already running.");
+        let _other = lock_dir(&base.join("two")).unwrap();
+        drop(first);
+        lock_dir(&base.join("one")).unwrap();
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

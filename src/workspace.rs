@@ -477,7 +477,7 @@ impl Chat {
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (db, lock, imported, broken) = match db::open_locked() {
-            Ok((db, lock, imported)) => (db, lock, imported, None),
+            Ok((db, lock, imported)) => (db, Some(lock), imported, None),
             Err(err) => {
                 eprintln!("{err:#}");
                 (
