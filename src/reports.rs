@@ -2,7 +2,7 @@
 //! they switch to another one (`/clear`, `/new`, `/resume`), by appending to a
 //! file per terminal: Claude through a SessionStart hook, pi through an
 //! extension. Codex only runs hooks the user has reviewed, so its session is
-//! found from the files it keeps open instead (see `sessions::codex_session_of`).
+//! found from the files it keeps open instead (see `sessions::codex_open_sessions`).
 
 use std::collections::HashMap;
 use std::fs::{self, File};

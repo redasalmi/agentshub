@@ -9,7 +9,7 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -288,11 +288,13 @@ impl Pty {
                 }
                 match stop_rx.recv_timeout(EXIT_POLL) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        match reaper_pid
+                        // Taken in a statement of its own, so the lock isn't
+                        // held through the kill.
+                        let pid = reaper_pid
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
-                            .take()
-                        {
+                            .take();
+                        match pid {
                             #[cfg(unix)]
                             Some(pid) => kill_session(pid),
                             _ => {
@@ -419,12 +421,37 @@ fn has_exited(pid: u32) -> bool {
     result != 0 || unsafe { info.si_pid() } != 0
 }
 
+/// A CLI's pid, which can be used on any thread.
+#[derive(Clone)]
+pub struct Pid(Arc<Mutex<Option<u32>>>);
+
+impl Pid {
+    /// Calls `f` with the pid, unless it has been reaped. The pid can't be
+    /// reaped, and so can't belong to another process, until `f` returns.
+    pub fn with<T>(&self, f: impl FnOnce(u32) -> Option<T>) -> Option<T> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .and_then(f)
+    }
+
+    /// Whether the pid may not be reaped yet, without waiting for whoever
+    /// holds it, which can be a lookup through the process's files.
+    pub fn may_be_running(&self) -> bool {
+        match self.0.try_lock() {
+            Ok(pid) => pid.is_some(),
+            Err(TryLockError::Poisoned(err)) => err.into_inner().is_some(),
+            Err(TryLockError::WouldBlock) => true,
+        }
+    }
+}
+
 pub struct Terminal {
     tx: mpsc::Sender<Msg>,
     frame: Option<Arc<Frame>>,
     size: Option<GridSize>,
     exited: bool,
-    pid: Arc<Mutex<Option<u32>>>,
+    pid: Pid,
     stop: mpsc::Sender<()>,
     reaped: smol::channel::Receiver<()>,
     input: Cell<Input>,
@@ -542,7 +569,7 @@ impl Terminal {
             frame: None,
             size: None,
             exited: false,
-            pid: pty.pid,
+            pid: Pid(pty.pid),
             stop: pty.stop,
             reaped: pty.reaped,
             input: Cell::new(Input::Untouched),
@@ -555,13 +582,13 @@ impl Terminal {
         self.frame.clone()
     }
 
-    /// Calls `f` with the CLI's pid, unless it has been reaped. The pid can't
-    /// be reaped, and so can't belong to another process, until `f` returns.
+    /// Calls `f` with the CLI's pid, as `Pid::with` does.
     pub fn with_pid<T>(&self, f: impl FnOnce(u32) -> Option<T>) -> Option<T> {
-        self.pid
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .and_then(f)
+        self.pid.with(f)
+    }
+
+    pub fn pid(&self) -> Pid {
+        self.pid.clone()
     }
 
     pub fn resize(&mut self, size: GridSize) {
@@ -1954,6 +1981,35 @@ mod tests {
             assert!(Instant::now() < deadline, "{pid} outlived the CLI");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn says_a_pid_in_use_may_be_running_without_waiting() {
+        let pid = Pid(Arc::new(Mutex::new(Some(1))));
+        let (held_tx, held) = mpsc::channel();
+        let (release_tx, release) = mpsc::channel::<()>();
+        let holder = thread::spawn({
+            let pid = pid.clone();
+            move || {
+                pid.with(|_| {
+                    held_tx.send(()).unwrap();
+                    release.recv().ok()
+                })
+            }
+        });
+        held.recv().unwrap();
+        assert!(pid.may_be_running());
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        *pid.0.lock().unwrap() = None;
+        assert!(!pid.may_be_running());
+    }
+
+    #[test]
+    fn forgets_the_pid_once_the_cli_is_reaped() {
+        let pty = Pty::spawn("true", &[], &[], Path::new("/"), colors()).unwrap();
+        pty.reaped.recv_blocking().unwrap_err();
+        assert_eq!(*pty.pid.lock().unwrap(), None);
     }
 
     #[cfg(target_os = "linux")]

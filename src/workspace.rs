@@ -622,13 +622,16 @@ impl Workspace {
             }
             // Discover Codex's last session before its process disappears.
             // A queued watcher callback cannot run once we're released.
+            let codex_dir = sessions::codex_sessions_dir();
             for chat in &this.chats {
                 if chat.agent == Agent::Codex
                     && let Some(terminal) = &chat.terminal
-                    && let Some(path) = terminal
+                    && let Some(dir) = &codex_dir
+                    && let Some(files) = terminal
                         .terminal
                         .read(cx)
-                        .with_pid(sessions::codex_session_of)
+                        .with_pid(|pid| sessions::codex_open_sessions(pid, dir))
+                    && let Some(path) = sessions::codex_session_in(files)
                     && let Some(agent_id) = transcript::session_id(chat.agent, &path)
                 {
                     match this
@@ -2156,9 +2159,10 @@ impl Workspace {
             let Some(terminal) = &chat.terminal else {
                 continue;
             };
-            let Some(pid) = terminal.terminal.read(cx).with_pid(Some) else {
+            let pid = terminal.terminal.read(cx).pid();
+            if !pid.may_be_running() {
                 continue;
-            };
+            }
             chat.codex_lookup = lookup;
             chat.codex_pending = true;
             chats.push((chat.id, chat.report.clone(), pid));
@@ -2174,7 +2178,12 @@ impl Workspace {
                 chats
                     .into_iter()
                     .filter_map(|(id, report, pid)| {
-                        let path = sessions::codex_session_of(pid)?;
+                        let dir = sessions::codex_sessions_dir()?;
+                        // Under the pid's lock, so the CLI can't be reaped,
+                        // and its pid go to another process, while its open
+                        // files are listed. Only that is done under it.
+                        let files = pid.with(|pid| sessions::codex_open_sessions(pid, &dir))?;
+                        let path = sessions::codex_session_in(files)?;
                         let agent_id = transcript::session_id(Agent::Codex, &path)?;
                         Some((id, report, path, agent_id))
                     })
@@ -2833,10 +2842,12 @@ impl Workspace {
             .as_ref()
             .filter(|_| chat.agent == Agent::Codex)
             .and_then(|terminal| {
-                terminal
+                let dir = sessions::codex_sessions_dir()?;
+                let files = terminal
                     .terminal
                     .read(cx)
-                    .with_pid(sessions::codex_session_of)
+                    .with_pid(|pid| sessions::codex_open_sessions(pid, &dir))?;
+                sessions::codex_session_in(files)
             })
             .and_then(|path| Some((transcript::session_id(Agent::Codex, &path)?, path)));
         // A Codex that exited, or is exiting, while a lookup was under way
@@ -3153,6 +3164,8 @@ impl Workspace {
             if !self.shells.contains_key(&cwd) {
                 let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
                 let colors = appearance::terminal_colors(cx);
+                // Like a CLI, the shell gets a scope of its own, so what it
+                // leaves running, `nohup` jobs included, stops once it exits.
                 let pty = match Pty::spawn(&program, &[], &[], &cwd, colors) {
                     Ok(pty) => pty,
                     Err(err) => {

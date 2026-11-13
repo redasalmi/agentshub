@@ -33,22 +33,32 @@ fn codex_index() -> Option<PathBuf> {
     Some(codex_home()?.join(CODEX_INDEX))
 }
 
-/// The Codex session a process is in: of the session files it keeps open, the
-/// one written to last, leaving out subagent threads. Codex keeps the
-/// sessions it switched away from open too. Resolve npm's Node launcher to its
-/// native child first, then inspect only that process: a `codex exec` it
-/// starts has a chat of its own.
+/// The session files a Codex process keeps open, including the sessions it
+/// switched away from. Resolve npm's Node launcher to its native child first,
+/// then inspect only that process: a `codex exec` it starts has a chat of its
+/// own. It only reads under /proc, so it is quick enough to run while the
+/// process is kept from being reaped (see `terminal::Pid`).
 #[cfg(target_os = "linux")]
-pub fn codex_session_of(pid: u32) -> Option<PathBuf> {
-    let dir = codex_sessions_dir()?;
+pub fn codex_open_sessions(pid: u32, dir: &Path) -> Option<Vec<PathBuf>> {
     let process = codex_process_dir(&PathBuf::from(format!("/proc/{pid}")))?;
-    let mut files: Vec<(SystemTime, PathBuf)> = fs::read_dir(process.join("fd"))
+    Some(
+        fs::read_dir(process.join("fd"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|fd| fs::read_link(fd.path()).ok())
+            .filter(|path| path.starts_with(dir))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .collect(),
+    )
+}
+
+/// Of the session files a Codex process keeps open, the one written to last,
+/// leaving out subagent threads.
+#[cfg(target_os = "linux")]
+pub fn codex_session_in(files: Vec<PathBuf>) -> Option<PathBuf> {
+    let mut files: Vec<(SystemTime, PathBuf)> = files
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|fd| fs::read_link(fd.path()).ok())
-        .filter(|path| path.starts_with(&dir))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .filter_map(|path| Some((fs::metadata(&path).ok()?.modified().ok()?, path)))
         .collect();
     // Newest first, so telling subagent threads apart opens one file, not all
@@ -62,7 +72,12 @@ pub fn codex_session_of(pid: u32) -> Option<PathBuf> {
 
 /// Codex keeps its sessions in files only Linux exposes the way this needs.
 #[cfg(not(target_os = "linux"))]
-pub fn codex_session_of(_: u32) -> Option<PathBuf> {
+pub fn codex_open_sessions(_: u32, _: &Path) -> Option<Vec<PathBuf>> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn codex_session_in(_: Vec<PathBuf>) -> Option<PathBuf> {
     None
 }
 
