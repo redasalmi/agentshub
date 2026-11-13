@@ -3,11 +3,8 @@
 //! future. Writes run one at a time on one thread, in the order they were
 //! asked for. Reads run beside them, and beside each other, each on a
 //! connection of its own, and each sees every write asked for before it.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "nothing reads or writes through it yet")
-)]
 
+use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -16,7 +13,57 @@ use std::thread;
 use anyhow::Context as _;
 use smol::channel::{self, Sender};
 
-use crate::db::{Db, Project};
+use crate::db::{self, Db, Imported, Project};
+use crate::settings::Settings;
+
+/// The database as startup opened it.
+pub struct Opened {
+    pub store: Store,
+    /// The same database, for what doesn't go through the store.
+    pub db: Db,
+    /// Keeps a second Agents Hub off the database while it is held.
+    pub lock: Option<fs::File>,
+    pub imported: Option<Imported>,
+    pub settings: Settings,
+    /// Why the database can't be used, in which case an empty one in memory
+    /// stands in for it.
+    pub broken: Option<String>,
+}
+
+/// Opens the database where it lives, with the settings saved in it. Taking
+/// the lock, finishing an import and migrating, which first backs the
+/// database up, can each take a while, so they run on a thread of their own.
+pub async fn open() -> Opened {
+    let (store, db, lock, imported, broken) = smol::unblock(|| {
+        let opened = db::open_locked().and_then(|(db, lock, imported)| {
+            let store = Store::new(db.clone()).context("Couldn't read the database")?;
+            Ok((store, db, lock, imported))
+        });
+        match opened {
+            Ok((store, db, lock, imported)) => (store, db, Some(lock), imported, None),
+            Err(err) => {
+                eprintln!("{err:#}");
+                let db = Db::open_in_memory().expect("SQLite opens in memory");
+                let store = Store::new(db.clone()).expect("the database's threads start");
+                (store, db, None, None, Some(format!("{err:#}")))
+            }
+        }
+    })
+    .await;
+    let settings = store
+        .settings()
+        .await
+        .inspect_err(|err| eprintln!("can't read the settings: {err:#}"))
+        .unwrap_or_default();
+    Opened {
+        store,
+        db,
+        lock,
+        imported,
+        settings,
+        broken,
+    }
+}
 
 /// Something asked of the database, which sends its own answer.
 type Job = Box<dyn FnOnce(&Db) + Send>;
@@ -77,6 +124,11 @@ impl Store {
             reads,
             order,
         })
+    }
+
+    /// The saved settings. One that can't be read has its default.
+    pub fn settings(&self) -> impl Future<Output = anyhow::Result<Settings>> + use<> {
+        self.read(|db| Ok(Settings::load(db)))
     }
 
     /// The projects, in the order the user put them in, with their chats.

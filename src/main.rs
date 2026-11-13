@@ -72,18 +72,33 @@ fn main() {
         workspace::init(cx);
         // The tray decides whether closing the window quits.
         cx.set_quit_mode(QuitMode::Explicit);
-        let workspace = open_window(None, None, cx);
-        alerts::init(&workspace, cx);
-        appearance::watch_desktop_motion(cx);
-        tray::init(workspace, cx);
-        instance::serve(instance, cx);
+        // The window shows what is in the database, so it waits for it.
+        cx.spawn(async move |cx| {
+            let opened = store::open().await;
+            cx.update(|cx| {
+                let workspace = open_window(Contents::New(Box::new(opened)), None, cx);
+                alerts::init(&workspace, cx);
+                appearance::watch_desktop_motion(cx);
+                tray::init(workspace, cx);
+                instance::serve(instance, cx);
+            });
+        })
+        .detach();
     });
 }
 
-/// Opens the window on `workspace`, or on a new one the first time, with the
-/// `bounds` it was closed with, if any.
+/// What a window opens on.
+pub enum Contents {
+    /// The workspace of the window that was closed to the tray.
+    Workspace(Entity<Workspace>),
+    /// A new workspace, on the database startup opened.
+    New(Box<store::Opened>),
+}
+
+/// Opens the window on `contents`, with the `bounds` it was closed with, if
+/// any.
 pub fn open_window(
-    workspace: Option<Entity<Workspace>>,
+    contents: Contents,
     bounds: Option<WindowBounds>,
     cx: &mut App,
 ) -> Entity<Workspace> {
@@ -112,8 +127,8 @@ pub fn open_window(
         window
             .observe_window_appearance(appearance::follow_system)
             .detach();
-        let workspace = match workspace {
-            Some(workspace) => {
+        let workspace = match contents {
+            Contents::Workspace(workspace) => {
                 workspace.update(cx, |workspace, cx| {
                     workspace.set_window(window);
                     workspace.set_hidden(false, cx);
@@ -121,9 +136,9 @@ pub fn open_window(
                 });
                 workspace
             }
-            None => {
+            Contents::New(opened) => {
                 appearance::init(cx);
-                let workspace = cx.new(|cx| Workspace::new(window, cx));
+                let workspace = cx.new(|cx| Workspace::new(*opened, window, cx));
                 // The shortcuts reach the workspace through the focus.
                 workspace.update(cx, |workspace, cx| workspace.focus_chat(window, cx));
                 workspace

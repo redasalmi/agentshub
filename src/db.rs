@@ -386,10 +386,6 @@ impl Db {
 
     /// Another handle on the database, whose reads have a connection of their
     /// own. In memory, there is only one connection to share.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "nothing reads through the store yet")
-    )]
     pub fn reader(&self) -> anyhow::Result<Self> {
         let read = match &self.path {
             Some(path) => Some(Arc::new(Mutex::new(read_only(path)?))),

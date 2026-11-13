@@ -243,7 +243,7 @@ pub fn show(token: Option<String>, cx: &mut App) {
             .ok();
     } else if let Some(workspace) = cx.global::<Tray>().workspace.clone() {
         let bounds = cx.global::<Tray>().bounds;
-        crate::open_window(Some(workspace), bounds, cx);
+        crate::open_window(crate::Contents::Workspace(workspace), bounds, cx);
         if let (Some(token), Some(window)) = (token, cx.windows().first()) {
             window
                 .update(cx, |_, window, _| activate_with_token(window, token))

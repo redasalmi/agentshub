@@ -46,6 +46,7 @@ use crate::settings::{
 };
 use crate::sidebar::{self, Filter, Held, NUMBERED, Sidebar, SidebarEvent, Tone, home_relative};
 use crate::status::Status;
+use crate::store::{Opened, Store};
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::{self, TerminalView};
 use crate::transcript;
@@ -196,6 +197,8 @@ pub fn init(cx: &mut App) {
 pub struct Workspace {
     sidebar: Entity<Sidebar>,
     db: Db,
+    #[expect(dead_code, reason = "nothing reads or writes through it yet")]
+    store: Store,
     /// Open chats, including exited terminals and history whose CLI couldn't
     /// start. Running processes keep running while another chat is shown,
     /// until the user closes them.
@@ -507,19 +510,15 @@ impl Chat {
 }
 
 impl Workspace {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (db, lock, imported, broken) = match db::open_locked() {
-            Ok((db, lock, imported)) => (db, Some(lock), imported, None),
-            Err(err) => {
-                eprintln!("{err:#}");
-                (
-                    Db::open_in_memory().expect("SQLite opens in memory"),
-                    None,
-                    None,
-                    Some(format!("{err:#}").into()),
-                )
-            }
-        };
+    pub fn new(opened: Opened, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Opened {
+            store,
+            db,
+            lock,
+            imported,
+            settings,
+            broken,
+        } = opened;
         // Said once the window is up, since its notifications aren't yet.
         if let Some(imported) = imported {
             let message = match imported {
@@ -540,7 +539,7 @@ impl Workspace {
             .detach();
         }
 
-        cx.set_global(Settings::load(&db));
+        cx.set_global(settings);
         appearance::apply_motion(cx);
         let sidebar = cx.new(Sidebar::new);
         let sidebar_events =
@@ -754,6 +753,7 @@ impl Workspace {
         let mut this = Self {
             sidebar,
             db,
+            store,
             chats: Vec::new(),
             active: None,
             requested: None,
@@ -775,7 +775,7 @@ impl Workspace {
             palette_start: None,
             _theme: theme,
             _focus_lost: focus_lost,
-            broken,
+            broken: broken.map(SharedString::from),
             reading: Vec::new(),
             checkouts: Vec::new(),
             closed_all: 0,
