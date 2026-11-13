@@ -8,8 +8,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::Value;
 
-use crate::db::{Db, Item, Session};
+use crate::db::{Item, Session};
 use crate::sidebar::age;
+use crate::store::Store;
 use crate::transcript::Kind;
 
 const ROW_HEIGHT: Pixels = px(32.);
@@ -23,7 +24,7 @@ const INPUT_CHARS: usize = 200;
 const ITEMS_PAGE: usize = 100;
 
 pub struct History {
-    db: Db,
+    store: Store,
     chat_id: i64,
     sessions: Vec<Earlier>,
     /// Whether the list shows. The chat's header has the button that opens
@@ -39,6 +40,10 @@ pub struct History {
     errors: HashMap<i64, SharedString>,
     /// The reasoning and tool outputs that are expanded, by item.
     shown: HashSet<i64>,
+    /// The expanded sessions to reload once the sessions are listed, and the
+    /// listing under way, which a newer one replaces.
+    reload: HashSet<i64>,
+    _listing: Option<Task<()>>,
 }
 
 struct Earlier {
@@ -49,9 +54,9 @@ struct Earlier {
 }
 
 impl History {
-    pub fn new(db: Db, chat_id: i64, open: bool) -> Self {
+    pub fn new(store: Store, chat_id: i64, open: bool) -> Self {
         Self {
-            db,
+            store,
             chat_id,
             sessions: Vec::new(),
             open,
@@ -60,6 +65,8 @@ impl History {
             more: HashSet::new(),
             errors: HashMap::new(),
             shown: HashSet::new(),
+            reload: HashSet::new(),
+            _listing: None,
         }
     }
 
@@ -67,7 +74,22 @@ impl History {
     /// in, and reloads the expanded ones whose transcript read, in `changed`,
     /// found something.
     pub fn refresh(&mut self, current: Option<i64>, changed: &[i64], cx: &mut Context<Self>) {
-        let sessions = match self.db.sessions(self.chat_id) {
+        self.reload.extend(changed);
+        let sessions = self.store.sessions(self.chat_id);
+        self._listing = Some(cx.spawn(async move |this, cx| {
+            let sessions = sessions.await;
+            this.update(cx, |this, cx| this.list(sessions, current, cx))
+                .ok();
+        }));
+    }
+
+    fn list(
+        &mut self,
+        sessions: anyhow::Result<Vec<Session>>,
+        current: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        let sessions = match sessions {
             Ok(sessions) => sessions,
             Err(err) => {
                 eprintln!("can't list the sessions of chat {}: {err}", self.chat_id);
@@ -89,9 +111,9 @@ impl History {
         self.limits.retain(|id, _| self.expanded.contains_key(id));
         self.more.retain(|id| self.expanded.contains_key(id));
         self.errors.retain(|id, _| self.expanded.contains_key(id));
-        for id in changed {
-            if self.expanded.contains_key(id) {
-                self.load(*id, cx);
+        for id in std::mem::take(&mut self.reload) {
+            if self.expanded.contains_key(&id) {
+                self.load(id, cx);
             }
         }
         cx.notify();
@@ -135,17 +157,12 @@ impl History {
     /// session is the first time its transcript has to be read since the chat
     /// opened, so the read and the load happen together.
     fn load(&mut self, id: i64, cx: &mut Context<Self>) {
-        let db = self.db.clone();
+        let store = self.store.clone();
         let limit = self.limits.get(&id).copied().unwrap_or(ITEMS_PAGE);
         self.expanded.entry(id).or_default();
         cx.spawn(async move |this, cx| {
-            let (read, items) = cx
-                .background_executor()
-                .spawn(async move {
-                    let read = crate::transcript::read(&db, id);
-                    (read, db.items(id, limit))
-                })
-                .await;
+            let read = store.read_transcript(id).await;
+            let items = store.items(id, limit).await;
             this.update(cx, |this, cx| {
                 if !this.expanded.contains_key(&id) {
                     return;

@@ -15,7 +15,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::agent::Agent;
-use crate::db::Db;
+use crate::db::{Db, Transcript};
 use crate::sessions;
 
 const TITLE_CHARS: usize = 80;
@@ -117,25 +117,15 @@ pub struct Read {
 }
 
 /// Reads the lines added to a session's transcript since the last read, and
-/// says whether the history shows anything new.
+/// says whether the history shows anything new. The store reads them one
+/// session at a time (see `Store::read_transcript`).
+#[cfg(test)]
 pub fn read(db: &Db, session_id: i64) -> anyhow::Result<bool> {
-    let _reading = db.lock_reads();
     let Some(transcript) = db.transcript(session_id)? else {
         return Ok(false);
     };
-    // What an older parser kept is replaced, from the start of the file.
-    let outdated = transcript.parser < PARSER;
-    let offset = if outdated { 0 } else { transcript.offset };
-    match Read::file(
-        transcript.agent,
-        &transcript.agent_id,
-        &transcript.path,
-        offset,
-    ) {
-        Ok(mut read) => {
-            read.reset |= outdated && transcript.offset > 0;
-            Ok(db.save_read_state(session_id, &read)?)
-        }
+    match parse(&transcript) {
+        Ok(read) => Ok(db.save_read_state(session_id, &read)?),
         // Its items stay.
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             db.set_missing(session_id)?;
@@ -143,6 +133,21 @@ pub fn read(db: &Db, session_id: i64) -> anyhow::Result<bool> {
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// The lines added to a transcript since `transcript` says it was last read.
+pub fn parse(transcript: &Transcript) -> io::Result<Read> {
+    // What an older parser kept is replaced, from the start of the file.
+    let outdated = transcript.parser < PARSER;
+    let offset = if outdated { 0 } else { transcript.offset };
+    let mut read = Read::file(
+        transcript.agent,
+        &transcript.agent_id,
+        &transcript.path,
+        offset,
+    )?;
+    read.reset |= outdated && transcript.offset > 0;
+    Ok(read)
 }
 
 /// The sessions whose transcripts hold something the database doesn't, which

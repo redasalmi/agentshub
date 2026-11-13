@@ -2,8 +2,8 @@
 //! through, and a trimmed copy of those sessions (see `transcript`), in SQLite.
 //!
 //! Writes go through one connection, and reads have a connection of their own,
-//! so that the UI doesn't wait on a transcript read's transaction. Transcript
-//! reads run one at a time (see `Db::lock_reads`).
+//! so that the UI doesn't wait on a transcript read's transaction. The store
+//! (see `store`) runs them on threads of its own.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -251,6 +251,7 @@ pub fn now() -> i64 {
         .map_or(0, |since| since.as_secs() as i64)
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Project {
     pub id: i64,
     pub path: PathBuf,
@@ -260,6 +261,7 @@ pub struct Project {
     pub chats: Vec<Chat>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Chat {
     pub id: i64,
     pub project_id: i64,
@@ -325,7 +327,6 @@ pub struct Db {
     write: Arc<Mutex<Connection>>,
     /// Reads get their own connection. In memory, there is only one.
     read: Option<Arc<Mutex<Connection>>>,
-    reads: Arc<Mutex<()>>,
     /// The file it was opened from, which reads open again. None in memory.
     path: Option<PathBuf>,
     /// The folder the database is in, which exports stay out of. None in
@@ -378,7 +379,6 @@ impl Db {
         Ok(Self {
             write: Arc::new(Mutex::new(conn)),
             read,
-            reads: Arc::default(),
             path: path.map(Path::to_path_buf),
             dir: path.and_then(|path| fs::canonicalize(path.parent()?).ok()),
         })
@@ -397,19 +397,17 @@ impl Db {
         })
     }
 
+    /// What stops the query its reads' connection runs.
+    pub fn interrupt_handle(&self) -> rusqlite::InterruptHandle {
+        self.read().get_interrupt_handle()
+    }
+
     fn write(&self) -> MutexGuard<'_, Connection> {
         lock(&self.write)
     }
 
     fn read(&self) -> MutexGuard<'_, Connection> {
         lock(self.read.as_ref().unwrap_or(&self.write))
-    }
-
-    /// Held for the length of a transcript read, so that reads run one at a
-    /// time: two that started from the same offset would each save what they
-    /// found. A read that waited starts from where the one before stopped.
-    pub fn lock_reads(&self) -> MutexGuard<'_, ()> {
-        lock(&self.reads)
     }
 
     /// The projects, in the order the user put them in, with their chats.
@@ -505,33 +503,47 @@ impl Db {
         agent: Agent,
         worktree: Option<&Worktree>,
     ) -> Result<i64> {
-        let conn = self.write();
-        conn.execute(
-            "INSERT INTO chats (project_id, agent, created_at, updated_at, position,
-                                worktree, worktree_folder)
-             VALUES (?1, ?2, ?3, ?3,
-                     (SELECT COALESCE(MIN(position), 0) - 1 FROM chats WHERE project_id = ?1),
-                     ?4, ?5)",
-            params![
-                project_id,
-                agent.label(),
-                now(),
-                worktree.map(|worktree| worktree.root.to_string_lossy()),
-                worktree.map(|worktree| worktree.folder.to_string_lossy()),
-            ],
-        )?;
-        Ok(conn.last_insert_rowid())
+        insert_chat(&self.write(), project_id, agent, worktree)
+    }
+
+    /// Adds a chat as `add_chat` does, titled `title` unless it's empty,
+    /// and brings its project back if it's archived, all at once. Nothing is
+    /// added once the project is removed, as its id can then name another
+    /// folder than `project`.
+    pub fn add_chat_to(
+        &self,
+        project_id: i64,
+        project: &Path,
+        agent: Agent,
+        worktree: Option<&Worktree>,
+        title: &str,
+    ) -> Result<Option<i64>> {
+        let mut conn = self.write();
+        // It reads before it writes, and a read transaction that has to
+        // become a write fails at once while another process writes, rather
+        // than waiting for it as the busy timeout says.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let path: Option<String> = tx
+            .query_row(
+                "SELECT path FROM projects WHERE id = ?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if path.as_deref().map(Path::new) != Some(project) {
+            return Ok(None);
+        }
+        let id = insert_chat(&tx, project_id, agent, worktree)?;
+        title_chat(&tx, id, title)?;
+        restore_project(&tx, project_id)?;
+        tx.commit()?;
+        Ok(Some(id))
     }
 
     /// Titles a chat, or with an empty title, titles it after its sessions
     /// again.
     pub fn rename_chat(&self, id: i64, title: &str) -> Result<()> {
-        let title = title.trim();
-        self.write().execute(
-            "UPDATE chats SET title = ?2 WHERE id = ?1",
-            params![id, (!title.is_empty()).then_some(title)],
-        )?;
-        Ok(())
+        title_chat(&self.write(), id, title)
     }
 
     /// Pins or unpins a chat, which goes to the top of its new group.
@@ -591,14 +603,7 @@ impl Db {
     /// Brings back an archived project at the top of the list. Says whether
     /// it was archived.
     pub fn restore_project(&self, id: i64) -> Result<bool> {
-        let changed = self.write().execute(
-            "UPDATE projects SET archived_at = NULL, position = (
-                SELECT MIN(position) - 1 FROM projects
-             )
-             WHERE id = ?1 AND archived_at IS NOT NULL",
-            [id],
-        )?;
-        Ok(changed > 0)
+        restore_project(&self.write(), id)
     }
 
     /// A setting that is on or off, or `None` while it has its default.
@@ -1239,6 +1244,49 @@ impl Db {
     }
 }
 
+fn insert_chat(
+    conn: &Connection,
+    project_id: i64,
+    agent: Agent,
+    worktree: Option<&Worktree>,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO chats (project_id, agent, created_at, updated_at, position,
+                            worktree, worktree_folder)
+         VALUES (?1, ?2, ?3, ?3,
+                 (SELECT COALESCE(MIN(position), 0) - 1 FROM chats WHERE project_id = ?1),
+                 ?4, ?5)",
+        params![
+            project_id,
+            agent.label(),
+            now(),
+            worktree.map(|worktree| worktree.root.to_string_lossy()),
+            worktree.map(|worktree| worktree.folder.to_string_lossy()),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn title_chat(conn: &Connection, id: i64, title: &str) -> Result<()> {
+    let title = title.trim();
+    conn.execute(
+        "UPDATE chats SET title = ?2 WHERE id = ?1",
+        params![id, (!title.is_empty()).then_some(title)],
+    )?;
+    Ok(())
+}
+
+fn restore_project(conn: &Connection, id: i64) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE projects SET archived_at = NULL, position = (
+            SELECT MIN(position) - 1 FROM projects
+         )
+         WHERE id = ?1 AND archived_at IS NOT NULL",
+        [id],
+    )?;
+    Ok(changed > 0)
+}
+
 /// How long to wait for another process's write before giving up.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -1494,7 +1542,6 @@ fn copy_checked(source: &Path, target: &Path) -> anyhow::Result<Vec<Project>> {
     let db = Db {
         write: Arc::new(Mutex::new(conn)),
         read: None,
-        reads: Arc::default(),
         path: None,
         dir: None,
     };
@@ -1963,7 +2010,6 @@ mod tests {
         let db = Db {
             write: Arc::new(Mutex::new(conn)),
             read: None,
-            reads: Arc::default(),
             path: None,
             dir: None,
         };

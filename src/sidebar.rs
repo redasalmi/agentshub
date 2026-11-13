@@ -19,6 +19,7 @@ use crate::appearance::{self, Tint};
 use crate::db::{self, Chat, Project};
 use crate::settings::Settings;
 use crate::status::{Need, Status};
+use crate::store::Change;
 
 /// How often the ages of the chats are brought up to date.
 const AGE_INTERVAL: Duration = Duration::from_secs(60);
@@ -584,6 +585,13 @@ impl Sidebar {
             }));
         }
         cx.notify();
+    }
+
+    /// Shows `change` made to the projects before it is saved.
+    pub fn change(&mut self, change: &Change, cx: &mut Context<Self>) {
+        let mut projects = self.projects.clone();
+        change.apply(&mut projects);
+        self.set_projects(projects, cx);
     }
 
     /// `chats` of one group of the list, pinned or not, with those leaving

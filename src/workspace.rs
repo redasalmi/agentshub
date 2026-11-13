@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -46,7 +46,7 @@ use crate::settings::{
 };
 use crate::sidebar::{self, Filter, Held, NUMBERED, Sidebar, SidebarEvent, Tone, home_relative};
 use crate::status::Status;
-use crate::store::{Opened, Store};
+use crate::store::{Change, Opened, Store};
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::{self, TerminalView};
 use crate::transcript;
@@ -197,8 +197,26 @@ pub fn init(cx: &mut App) {
 pub struct Workspace {
     sidebar: Entity<Sidebar>,
     db: Db,
-    #[expect(dead_code, reason = "nothing reads or writes through it yet")]
     store: Store,
+    /// How many changes show that aren't saved yet. The projects are listed
+    /// again only once none are, as a listing from before one is saved would
+    /// take it back.
+    unsaved: usize,
+    /// Listing the projects again, which a newer listing replaces.
+    _listing: Option<Task<()>>,
+    /// A project to select once the projects are listed, as one just added
+    /// isn't before.
+    select_listed: Option<i64>,
+    /// The chats being deleted, which can't be opened until that is saved.
+    deleting: HashMap<i64, Deleting>,
+    /// The projects being removed, which a chat added meanwhile goes with.
+    removing: HashSet<i64>,
+    /// The worktrees checked out for chats being added, with their
+    /// project's folder. Shutdown removes one no chat took.
+    adding: Vec<(Worktree, PathBuf)>,
+    /// How many times a project was archived, which a chat added meanwhile
+    /// doesn't start in.
+    archived_projects: u64,
     /// Open chats, including exited terminals and history whose CLI couldn't
     /// start. Running processes keep running while another chat is shown,
     /// until the user closes them.
@@ -489,6 +507,28 @@ struct Chat {
     fresh_on_restart: bool,
 }
 
+/// A chat being added, with what starting it needs once it is.
+#[derive(Clone)]
+struct PendingChat {
+    project_id: i64,
+    agent: Agent,
+    project: PathBuf,
+    worktree: Option<Worktree>,
+    asked: Asked,
+    /// How many times a project had been archived when it was asked for.
+    archived: u64,
+}
+
+/// A chat being deleted, with what goes once that is saved.
+struct Deleting {
+    /// The worktree Agents Hub made for it, and its project's folder.
+    worktree: Option<(Worktree, PathBuf)>,
+    /// What says its stopped CLI has been reaped.
+    reaped: Option<smol::channel::Receiver<()>>,
+    /// How many deletes of it, its own or its project's, aren't saved yet.
+    pending: usize,
+}
+
 struct ChatTerminal {
     terminal: Entity<Terminal>,
     view: Entity<TerminalView>,
@@ -517,6 +557,7 @@ impl Workspace {
             lock,
             imported,
             settings,
+            projects,
             broken,
         } = opened;
         // Said once the window is up, since its notifications aren't yet.
@@ -555,33 +596,27 @@ impl Workspace {
                 SidebarEvent::RenameChat(id, title) => {
                     this.open_rename_dialog(*id, title.clone(), window, cx)
                 }
-                SidebarEvent::PinChat(id, pinned) => {
-                    if let Err(err) = this.db.set_pinned(*id, *pinned) {
-                        eprintln!("can't pin chat {id}: {err}");
-                    }
-                    this.refresh(cx);
-                }
+                SidebarEvent::PinChat(id, pinned) => this.change(
+                    Change::Pin {
+                        chat: *id,
+                        pinned: *pinned,
+                    },
+                    cx,
+                ),
                 SidebarEvent::MoveChat(id, to) => {
-                    if let Err(err) = this.db.move_chat(*id, *to) {
-                        eprintln!("can't move chat {id}: {err}");
-                    }
-                    this.refresh(cx);
+                    this.change(Change::MoveChat { chat: *id, to: *to }, cx)
                 }
-                SidebarEvent::MoveProject(id, to) => {
-                    if let Err(err) = this.db.move_project(*id, *to) {
-                        eprintln!("can't move project {id}: {err}");
-                    }
-                    this.refresh(cx);
-                }
+                SidebarEvent::MoveProject(id, to) => this.change(
+                    Change::MoveProject {
+                        project: *id,
+                        to: *to,
+                    },
+                    cx,
+                ),
                 SidebarEvent::CloseChat(id) => this.confirm_close_chat(*id, window, cx),
                 SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
                 SidebarEvent::ArchiveChat(id) => this.confirm_archive_chat(*id, window, cx),
-                SidebarEvent::RestoreChat(id) => {
-                    if let Err(err) = this.db.restore_chat(*id) {
-                        eprintln!("can't restore chat {id}: {err}");
-                    }
-                    this.refresh(cx);
-                }
+                SidebarEvent::RestoreChat(id) => this.change(Change::RestoreChat(*id), cx),
                 SidebarEvent::OpenSettings => this.show_settings(true, window, cx),
                 SidebarEvent::ShowProjectNames(show) => this.show_project_names(*show, window, cx),
                 SidebarEvent::Selected => this.project_selected(window, cx),
@@ -635,6 +670,36 @@ impl Workspace {
         // The workspace outlives its window (see `tray`), so it's released
         // when the app quits.
         cx.on_release(|this, cx| {
+            // The changes the user made are saved before anything else, so
+            // that a chat whose delete is saved can have its worktree removed.
+            this.store.wait_for_writes();
+            let mut deleted_reaped = Vec::new();
+            for (id, deleting) in std::mem::take(&mut this.deleting) {
+                match deleting.worktree {
+                    Some((worktree, project)) if matches!(this.db.chat(id), Ok(None)) => {
+                        this.track_removal(
+                            &worktree,
+                            &project,
+                            deleting.reaped.into_iter().collect(),
+                        );
+                    }
+                    _ => deleted_reaped.extend(deleting.reaped),
+                }
+            }
+            if !this.adding.is_empty()
+                && let Ok(projects) = this.db.projects()
+            {
+                let taken: HashSet<&Path> = projects
+                    .iter()
+                    .flat_map(|project| &project.chats)
+                    .filter_map(|chat| Some(chat.worktree.as_ref()?.root.as_path()))
+                    .collect();
+                for (worktree, project) in std::mem::take(&mut this.adding) {
+                    if !taken.contains(worktree.root.as_path()) {
+                        this.track_removal(&worktree, &project, Vec::new());
+                    }
+                }
+            }
             // Nothing can be scheduled on a released workspace, so what the
             // CLIs wrote last is read here: the sessions in their queued
             // reports, the ones they were in, and the reads still under way.
@@ -684,6 +749,7 @@ impl Workspace {
                 .filter_map(|chat| chat.terminal.as_ref())
                 .map(|terminal| terminal.terminal.read(cx).shutdown())
                 .chain(this.stopping.values().map(|(reaped, _)| reaped.clone()))
+                .chain(deleted_reaped)
                 .chain(
                     this.shells
                         .values()
@@ -712,6 +778,7 @@ impl Workspace {
             for chat in &this.chats {
                 if let Err(err) = import_chat(
                     &this.db,
+                    &this.store,
                     &mut this.reports,
                     chat.id,
                     chat.agent,
@@ -724,7 +791,7 @@ impl Workspace {
             sessions.sort_unstable();
             sessions.dedup();
             for id in sessions {
-                if let Err(err) = transcript::read(&this.db, id) {
+                if let Err(err) = smol::block_on(this.store.read_transcript(id)) {
                     eprintln!("can't read session {id} on shutdown: {err}");
                 }
             }
@@ -754,6 +821,13 @@ impl Workspace {
             sidebar,
             db,
             store,
+            unsaved: 0,
+            _listing: None,
+            select_listed: None,
+            deleting: HashMap::new(),
+            removing: HashSet::new(),
+            adding: Vec::new(),
+            archived_projects: 0,
             chats: Vec::new(),
             active: None,
             requested: None,
@@ -792,7 +866,8 @@ impl Workspace {
             importing: false,
         };
         this.update_codex_watch();
-        this.refresh(cx);
+        this.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx));
         this.catch_up(cx);
         this
     }
@@ -800,9 +875,9 @@ impl Workspace {
     /// Reads what the CLIs wrote since the transcripts were last read, so
     /// that the search finds it without each chat having to be opened first.
     fn catch_up(&self, cx: &mut Context<Self>) {
-        let db = self.db.clone();
+        let behind = self.store.transcripts_behind();
         cx.spawn(async move |this, cx| {
-            match smol::unblock(move || transcript::behind(&db)).await {
+            match behind.await {
                 Ok(sessions) => this
                     .update(cx, |this, cx| {
                         this.read_sessions(sessions, false, cx).detach()
@@ -839,7 +914,7 @@ impl Workspace {
             let Some(path) = path else {
                 return;
             };
-            this.update_in(cx, |this, window, cx| this.add_folders(&[path], window, cx))
+            this.update(cx, |this, cx| this.add_folders(&[path], cx))
                 .ok();
         })
         .detach();
@@ -853,30 +928,45 @@ impl Workspace {
             window.push_notification("Drop a folder to add it as a project", cx);
             return;
         }
-        self.add_folders(&folders, window, cx);
+        self.add_folders(&folders, cx);
     }
 
     /// Adds folders as projects, in the order given at the top of the list,
     /// and selects the first. A folder that already is a project is selected
     /// where it is.
-    fn add_folders(&mut self, folders: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
-        let mut first = None;
+    fn add_folders(&mut self, folders: &[PathBuf], cx: &mut Context<Self>) {
         // Each one goes on top, so the last goes in first.
-        for path in folders.iter().rev() {
-            let path = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-            match self.db.add_project(&path) {
-                Ok(id) => first = Some(id),
-                Err(err) => {
-                    window.push_notification(format!("Couldn't add {}: {err}", path.display()), cx)
+        let added: Vec<_> = folders
+            .iter()
+            .rev()
+            .map(|path| {
+                let path = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                (path.clone(), self.store.add_project(path))
+            })
+            .collect();
+        cx.spawn(async move |this, cx| {
+            let mut first = None;
+            for (path, added) in added {
+                match added.await {
+                    Ok(id) => first = Some(id),
+                    Err(err) => {
+                        let message = format!("Couldn't add {}: {err}", path.display());
+                        this.update(cx, |this, cx| this.say(message, cx)).ok();
+                    }
                 }
             }
-        }
-        let Some(id) = first else {
-            return;
-        };
-        self.refresh(cx);
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.select(id, cx));
+            let Some(id) = first else {
+                return;
+            };
+            // Selecting it looks up what can start in it, so it is listed
+            // first.
+            this.update(cx, |this, cx| {
+                this.select_listed = Some(id);
+                this.refresh(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Copies the database where the user asks, so the history can live
@@ -897,14 +987,14 @@ impl Workspace {
                 }
                 _ => return,
             };
-            this.update_in(cx, |this, window, cx| match this.db.export(&path) {
-                Ok(()) => window
-                    .push_notification(format!("Exported the database to {}", path.display()), cx),
-                Err(err) => {
-                    window.push_notification(format!("Couldn't export the database: {err}"), cx)
-                }
-            })
-            .ok();
+            let Ok(exported) = this.update(cx, |this, _| this.store.export(path.clone())) else {
+                return;
+            };
+            let message = match exported.await {
+                Ok(()) => format!("Exported the database to {}", path.display()),
+                Err(err) => format!("Couldn't export the database: {err}"),
+            };
+            this.update(cx, |this, cx| this.say(message, cx)).ok();
         })
         .detach();
     }
@@ -1066,50 +1156,54 @@ impl Workspace {
                 .description(description)
                 .ok_text("Remove")
                 .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    this.update(cx, |this, cx| {
-                        let projects = this.db.projects().unwrap_or_default();
-                        let project = projects.iter().find(|project| project.id == id);
-                        let mut worktrees = Vec::new();
-                        for chat in project.into_iter().flat_map(|project| &project.chats) {
-                            let reaped = this
-                                .stop_chat(chat.id, cx)
-                                .or_else(|| this.reaping(chat.id));
-                            if let Some(worktree) = &chat.worktree {
-                                worktrees.push((worktree.clone(), reaped));
-                            }
-                        }
-                        // Dropping its terminal kills the shell.
-                        if let Some(project) = project {
-                            this.shells.remove(&project.path);
-                            this.sync_terminals(cx);
-                        }
-                        match this.db.remove_project(id) {
-                            // Their notifications can't open them anymore.
-                            Ok(()) => {
-                                for chat in project.into_iter().flat_map(|project| &project.chats) {
-                                    alerts::withdraw(chat.id, cx);
-                                }
-                                if let Some(project) = project {
-                                    for (worktree, reaped) in worktrees {
-                                        this.remove_worktree(
-                                            &worktree,
-                                            &project.path,
-                                            reaped,
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                }
-                            }
-                            Err(err) => eprintln!("can't remove project {id}: {err}"),
-                        }
-                        this.refresh(cx);
-                    })
-                    .ok();
+                .on_ok(move |_, _, cx| {
+                    this.update(cx, |this, cx| this.remove_project(id, cx)).ok();
                     true
                 })
         });
+    }
+
+    /// Stops a project's agents and shell, and removes it with its chats.
+    /// The worktrees of its chats go once that is saved, and until then, its
+    /// chats can't be opened, nor a chat added to it start.
+    fn remove_project(&mut self, id: i64, cx: &mut Context<Self>) {
+        // Its id may name another project once the first removal is saved.
+        if self.removing.contains(&id) {
+            return;
+        }
+        let projects = self.db.projects().unwrap_or_default();
+        let Some(project) = projects.into_iter().find(|project| project.id == id) else {
+            return;
+        };
+        let chats: Vec<i64> = project.chats.iter().map(|chat| chat.id).collect();
+        for chat in project.chats {
+            self.cancel_opening(chat.id);
+            let reaped = self
+                .stop_chat(chat.id, cx)
+                .or_else(|| self.reaping(chat.id));
+            let worktree = chat
+                .worktree
+                .map(|worktree| (worktree, project.path.clone()));
+            self.mark_deleting(chat.id, worktree, reaped);
+        }
+        // Dropping its terminal kills the shell.
+        self.shells.remove(&project.path);
+        self.sync_terminals(cx);
+        self.removing.insert(id);
+        let removed = self.store.remove_project(id, project.path.clone());
+        cx.spawn(async move |this, cx| {
+            let removed = removed.await;
+            this.update(cx, |this, cx| {
+                this.removing.remove(&id);
+                if let Err(err) = &removed {
+                    eprintln!("can't remove project {id}: {err:#}");
+                    this.say(format!("Couldn't remove the project: {err}"), cx);
+                }
+                this.finish_deleting(&chats, removed.is_ok(), cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Closes a running chat, asking first if its agent is in the middle of
@@ -1165,25 +1259,88 @@ impl Workspace {
                 .description(description)
                 .ok_text("Delete")
                 .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    this.update(cx, |this, cx| {
-                        let reaped = this.stop_chat(id, cx).or_else(|| this.reaping(id));
-                        match this.db.delete_chat(id) {
-                            // Its notification can't open it anymore.
-                            Ok(()) => {
-                                alerts::withdraw(id, cx);
-                                if let Some((worktree, project)) = &worktree {
-                                    this.remove_worktree(worktree, project, reaped, window, cx);
-                                }
-                            }
-                            Err(err) => eprintln!("can't delete chat {id}: {err}"),
-                        }
-                        this.refresh(cx);
-                    })
-                    .ok();
+                .on_ok(move |_, _, cx| {
+                    this.update(cx, |this, cx| this.delete_chat(id, worktree.clone(), cx))
+                        .ok();
                     true
                 })
         });
+    }
+
+    /// Stops a chat's agent and deletes the chat. Its worktree goes once that
+    /// is saved, and until then, the chat can't be opened.
+    fn delete_chat(
+        &mut self,
+        id: i64,
+        worktree: Option<(Worktree, PathBuf)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_opening(id);
+        let reaped = self.stop_chat(id, cx).or_else(|| self.reaping(id));
+        self.mark_deleting(id, worktree, reaped);
+        let deleted = self.store.delete_chat(id);
+        cx.spawn(async move |this, cx| {
+            let deleted = deleted.await;
+            this.update(cx, |this, cx| {
+                if let Err(err) = &deleted {
+                    eprintln!("can't delete chat {id}: {err:#}");
+                    this.say(format!("Couldn't delete the chat: {err}"), cx);
+                }
+                this.finish_deleting(&[id], deleted.is_ok(), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Keeps chat `id` from being opened until deleting it is saved. A
+    /// chat can be deleted again meanwhile, with its project, once its CLI
+    /// is already stopped, so what says that CLI was reaped is kept.
+    fn mark_deleting(
+        &mut self,
+        id: i64,
+        worktree: Option<(Worktree, PathBuf)>,
+        reaped: Option<smol::channel::Receiver<()>>,
+    ) {
+        let deleting = self.deleting.entry(id).or_insert(Deleting {
+            worktree,
+            reaped: None,
+            pending: 0,
+        });
+        deleting.pending += 1;
+        if reaped.is_some() {
+            deleting.reaped = reaped;
+        }
+    }
+
+    /// Lets `chats` be opened again, once deleting them is done, and if they
+    /// were deleted, removes their worktrees.
+    fn finish_deleting(&mut self, chats: &[i64], deleted: bool, cx: &mut Context<Self>) {
+        for id in chats {
+            let Some(deleting) = self.deleting.get_mut(id) else {
+                continue;
+            };
+            deleting.pending -= 1;
+            // Another delete of it may still be saved.
+            if !deleted && deleting.pending > 0 {
+                continue;
+            }
+            let Some(Deleting {
+                worktree, reaped, ..
+            }) = self.deleting.remove(id)
+            else {
+                continue;
+            };
+            if !deleted {
+                continue;
+            }
+            // Its notification can't open it anymore.
+            alerts::withdraw(*id, cx);
+            if let Some((worktree, project)) = &worktree {
+                self.remove_worktree(worktree, project, reaped, cx);
+            }
+        }
+        self.refresh(cx);
     }
 
     /// Archives a chat, closing it first, and asks first if its agent is in
@@ -1222,15 +1379,20 @@ impl Workspace {
     fn archive_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_opening(id);
         self.close_chats(vec![id], window, cx);
-        if let Err(err) = self.db.set_chat_archived(id, true) {
-            window.push_notification(format!("Couldn't archive the chat: {err}"), cx);
-            return;
-        }
+        self.change(
+            Change::ArchiveChat {
+                chat: id,
+                archived: true,
+            },
+            cx,
+        );
         alerts::withdraw(id, cx);
-        self.refresh(cx);
         self.offer_undo(
             "Archived the chat.",
-            move |db| db.set_chat_archived(id, false),
+            Change::ArchiveChat {
+                chat: id,
+                archived: false,
+            },
             window,
             cx,
         );
@@ -1302,17 +1464,23 @@ impl Workspace {
         if self.shells.len() != shells {
             self.sync_terminals(cx);
         }
-        if let Err(err) = self.db.set_project_archived(id, true) {
-            window.push_notification(format!("Couldn't archive the project: {err}"), cx);
-            return;
-        }
+        self.archived_projects += 1;
+        self.change(
+            Change::ArchiveProject {
+                project: id,
+                archived: true,
+            },
+            cx,
+        );
         for id in ids {
             alerts::withdraw(id, cx);
         }
-        self.refresh(cx);
         self.offer_undo(
             "Archived the project.",
-            move |db| db.set_project_archived(id, false),
+            Change::ArchiveProject {
+                project: id,
+                archived: false,
+            },
             window,
             cx,
         );
@@ -1341,16 +1509,65 @@ impl Workspace {
         }
     }
 
-    /// Says `message` with a button that runs `undo` on the database.
+    /// Shows `change` at once, and saves it. The projects are listed as saved
+    /// once every change shown is, which takes back one that couldn't be.
+    fn change(&mut self, change: Change, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.change(&change, cx));
+        self.unsaved += 1;
+        let saved = self.store.change(change);
+        cx.spawn(async move |this, cx| {
+            let saved = saved.await;
+            this.update(cx, |this, cx| {
+                this.unsaved -= 1;
+                if let Err(err) = saved {
+                    eprintln!("can't save a change: {err:#}");
+                    this.say(
+                        format!("Couldn't save the change, so it is undone: {err}"),
+                        cx,
+                    );
+                }
+                this.refresh(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Says so if a setting couldn't be saved, which then lasts until Agents
+    /// Hub quits.
+    fn save_setting(
+        &self,
+        saved: impl Future<Output = anyhow::Result<()>> + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            if let Err(err) = saved.await {
+                eprintln!("can't save the settings: {err:#}");
+                let message =
+                    format!("Couldn't save the setting, so it lasts until Agents Hub quits: {err}");
+                this.update(cx, |this, cx| this.say(message, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Says `message` in the window, unless it is closed to the tray.
+    fn say(&self, message: String, cx: &mut App) {
+        self.window
+            .update(cx, |_, window, cx| window.push_notification(message, cx))
+            .ok();
+    }
+
+    /// Says `message` with a button that makes the `undo` change.
     fn offer_undo(
         &self,
         message: &'static str,
-        undo: impl Fn(&Db) -> rusqlite::Result<()> + 'static,
+        undo: Change,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let this = cx.entity().downgrade();
-        let undo = Rc::new(undo);
         window.push_notification(
             Notification::new()
                 .message(message)
@@ -1358,13 +1575,8 @@ impl Workspace {
                     let (this, undo) = (this.clone(), undo.clone());
                     Button::new("undo").label("Undo").on_click(cx.listener(
                         move |note, _, window, cx| {
-                            this.update(cx, |this, cx| {
-                                if let Err(err) = undo(&this.db) {
-                                    eprintln!("can't undo: {err}");
-                                }
-                                this.refresh(cx);
-                            })
-                            .ok();
+                            this.update(cx, |this, cx| this.change(undo.clone(), cx))
+                                .ok();
                             note.dismiss(window, cx);
                         },
                     ))
@@ -1430,11 +1642,9 @@ impl Workspace {
                     let value = input.read(cx).value();
                     // An untouched title stays the agent's, and follows it.
                     if value != title {
+                        let title = value.to_string();
                         this.update(cx, |this, cx| {
-                            if let Err(err) = this.db.rename_chat(id, &value) {
-                                eprintln!("can't rename chat {id}: {err}");
-                            }
-                            this.refresh(cx);
+                            this.change(Change::Rename { chat: id, title }, cx)
                         })
                         .ok();
                     }
@@ -1845,8 +2055,7 @@ impl Workspace {
                     return;
                 }
             }
-            let show = self.navigations == asked.navigations;
-            self.add_chat(project_id, agent, project, None, &title, show, window, cx);
+            self.add_chat(project_id, agent, project, None, title, asked, cx);
             return;
         }
         // Checking out the project takes a while in a large repository, and
@@ -1870,30 +2079,29 @@ impl Workspace {
             let added = this.update_in(cx, |this, window, cx| match &created {
                 // All the chats were closed meanwhile, this one with them.
                 Ok(worktree) if this.closed_all != closed_all => {
-                    this.remove_worktree(worktree, &project, None, window, cx)
+                    this.remove_worktree(worktree, &project, None, cx)
                 }
                 Err(_) if this.closed_all != closed_all => {}
                 Ok(worktree) => {
                     // The project may have been removed meanwhile, and its id
                     // given to another project, which the chat isn't about.
                     match this.db.project_path(project_id) {
-                        Ok(Some(path)) if path == project => {
-                            let show = this.navigations == navigations;
-                            this.add_chat(
-                                project_id,
-                                agent,
-                                &project,
-                                Some(worktree),
-                                &title,
-                                show,
-                                window,
-                                cx,
-                            )
-                        }
-                        Ok(_) => this.remove_worktree(worktree, &project, None, window, cx),
+                        Ok(Some(path)) if path == project => this.add_chat(
+                            project_id,
+                            agent,
+                            &project,
+                            Some(worktree),
+                            title.clone(),
+                            Asked {
+                                navigations,
+                                closed_all,
+                            },
+                            cx,
+                        ),
+                        Ok(_) => this.remove_worktree(worktree, &project, None, cx),
                         Err(err) => {
                             window.push_notification(format!("Couldn't add the chat: {err}"), cx);
-                            this.remove_worktree(worktree, &project, None, window, cx);
+                            this.remove_worktree(worktree, &project, None, cx);
                         }
                     }
                 }
@@ -1923,8 +2131,8 @@ impl Workspace {
 
     /// Adds a chat and starts its agent in `project`, or in the `worktree`
     /// made for it, which goes again if the chat can't start. The chat is
-    /// titled `title`, unless it's empty, and shown if `show` is set, and
-    /// otherwise runs in the background.
+    /// titled `title`, unless it's empty, and shown unless something else
+    /// was asked for since `asked`, and otherwise runs in the background.
     #[expect(
         clippy::too_many_arguments,
         reason = "GPUI's context arguments count toward the limit"
@@ -1935,43 +2143,158 @@ impl Workspace {
         agent: Agent,
         project: &Path,
         worktree: Option<&Worktree>,
-        title: &str,
-        show: bool,
-        window: &mut Window,
+        title: String,
+        asked: Asked,
         cx: &mut Context<Self>,
     ) {
-        let cwd = worktree.map_or(project, |worktree| &worktree.folder);
-        let id = match self.db.add_chat(project_id, agent, worktree) {
-            Ok(id) => id,
+        let project = project.to_path_buf();
+        let worktree = worktree.cloned();
+        // The project may have been archived while the chat's worktree was
+        // checked out. Adding the chat brings it back, as opening one does.
+        let added =
+            self.store
+                .add_chat(project_id, project.clone(), agent, worktree.clone(), title);
+        if let Some(worktree) = &worktree {
+            self.adding.push((worktree.clone(), project.clone()));
+        }
+        let archived = self.archived_projects;
+        let new = PendingChat {
+            project_id,
+            agent,
+            project,
+            worktree,
+            asked,
+            archived,
+        };
+        cx.spawn(async move |this, cx| {
+            let added = added.await.map_err(|err| err.to_string());
+            let Ok(window) = this.read_with(cx, |this, _| this.window) else {
+                return;
+            };
+            let finished = window.update(cx, |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    this.finish_adding(new.clone(), added.clone(), Some(window), cx)
+                })
+            });
+            // Closed to the tray, the window can't show the chat, which is
+            // only listed then.
+            if !matches!(finished, Ok(Ok(()))) {
+                this.update(cx, |this, cx| this.finish_adding(new, added, None, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Starts a chat that was added for `new`, in `window`, unless something
+    /// since tells it not to, or it couldn't be added.
+    fn finish_adding(
+        &mut self,
+        new: PendingChat,
+        added: Result<Option<i64>, String>,
+        mut window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        // Inside the window's update, the window has to say it itself.
+        let mut say =
+            |this: &Self, message: String, cx: &mut Context<Self>| match window.as_deref_mut() {
+                Some(window) => window.push_notification(message, cx),
+                None => this.say(message, cx),
+            };
+        let PendingChat {
+            project_id,
+            agent,
+            project,
+            worktree,
+            asked,
+            archived,
+        } = new;
+        if let Some(worktree) = &worktree {
+            self.adding.retain(|(each, _)| each.root != worktree.root);
+        }
+        let id = match added {
+            Ok(Some(id)) => id,
+            // Its project was removed before it could be added.
+            Ok(None) => {
+                if let Some(worktree) = &worktree {
+                    self.remove_worktree(worktree, &project, None, cx);
+                }
+                self.refresh(cx);
+                return;
+            }
             Err(err) => {
-                window.push_notification(format!("Couldn't add the chat: {err}"), cx);
-                if let Some(worktree) = worktree {
-                    self.remove_worktree(worktree, project, None, window, cx);
+                say(self, format!("Couldn't add the chat: {err}"), cx);
+                if let Some(worktree) = &worktree {
+                    self.remove_worktree(worktree, &project, None, cx);
                 }
                 return;
             }
         };
-        if !title.trim().is_empty()
-            && let Err(err) = self.db.rename_chat(id, title)
+        // Its project may have been removed while it was added, with the
+        // chats it had before this one.
+        let worktree = worktree.map(|worktree| (worktree, project.clone()));
+        if self.removing.contains(&project_id) {
+            self.delete_chat(id, worktree, cx);
+            return;
+        }
+        match self.db.chat(id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Some((worktree, project)) = &worktree {
+                    self.remove_worktree(worktree, project, None, cx);
+                }
+                self.refresh(cx);
+                return;
+            }
+            Err(err) => {
+                say(self, format!("Couldn't start the chat: {err}"), cx);
+                return;
+            }
+        }
+        // All the chats were closed while it was added, this one with them.
+        if self.closed_all != asked.closed_all {
+            self.refresh(cx);
+            return;
+        }
+        // A listing since it was saved shows it, so it may have been opened,
+        // archived or deleted from there meanwhile.
+        let chat_archived = self.sidebar.read(cx).projects().iter().any(|project| {
+            project
+                .chats
+                .iter()
+                .any(|chat| chat.id == id && chat.archived_at.is_some())
+        });
+        if chat_archived
+            || self.deleting.contains_key(&id)
+            || self.opening.contains_key(&id)
+            || self.chats.iter().any(|chat| chat.id == id)
         {
-            eprintln!("can't title chat {id}: {err}");
+            self.refresh(cx);
+            return;
         }
-        // The project may have been archived while the chat's worktree was
-        // checked out. Starting the chat brings it back, as opening one does.
-        if let Err(err) = self.db.restore_project(project_id) {
-            eprintln!("can't restore project {project_id}: {err}");
-        }
+        // Archiving its project while it was added stops the agents in it,
+        // which this one would have been among.
+        let archived = self.archived_projects != archived
+            && self
+                .sidebar
+                .read(cx)
+                .projects()
+                .iter()
+                .any(|each| each.id == project_id && each.archived_at.is_some());
+        let Some(window) = window.filter(|_| !archived) else {
+            self.refresh(cx);
+            return;
+        };
+        let cwd = worktree
+            .as_ref()
+            .map_or(&project, |(worktree, _)| &worktree.folder);
         // Its first session report adds its first session.
         if !self.start_chat(id, agent, cwd, None, window, cx) {
-            let reaped = self.stop_chat(id, cx);
-            self.db.delete_chat(id).ok();
-            if let Some(worktree) = worktree {
-                self.remove_worktree(worktree, project, reaped, window, cx);
-            }
-        } else if show {
+            self.delete_chat(id, worktree, cx);
+        } else if self.navigations == asked.navigations {
             self.activate(id, window, cx);
-            // The sidebar doesn't list the new chat yet, so it can't find
-            // its project by itself.
+            // The sidebar doesn't list the new chat yet, so it can't find its
+            // project by itself.
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.select(project_id, cx));
         } else {
@@ -2021,7 +2344,6 @@ impl Workspace {
         worktree: &Worktree,
         project: &Path,
         reaped: Option<smol::channel::Receiver<()>>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let inside: Vec<PathBuf> = self
@@ -2042,7 +2364,7 @@ impl Workspace {
         }
         let folder = worktree.root.clone();
         let job = self.track_removal(worktree, project, waits.clone());
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             // What the CLI and the shells write as they exit, like a shell's
             // history, would otherwise go to a folder being deleted.
             for reaped in waits {
@@ -2072,8 +2394,7 @@ impl Workspace {
                     )
                 }
             };
-            this.update_in(cx, |_, window, cx| window.push_notification(message, cx))
-                .ok();
+            this.update(cx, |this, cx| this.say(message, cx)).ok();
         })
         .detach();
     }
@@ -2082,11 +2403,11 @@ impl Workspace {
     /// Shows a chat, starting its CLI unless it runs. An archived chat, or
     /// one in an archived project, is brought back first.
     pub fn open_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.deleting.contains_key(&id) {
+            return;
+        }
         if self.is_archived(id, cx) {
-            if let Err(err) = self.db.restore_chat(id) {
-                eprintln!("can't restore chat {id}: {err}");
-            }
-            self.refresh(cx);
+            self.change(Change::RestoreChat(id), cx);
         }
         self.navigations += 1;
         if self.chats.iter().any(|chat| chat.id == id) {
@@ -2140,30 +2461,38 @@ impl Workspace {
         // The last session decides how the CLI starts, so it's read first: the
         // CLI may have gone on without agentshub. Transcripts can be large
         // enough that this can't happen while the window waits.
-        let db = self.db.clone();
+        let store = self.store.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let read = smol::unblock(move || -> anyhow::Result<()> {
-                let mut sessions = db.sessions(id)?;
+            let read = async {
+                let mut sessions = store.sessions(id).await?;
+                let paths: Vec<PathBuf> = sessions
+                    .iter()
+                    .map(|session| session.transcript_path.clone())
+                    .collect();
+                let exist: Vec<bool> =
+                    smol::unblock(move || paths.iter().map(|path| path.exists()).collect()).await;
+                let mut exist = exist.into_iter();
+                let last_exists = exist.next_back().unwrap_or(false);
                 if let Some(last) = sessions.pop()
-                    && last.transcript_path.exists()
+                    && last_exists
                 {
-                    transcript::read(&db, last.id)?;
+                    store.read_transcript(last.id).await?;
                     // Opening a chat is the chat being active, which orders the
                     // sidebar. Reading its history must not do the same.
-                    db.touch_session(last.id)?;
+                    store.touch_session(last.id).await?;
                 }
                 // The history hides a session without a prompt, so it is never
                 // read again there, even once a newer parser would find one.
-                for earlier in sessions
-                    .iter()
-                    .filter(|session| !session.prompted && session.transcript_path.exists())
-                {
-                    if let Err(err) = transcript::read(&db, earlier.id) {
+                for (earlier, exists) in sessions.iter().zip(exist) {
+                    if !earlier.prompted
+                        && exists
+                        && let Err(err) = store.read_transcript(earlier.id).await
+                    {
                         eprintln!("can't read session {}: {err}", earlier.id);
                     }
                 }
-                Ok(())
-            })
+                anyhow::Ok(())
+            }
             .await;
             if let Err(err) = read {
                 eprintln!("can't read the last session of chat {id}: {err}");
@@ -2460,34 +2789,28 @@ impl Workspace {
         touch: bool,
         cx: &mut Context<Self>,
     ) -> Task<()> {
-        let db = self.db.clone();
+        let store = self.store.clone();
         self.reading.extend(&sessions);
         cx.spawn(async move |this, cx| {
             if sessions.is_empty() {
                 return;
             }
-            // Parsing transcripts and writing them to the database blocks, so
-            // it stays off the executor's threads.
-            let (sessions, changed) = smol::unblock(move || {
-                let mut changed = Vec::new();
-                for &id in &sessions {
-                    match transcript::read(&db, id) {
-                        Ok(read) => {
-                            if touch {
-                                db.touch_session(id).ok();
-                            }
-                            if read {
-                                changed.push(id);
-                            }
+            let mut changed = Vec::new();
+            for &id in &sessions {
+                match store.read_transcript(id).await {
+                    Ok(read) => {
+                        if touch && let Err(err) = store.touch_session(id).await {
+                            eprintln!("can't touch session {id}: {err}");
                         }
-                        Err(err) => {
-                            eprintln!("can't read session {id}: {err}");
+                        if read {
+                            changed.push(id);
                         }
                     }
+                    Err(err) => {
+                        eprintln!("can't read session {id}: {err}");
+                    }
                 }
-                (sessions, changed)
-            })
-            .await;
+            }
             this.update(cx, |this, cx| {
                 for id in &sessions {
                     if let Some(index) = this.reading.iter().position(|reading| reading == id) {
@@ -2509,18 +2832,36 @@ impl Workspace {
     /// The same, reloading the expanded sessions whose transcript read, in
     /// `changed`, found something.
     fn refresh_after(&mut self, changed: &[i64], cx: &mut Context<Self>) {
-        let shell = self.shell_cwd(cx);
-        match self.db.projects() {
-            Ok(projects) => self
-                .sidebar
-                .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx)),
-            Err(err) => eprintln!("can't list the projects: {err}"),
-        }
-        // Which shell shows depends on the projects' chats, and a new chat
-        // shown before they list it got its project's shell meanwhile.
-        if self.shell_cwd(cx) != shell {
-            self.sync_terminals(cx);
-            cx.notify();
+        if self.unsaved == 0 {
+            let listed = self.store.projects();
+            self._listing = Some(cx.spawn(async move |this, cx| {
+                let listed = listed.await;
+                this.update(cx, |this, cx| {
+                    // A change shown since is listed once it's saved.
+                    if this.unsaved > 0 {
+                        return;
+                    }
+                    let shell = this.shell_cwd(cx);
+                    match listed {
+                        Ok(projects) => this
+                            .sidebar
+                            .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx)),
+                        Err(err) => eprintln!("can't list the projects: {err}"),
+                    }
+                    if let Some(id) = this.select_listed.take() {
+                        this.sidebar
+                            .update(cx, |sidebar, cx| sidebar.select(id, cx));
+                    }
+                    // Which shell shows depends on the projects' chats, and a
+                    // new chat shown before they list it got its project's
+                    // shell meanwhile.
+                    if this.shell_cwd(cx) != shell {
+                        this.sync_terminals(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }));
         }
         for chat in &self.chats {
             let current = chat.current_session();
@@ -2605,13 +2946,14 @@ impl Workspace {
             .and_then(|chat| chat.session);
         let read =
             read.or_else(|| session.map(|session| self.read_sessions(vec![session], false, cx)));
-        let db = self.db.clone();
+        let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             if let Some(read) = read {
                 read.await;
             }
             let items = match session {
-                Some(session) => smol::unblock(move || db.items(session, TURN_ITEMS))
+                Some(session) => store
+                    .items(session, TURN_ITEMS)
                     .await
                     .inspect_err(|err| eprintln!("can't read session {session}: {err}"))
                     .unwrap_or_default(),
@@ -2778,10 +3120,10 @@ impl Workspace {
         // Without a running CLI, even its last session belongs in history.
         let current = terminal.as_ref().and(session.map(|session| session.id));
         let transcript = session.map(|session| session.transcript_path.clone());
-        let db = self.db.clone();
+        let store = self.store.clone();
         let history = cx.new(|cx| {
             // Without a terminal, the history is all there is to show.
-            let mut history = History::new(db, id, terminal.is_none());
+            let mut history = History::new(store, id, terminal.is_none());
             history.refresh(current, &[], cx);
             history
         });
@@ -3198,19 +3540,17 @@ impl Workspace {
 
     /// Saves the theme's mode and puts the theme in it.
     fn set_appearance(&mut self, value: Appearance, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(err) = Settings::set_appearance(&self.db, value, cx) {
-            setting_not_saved(err, window, cx);
-        }
+        let saved = Settings::set_appearance(&self.store, value, cx);
+        self.save_setting(saved, cx);
         appearance::apply(window, cx);
         cx.notify();
     }
 
     /// Saves the family of themes and puts the theme in it.
     /// Names the projects in the sidebar's rail, or shows only their marks.
-    fn show_project_names(&mut self, show: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(err) = Settings::set_project_names(&self.db, show, cx) {
-            setting_not_saved(err, window, cx);
-        }
+    fn show_project_names(&mut self, show: bool, _: &mut Window, cx: &mut Context<Self>) {
+        let saved = Settings::set_project_names(&self.store, show, cx);
+        self.save_setting(saved, cx);
         self.sidebar.update(cx, |_, cx| cx.notify());
         cx.notify();
     }
@@ -3257,26 +3597,23 @@ impl Workspace {
     }
 
     /// Makes the terminals' text `by` points bigger, or smaller when negative.
-    fn zoom_terminals(&mut self, by: f32, window: &mut Window, cx: &mut Context<Self>) {
+    fn zoom_terminals(&mut self, by: f32, _: &mut Window, cx: &mut Context<Self>) {
         let size = cx.global::<Settings>().terminal_font_size + by;
-        if let Err(err) = Settings::set_terminal_font_size(&self.db, size, cx) {
-            setting_not_saved(err, window, cx);
-        }
+        let saved = Settings::set_terminal_font_size(&self.store, size, cx);
+        self.save_setting(saved, cx);
         cx.notify();
     }
 
-    fn set_motion(&mut self, value: Motion, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(err) = Settings::set_motion(&self.db, value, cx) {
-            setting_not_saved(err, window, cx);
-        }
+    fn set_motion(&mut self, value: Motion, _: &mut Window, cx: &mut Context<Self>) {
+        let saved = Settings::set_motion(&self.store, value, cx);
+        self.save_setting(saved, cx);
         appearance::apply_motion(cx);
         cx.notify();
     }
 
     fn set_theme(&mut self, value: ThemeFamily, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(err) = Settings::set_theme(&self.db, value, cx) {
-            setting_not_saved(err, window, cx);
-        }
+        let saved = Settings::set_theme(&self.store, value, cx);
+        self.save_setting(saved, cx);
         appearance::apply(window, cx);
         cx.notify();
     }
@@ -3301,6 +3638,12 @@ impl Workspace {
     /// running, or hides it if it shows. Settings cover the shell, so they
     /// close and the shell shows.
     fn toggle_shell(&mut self, _: &ToggleShell, window: &mut Window, cx: &mut Context<Self>) {
+        // Removing the project stopped its shell, and nothing would stop
+        // another one started before it is gone.
+        let selected = self.sidebar.read(cx).selected().map(|project| project.id);
+        if selected.is_some_and(|id| self.removing.contains(&id)) {
+            return;
+        }
         let Some(cwd) = self.shell_cwd(cx) else {
             return;
         };
@@ -3439,10 +3782,13 @@ impl Workspace {
     fn toggle_pin(&mut self, _: &TogglePin, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(chat) = self.active_entry(cx) {
             let (id, pinned) = (chat.id, chat.pinned);
-            if let Err(err) = self.db.set_pinned(id, !pinned) {
-                eprintln!("can't pin chat {id}: {err}");
-            }
-            self.refresh(cx);
+            self.change(
+                Change::Pin {
+                    chat: id,
+                    pinned: !pinned,
+                },
+                cx,
+            );
         }
     }
 
@@ -4043,18 +4389,16 @@ impl Workspace {
     /// Finds what was said in the chats, off the UI thread. `places` says
     /// where each chat is, to show beside what was found in it.
     fn message_search(&self, places: HashMap<i64, SharedString>) -> palette::Search {
-        let db = self.db.clone();
+        let store = self.store.clone();
         let places = Rc::new(places);
         Rc::new(move |query, cx| {
-            let db = db.clone();
+            let hits = store.search(query);
             let places = places.clone();
             cx.spawn(async move |_| {
-                let hits = smol::unblock(move || db.search(&query))
-                    .await
-                    .unwrap_or_else(|err| {
-                        eprintln!("can't search the messages: {err}");
-                        Vec::new()
-                    });
+                let hits = hits.await.unwrap_or_else(|err| {
+                    eprintln!("can't search the messages: {err}");
+                    Vec::new()
+                });
                 hits.into_iter()
                     .filter_map(|hit| {
                         let place = places.get(&hit.chat_id)?.clone();
@@ -4078,10 +4422,14 @@ impl Workspace {
             Pick::OpenChat(id) => self.open_chat(id, window, cx),
             Pick::StartAgent(project_id, agent) => self.start_agent(project_id, agent, window, cx),
             Pick::SelectProject(id) => {
-                match self.db.restore_project(id) {
-                    Ok(true) => self.refresh(cx),
-                    Ok(false) => {}
-                    Err(err) => eprintln!("can't restore project {id}: {err}"),
+                let archived = self
+                    .sidebar
+                    .read(cx)
+                    .projects()
+                    .iter()
+                    .any(|project| project.id == id && project.archived_at.is_some());
+                if archived {
+                    self.change(Change::RestoreProject(id), cx);
                 }
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select(id, cx))
@@ -4183,11 +4531,15 @@ impl Workspace {
 
     fn save_rail(&mut self, cx: &mut Context<Self>) {
         let settings = *cx.global::<Settings>();
-        let saved = Settings::set_rail_width(&self.db, settings.rail_width, cx)
-            .and_then(|()| Settings::set_project_names(&self.db, settings.project_names, cx));
-        if let Err(err) = saved {
-            eprintln!("can't save the rail's width: {err}");
-        }
+        let width = Settings::set_rail_width(&self.store, settings.rail_width, cx);
+        let names = Settings::set_project_names(&self.store, settings.project_names, cx);
+        self.save_setting(
+            async move {
+                width.await?;
+                names.await
+            },
+            cx,
+        );
     }
 
     /// Shows the shell taking `share` of the window's height, without saving
@@ -4206,9 +4558,8 @@ impl Workspace {
 
     fn save_shell_share(&mut self, cx: &mut Context<Self>) {
         let share = cx.global::<Settings>().shell_share;
-        if let Err(err) = Settings::set_shell_share(&self.db, share, cx) {
-            eprintln!("can't save the shell's height: {err}");
-        }
+        let saved = Settings::set_shell_share(&self.store, share, cx);
+        self.save_setting(saved, cx);
     }
 
     fn save_sidebar_width(&mut self, cx: &mut Context<Self>) {
@@ -4216,9 +4567,8 @@ impl Workspace {
         if cx.global::<Settings>().sidebar_width == width {
             return;
         }
-        if let Err(err) = Settings::set_sidebar_width(&self.db, width, cx) {
-            eprintln!("can't save the sidebar's width: {err}");
-        }
+        let saved = Settings::set_sidebar_width(&self.store, width, cx);
+        self.save_setting(saved, cx);
     }
 }
 
@@ -5419,6 +5769,7 @@ fn capitalized(text: &str) -> String {
 /// transcript that can't be read doesn't stop the others.
 fn import_chat(
     db: &Db,
+    store: &Store,
     reports: &mut Reports,
     id: i64,
     agent: Agent,
@@ -5438,7 +5789,7 @@ fn import_chat(
     sessions.sort_unstable();
     sessions.dedup();
     for session in sessions {
-        if let Err(err) = transcript::read(db, session) {
+        if let Err(err) = smol::block_on(store.read_transcript(session)) {
             failure.get_or_insert(err);
         }
     }
@@ -5554,14 +5905,6 @@ fn plural(count: usize, noun: &str) -> String {
         1 => format!("1 {noun}"),
         _ => format!("{count} {noun}s"),
     }
-}
-
-fn setting_not_saved(err: rusqlite::Error, window: &mut Window, cx: &mut App) {
-    eprintln!("can't save the settings: {err}");
-    window.push_notification(
-        format!("Couldn't save the setting, so it lasts until Agents Hub quits: {err}"),
-        cx,
-    );
 }
 
 /// The settings, on a sheet `width` wide.
@@ -5793,10 +6136,9 @@ fn render_settings(
                     ),
                     Switch::new("close-to-tray")
                         .checked(close_to_tray)
-                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
-                            if let Err(err) = Settings::set_close_to_tray(&this.db, *checked, cx) {
-                                setting_not_saved(err, window, cx);
-                            }
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            let saved = Settings::set_close_to_tray(&this.store, *checked, cx);
+this.save_setting(saved, cx);
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -5812,12 +6154,9 @@ fn render_settings(
                     ),
                     Switch::new("worktree-by-default")
                         .checked(worktree_by_default)
-                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
-                            if let Err(err) =
-                                Settings::set_worktree_by_default(&this.db, *checked, cx)
-                            {
-                                setting_not_saved(err, window, cx);
-                            }
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            let saved = Settings::set_worktree_by_default(&this.store, *checked, cx);
+this.save_setting(saved, cx);
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -5837,12 +6176,9 @@ fn render_settings(
                     ),
                     Switch::new("notification-popups")
                         .checked(notification_popups)
-                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
-                            if let Err(err) =
-                                Settings::set_notification_popups(&this.db, *checked, cx)
-                            {
-                                setting_not_saved(err, window, cx);
-                            }
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            let saved = Settings::set_notification_popups(&this.store, *checked, cx);
+this.save_setting(saved, cx);
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -5853,12 +6189,9 @@ fn render_settings(
                     None,
                     Switch::new("notification-sound")
                         .checked(notification_sound)
-                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
-                            if let Err(err) =
-                                Settings::set_notification_sound(&this.db, *checked, cx)
-                            {
-                                setting_not_saved(err, window, cx);
-                            }
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            let saved = Settings::set_notification_sound(&this.store, *checked, cx);
+this.save_setting(saved, cx);
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -6077,7 +6410,7 @@ mod tests {
         shell_height, shell_share, take_and_remove,
     };
     use crate::worktree::{Removal, Worktree};
-    use crate::{agent::Agent, db::Db, reports::Reports, transcript};
+    use crate::{agent::Agent, db::Db, reports::Reports, store::Store, transcript};
     use gpui_kit::px;
     use serde_json::json;
     use std::fs;
@@ -6178,7 +6511,17 @@ mod tests {
         )
         .unwrap();
 
-        import_chat(&db, &mut reports, chat, Agent::Claude, "cli", Vec::new()).unwrap();
+        let store = Store::new(db.clone()).unwrap();
+        import_chat(
+            &db,
+            &store,
+            &mut reports,
+            chat,
+            Agent::Claude,
+            "cli",
+            Vec::new(),
+        )
+        .unwrap();
         assert!(reports.read("cli", Agent::Claude).is_empty());
         reports.remove();
         // The original transcripts can expire; the database still has both.
@@ -6221,7 +6564,19 @@ mod tests {
         let (mut reports, _) = Reports::new();
 
         let sessions = vec![bad, session];
-        assert!(import_chat(&db, &mut reports, chat, Agent::Claude, "cli", sessions).is_err());
+        let store = Store::new(db.clone()).unwrap();
+        assert!(
+            import_chat(
+                &db,
+                &store,
+                &mut reports,
+                chat,
+                Agent::Claude,
+                "cli",
+                sessions
+            )
+            .is_err()
+        );
         assert_eq!(db.items(session, 100).unwrap()[0].payload["text"], "kept");
         reports.remove();
         fs::remove_dir_all(dir).unwrap();
