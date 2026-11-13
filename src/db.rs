@@ -326,6 +326,8 @@ pub struct Db {
     /// Reads get their own connection. In memory, there is only one.
     read: Option<Arc<Mutex<Connection>>>,
     reads: Arc<Mutex<()>>,
+    /// The file it was opened from, which reads open again. None in memory.
+    path: Option<PathBuf>,
     /// The folder the database is in, which exports stay out of. None in
     /// memory.
     dir: Option<PathBuf>,
@@ -370,19 +372,32 @@ impl Db {
         }
         migrate(&mut conn, version)?;
         let read = match path {
-            Some(path) => {
-                let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-                // Reads only wait for a writer's commit, never for each other.
-                conn.busy_timeout(BUSY_TIMEOUT)?;
-                Some(Arc::new(Mutex::new(conn)))
-            }
+            Some(path) => Some(Arc::new(Mutex::new(read_only(path)?))),
             None => None,
         };
         Ok(Self {
             write: Arc::new(Mutex::new(conn)),
             read,
             reads: Arc::default(),
+            path: path.map(Path::to_path_buf),
             dir: path.and_then(|path| fs::canonicalize(path.parent()?).ok()),
+        })
+    }
+
+    /// Another handle on the database, whose reads have a connection of their
+    /// own. In memory, there is only one connection to share.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "nothing reads through the store yet")
+    )]
+    pub fn reader(&self) -> anyhow::Result<Self> {
+        let read = match &self.path {
+            Some(path) => Some(Arc::new(Mutex::new(read_only(path)?))),
+            None => None,
+        };
+        Ok(Self {
+            read,
+            ..self.clone()
         })
     }
 
@@ -1241,6 +1256,13 @@ fn set_pragmas(conn: &Connection) -> Result<()> {
     )
 }
 
+fn read_only(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // Reads only wait for a writer's commit, never for each other.
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    Ok(conn)
+}
+
 /// Keeps the transcripts in the database to its user.
 #[cfg(unix)]
 fn restrict(path: &Path, mode: u32) {
@@ -1477,6 +1499,7 @@ fn copy_checked(source: &Path, target: &Path) -> anyhow::Result<Vec<Project>> {
         write: Arc::new(Mutex::new(conn)),
         read: None,
         reads: Arc::default(),
+        path: None,
         dir: None,
     };
     Ok(db.projects()?)
@@ -1945,6 +1968,7 @@ mod tests {
             write: Arc::new(Mutex::new(conn)),
             read: None,
             reads: Arc::default(),
+            path: None,
             dir: None,
         };
         assert_eq!(found(&db, "needle"), ["needle"]);

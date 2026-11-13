@@ -12,6 +12,7 @@ mod sessions;
 mod settings;
 mod sidebar;
 mod status;
+mod store;
 mod terminal;
 mod terminal_view;
 mod transcript;
