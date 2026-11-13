@@ -240,6 +240,10 @@ pub struct Workspace {
     /// UI thread, and the lookup under way.
     installed: Option<(i64, Vec<Agent>)>,
     _installed_lookup: Option<Task<()>>,
+    _new_chat_lookup: Option<Task<()>>,
+    /// The search box last opened, with the project whose agents it offers
+    /// to start, which fill in once they have been looked up.
+    palette_start: Option<(i64, palette::Sections)>,
     _theme: Subscription,
     _focus_lost: Subscription,
     /// Why the workspace can't be used: the database didn't open, or another
@@ -352,6 +356,34 @@ impl Render for ResizeShell {
 
 /// The shell's height in a window `viewport` tall, taking `share` of it but
 /// kept within the shell's limits.
+/// When the user asked for a new chat, which what finishes later, git's
+/// answers and the checkout of the chat's worktree, is checked against.
+#[derive(Clone, Copy, PartialEq)]
+struct Asked {
+    navigations: u64,
+    closed_all: u64,
+}
+
+/// Where the agents to start are among the search box's sections.
+const PALETTE_START: usize = 1;
+
+/// The search box's entries that start `agents` in a new chat of project
+/// `project_id`.
+fn start_entries(project_id: i64, agents: &[Agent]) -> Vec<Entry> {
+    agents
+        .iter()
+        .map(|&agent| {
+            Entry::new(
+                agent.display_name(),
+                Lead::Icon(IconName::Plus.into()),
+                Pick::StartAgent(project_id, agent),
+            )
+            .meta(agent.program())
+            .keywords(["new chat", "start"])
+        })
+        .collect()
+}
+
 fn shell_height(share: f32, viewport: Pixels) -> Pixels {
     (viewport * share.min(MAX_SHELL_SHARE)).max(MIN_SHELL_HEIGHT)
 }
@@ -739,6 +771,8 @@ impl Workspace {
             reveal_numbers: None,
             installed: None,
             _installed_lookup: None,
+            _new_chat_lookup: None,
+            palette_start: None,
             _theme: theme,
             _focus_lost: focus_lost,
             broken,
@@ -1427,13 +1461,54 @@ impl Workspace {
         let Some(project) = project else {
             return;
         };
-        // Only the agents whose CLI is installed can start. Chats of the others
-        // stay as they are.
-        let agents = Rc::new(Agent::installed(&project.path));
+        let path = project.path.clone();
+        let asked = self.ask_for_chat();
+        self._new_chat_lookup = Some(cx.spawn_in(window, async move |this, cx| {
+            // Only the agents whose CLI is installed can start. Chats of the
+            // others stay as they are. A chat can have a worktree of its own
+            // when the project is in a git repository.
+            let (agents, in_git) = cx
+                .background_spawn(async move {
+                    let agents = Agent::installed(&path);
+                    let in_git = if agents.is_empty() {
+                        Ok(false)
+                    } else {
+                        worktree::repo(&path).map(|repo| repo.is_some())
+                    };
+                    (agents, in_git)
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                // The user may have asked for something else meanwhile, opened
+                // another dialog, or removed the project and had its id given
+                // to another.
+                if this.asked() != asked
+                    || window.has_active_dialog(cx)
+                    || !matches!(this.db.project_path(project.id), Ok(Some(path)) if path == project.path)
+                {
+                    return;
+                }
+                match in_git {
+                    Ok(in_git) => this.show_new_chat_dialog(project, agents, in_git, window, cx),
+                    Err(err) => window.push_notification(format!("{err:#}"), cx),
+                }
+            })
+            .ok();
+        }));
+    }
+
+    fn show_new_chat_dialog(
+        &mut self,
+        project: db::Project,
+        agents: Vec<Agent>,
+        in_git: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project_id = project.id;
+        let agents = Rc::new(agents);
         let none_installed = agents.is_empty();
-        // A chat can have a worktree of its own when the project is in a git
-        // repository. Whether it does starts as the settings say.
-        let in_git = !none_installed && worktree::repo(&project.path).is_some();
+        // Whether the chat gets a worktree starts as the settings say.
         let use_worktree = Rc::new(Cell::new(
             in_git && cx.global::<Settings>().worktree_by_default,
         ));
@@ -1451,12 +1526,14 @@ impl Workspace {
                 let worktree = use_worktree.get();
                 workspace
                     .update(cx, |this, cx| {
+                        let asked = this.ask_for_chat();
                         this.new_chat(
                             project_id,
                             agent,
                             &project.path,
                             worktree,
                             title,
+                            asked,
                             window,
                             cx,
                         )
@@ -1671,24 +1748,73 @@ impl Workspace {
             .iter()
             .find(|project| project.id == project_id)
             .map(|project| project.path.clone());
-        if let Some(path) = path {
-            let worktree =
-                cx.global::<Settings>().worktree_by_default && worktree::repo(&path).is_some();
+        let Some(path) = path else {
+            return;
+        };
+        let asked = self.ask_for_chat();
+        if !cx.global::<Settings>().worktree_by_default {
             self.new_chat(
                 project_id,
                 agent,
                 &path,
-                worktree,
+                false,
                 String::new(),
+                asked,
                 window,
                 cx,
             );
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let repo = {
+                let path = path.clone();
+                cx.background_spawn(async move { worktree::repo(&path) })
+                    .await
+            };
+            this.update_in(cx, |this, window, cx| match repo {
+                Ok(repo) => this.new_chat(
+                    project_id,
+                    agent,
+                    &path,
+                    repo.is_some(),
+                    String::new(),
+                    asked,
+                    window,
+                    cx,
+                ),
+                // Starting it in the project's folder would have it share
+                // that with other chats, which the settings asked to avoid.
+                Err(err) if this.closed_all == asked.closed_all => {
+                    window.push_notification(format!("{err:#}"), cx)
+                }
+                Err(_) => {}
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asking for a new chat is itself a request to show something, so it
+    /// supersedes the chats still opening and the new chats still on their
+    /// way for earlier requests, which start in the background.
+    fn ask_for_chat(&mut self) -> Asked {
+        self.navigations += 1;
+        self.requested = None;
+        self.asked()
+    }
+
+    fn asked(&self) -> Asked {
+        Asked {
+            navigations: self.navigations,
+            closed_all: self.closed_all,
         }
     }
 
     /// Starts an agent in a new chat of a project, in a new worktree of its
     /// own when `worktree` is set. An empty `title` leaves the chat titled
-    /// after its agent's sessions.
+    /// after its agent's sessions. The chat starts in the background if the
+    /// user asked to show something else since `asked`, and not at all if
+    /// they closed all the chats.
     #[expect(
         clippy::too_many_arguments,
         reason = "GPUI's context arguments count toward the limit"
@@ -1700,23 +1826,36 @@ impl Workspace {
         project: &Path,
         worktree: bool,
         title: String,
+        asked: Asked,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // All the chats were closed meanwhile, this one with them.
+        if self.closed_all != asked.closed_all {
+            return;
+        }
         if !worktree {
-            self.add_chat(project_id, agent, project, None, &title, true, window, cx);
+            // The project may have been removed while git was asked about it,
+            // and its id given to another project.
+            match self.db.project_path(project_id) {
+                Ok(Some(path)) if path == project => {}
+                Ok(_) => return,
+                Err(err) => {
+                    window.push_notification(format!("Couldn't add the chat: {err}"), cx);
+                    return;
+                }
+            }
+            let show = self.navigations == asked.navigations;
+            self.add_chat(project_id, agent, project, None, &title, show, window, cx);
             return;
         }
         // Checking out the project takes a while in a large repository, and
         // the user may show another chat or the settings meanwhile. Then the
         // new chat starts in the background, so it can't take the keyboard.
-        // Asking for it is itself a request to show something, so it
-        // supersedes the chats still opening and the worktrees still being
-        // checked out for earlier requests, which start in the background.
-        self.navigations += 1;
-        self.requested = None;
-        let navigations = self.navigations;
-        let closed_all = self.closed_all;
+        let Asked {
+            navigations,
+            closed_all,
+        } = asked;
         let project = project.to_path_buf();
         let checkout = worktree::Checkout::start(&project);
         let created = checkout.created();
@@ -2969,6 +3108,9 @@ impl Workspace {
                 _ => self.focus_chat(window, cx),
             }
         }
+        // Selecting a project is asking to show something, so a new chat or
+        // New Chat dialog asked for before doesn't take the view from it.
+        self.navigations += 1;
         self.sync_terminals(cx);
         self.look_up_installed(cx);
         cx.notify();
@@ -2991,6 +3133,11 @@ impl Workspace {
                 .background_spawn(async move { Agent::installed(&path) })
                 .await;
             this.update(cx, |this, cx| {
+                if let Some((project, sections)) = &this.palette_start
+                    && *project == id
+                {
+                    sections.set(PALETTE_START, start_entries(id, &agents), cx);
+                }
                 this.installed = Some((id, agents));
                 cx.notify();
             })
@@ -3548,6 +3695,11 @@ impl Workspace {
     /// the selected project can start, the projects, the commands, and what
     /// is archived; or with `archived_only`, over what is archived alone.
     fn open_palette(&mut self, archived_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The agents to start are the ones last found until they have been
+        // looked up again.
+        self.palette_start = None;
+        let installed = self.installed.clone();
+        self.look_up_installed(cx);
         let sidebar = self.sidebar.read(cx);
         let mut chats = Vec::new();
         let mut archived = Vec::new();
@@ -3605,21 +3757,11 @@ impl Workspace {
             Some(project) => format!("Start an agent in {}", project.name),
             None => "Start an agent".into(),
         };
-        let start = selected
-            .map(|project| {
-                Agent::installed(&project.path)
-                    .into_iter()
-                    .map(|agent| {
-                        Entry::new(
-                            agent.display_name(),
-                            Lead::Icon(IconName::Plus.into()),
-                            Pick::StartAgent(project.id, agent),
-                        )
-                        .meta(agent.program())
-                        .keywords(["new chat", "start"])
-                    })
-                    .collect()
-            })
+        let selected_id = selected.map(|project| project.id);
+        let start = selected_id
+            .zip(installed)
+            .filter(|(project, (id, _))| project == id)
+            .map(|(project, (_, agents))| start_entries(project, &agents))
             .unwrap_or_default();
 
         for project in sidebar.projects() {
@@ -3881,19 +4023,21 @@ impl Workspace {
             .keywords(["restore", "backup"]),
         );
 
-        palette::open(
-            vec![
-                ("Chats".into(), chats),
-                (start_heading.into(), start),
-                ("Projects".into(), projects),
-                ("Commands".into(), commands),
-                ("Archived".into(), archived),
-            ],
+        let mut sections = vec![
+            ("Chats".into(), chats),
+            ("Projects".into(), projects),
+            ("Commands".into(), commands),
+            ("Archived".into(), archived),
+        ];
+        sections.insert(PALETTE_START, (start_heading.into(), start));
+        let sections = palette::open(
+            sections,
             Some(self.message_search(places)),
             on_pick,
             window,
             cx,
         );
+        self.palette_start = selected_id.map(|id| (id, sections));
     }
 
     /// Finds what was said in the chats, off the UI thread. `places` says

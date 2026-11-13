@@ -93,38 +93,73 @@ pub fn shortcut(action: &dyn Action, window: &Window) -> Option<SharedString> {
     Some(Kbd::format(keystroke.as_keystroke()).into())
 }
 
+/// The sections of an open modal, which can change while it is open.
+#[derive(Clone)]
+pub struct Sections(Rc<RefCell<Shown>>);
+
+struct Shown {
+    sections: Vec<(SharedString, Vec<Entry>)>,
+    /// What the sections show, built again once a section changes.
+    built: Option<Built>,
+}
+
+/// The sections' groups, and what picking each of their entries does.
+type Built = (Vec<CommandGroup>, Rc<Vec<Vec<Pick>>>);
+
+impl Sections {
+    /// Replaces the entries of the `ix`th section `open` was given. An empty
+    /// section keeps its place, so what is highlighted in the others stays.
+    pub fn set(&self, ix: usize, entries: Vec<Entry>, cx: &mut App) {
+        let mut shown = self.0.borrow_mut();
+        if let Some((_, section)) = shown.sections.get_mut(ix) {
+            *section = entries;
+            shown.built = None;
+        }
+        drop(shown);
+        cx.refresh_windows();
+    }
+
+    fn built(&self, window: &Window) -> Built {
+        let mut shown = self.0.borrow_mut();
+        let shown = &mut *shown;
+        let (groups, picks) = shown.built.get_or_insert_with(|| {
+            let (groups, picks): (Vec<_>, Vec<_>) = shown
+                .sections
+                .iter()
+                .map(|(heading, entries)| group(heading.clone(), entries.iter(), None, window))
+                .unzip();
+            (groups, Rc::new(picks))
+        });
+        (groups.clone(), picks.clone())
+    }
+}
+
 /// Opens the modal over `sections`, each a heading and its entries, and what
 /// `search` finds for the query under them, where it can't move the entry the
-/// user is about to pick. Empty sections are left out.
+/// user is about to pick. Empty sections don't show.
 pub fn open(
     sections: Vec<(SharedString, Vec<Entry>)>,
     search: Option<Search>,
     on_pick: impl Fn(Pick, &mut Window, &mut App) + 'static,
     window: &mut Window,
     cx: &mut App,
-) {
-    let mut groups = Vec::new();
-    let mut picks: Vec<Vec<Pick>> = Vec::new();
-    for (heading, entries) in sections {
-        if entries.is_empty() {
-            continue;
-        }
-        let (group, group_picks) = group(heading, entries.iter(), None, window);
-        groups.push(group);
-        picks.push(group_picks);
-    }
-
+) -> Sections {
+    let sections = Sections(Rc::new(RefCell::new(Shown {
+        sections,
+        built: None,
+    })));
     let state = cx.new(|cx| CommandState::new(window, cx));
-    let picks = Rc::new(picks);
     let on_pick = Rc::new(on_pick);
     let initial_focus = Cell::new(true);
     let found: Rc<RefCell<Vec<Entry>>> = Rc::default();
     let searching: Rc<Cell<Option<Task<()>>>> = Rc::default();
+    let shown = sections.clone();
     window.open_dialog(cx, move |dialog, window, cx| {
         if initial_focus.replace(false) {
             state.update(cx, |state, cx| state.focus(window, cx));
         }
-        let (picks, on_pick) = (picks.clone(), on_pick.clone());
+        let (groups, picks) = shown.built(window);
+        let on_pick = on_pick.clone();
         // The filter only passes what has the query in it, and a message can
         // match without having it verbatim. Keeping the query that is typed
         // now, the last results stay until the next ones replace them.
@@ -137,8 +172,7 @@ pub fn open(
         );
         let (found, searching, search) = (found.clone(), searching.clone(), search.clone());
         let command = groups
-            .iter()
-            .cloned()
+            .into_iter()
             .chain((!message_picks.is_empty()).then_some(messages))
             .fold(Command::new(&state), Command::group)
             .bordered(false)
@@ -206,6 +240,7 @@ pub fn open(
             .close_button(false)
             .child(command)
     });
+    sections
 }
 
 /// A section of the modal, and what picking each of its entries does. Besides

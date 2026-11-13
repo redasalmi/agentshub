@@ -20,6 +20,10 @@ const BRANCH_PREFIX: &str = "agentshub/";
 /// Agents Hub quits, or its chat is closed, before they're killed.
 const STOP_GRACE: Duration = Duration::from_millis(500);
 
+/// How long git gets to say which repository a folder is in, as a folder on a
+/// network filesystem that stopped answering can keep it waiting.
+const REPO_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Where a project folder sits in its git repository.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Repo {
@@ -30,20 +34,50 @@ pub struct Repo {
 }
 
 /// The repository `dir` is in, if git is installed and it is in one with a
-/// working tree.
-pub fn repo(dir: &Path) -> Option<Repo> {
-    let output = git(dir)
+/// working tree. Fails if git doesn't answer in time, which doesn't tell
+/// whether it is in one.
+pub fn repo(dir: &Path) -> anyhow::Result<Option<Repo>> {
+    let Ok(mut child) = git(dir)
         .args(["rev-parse", "--show-toplevel", "--show-prefix"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Ok(None);
+    };
+    let deadline = Instant::now() + REPO_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            _ => {
+                child.kill().ok();
+                child.wait().ok();
+                bail!(
+                    "Couldn't tell whether {} is in a git repository: git didn't answer in time.",
+                    dir.display()
+                );
+            }
+        }
+    };
+    let mut stdout = String::new();
+    if !status.success()
+        || child
+            .stdout
+            .take()
+            .is_none_or(|mut out| out.read_to_string(&mut stdout).is_err())
+    {
+        return Ok(None);
     }
-    let stdout = String::from_utf8(output.stdout).ok()?;
     let mut lines = stdout.lines();
-    let root = PathBuf::from(lines.next().filter(|root| !root.is_empty())?);
+    let Some(root) = lines.next().filter(|root| !root.is_empty()) else {
+        return Ok(None);
+    };
     let prefix = PathBuf::from(lines.next().unwrap_or_default());
-    Some(Repo { root, prefix })
+    Ok(Some(Repo {
+        root: PathBuf::from(root),
+        prefix,
+    }))
 }
 
 /// A worktree Agents Hub made for a chat.
@@ -197,7 +231,7 @@ pub fn abandon(checkouts: Vec<Checkout>) {
 /// Makes a worktree of `project`'s repository in `dir`, unless the
 /// checkout `state` is for is stopped first.
 fn create_in(project: &Path, dir: &Path, state: &Mutex<Git>) -> anyhow::Result<Worktree> {
-    let repo = repo(project).context("The project isn't in a git repository.")?;
+    let repo = repo(project)?.context("The project isn't in a git repository.")?;
     let parent = dir.join(project_dir_name(&repo.root));
     std::fs::create_dir_all(&parent)
         .with_context(|| format!("Couldn't create {}", parent.display()))?;
@@ -331,11 +365,15 @@ pub fn remove(worktree: &Worktree, project: &Path) -> anyhow::Result<Removal> {
     // A folder that isn't a working tree of its own anymore would have git
     // look at whatever repository it is in, as a home folder kept in git.
     let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-    if repo(root).is_none_or(|repo| repo.root != canonical) {
-        return Ok(Removal::Kept(format!(
-            "{} isn't a git worktree anymore",
-            root.display()
-        )));
+    match repo(root) {
+        Ok(Some(repo)) if repo.root == canonical => {}
+        Ok(_) => {
+            return Ok(Removal::Kept(format!(
+                "{} isn't a git worktree anymore",
+                root.display()
+            )));
+        }
+        Err(err) => return Ok(Removal::Kept(format!("{err:#}"))),
     }
     // Removing a worktree deletes its HEAD's reflog, which is all that keeps
     // commits made on a detached HEAD, so they go on a branch first.
@@ -506,14 +544,14 @@ mod tests {
     fn finds_where_a_folder_sits_in_its_repository() {
         let (base, root) = setup();
         assert_eq!(
-            repo(&root),
+            repo(&root).unwrap(),
             Some(Repo {
                 root: root.clone(),
                 prefix: PathBuf::new()
             })
         );
         assert_eq!(
-            repo(&root.join("app")),
+            repo(&root.join("app")).unwrap(),
             Some(Repo {
                 root: root.clone(),
                 prefix: PathBuf::from("app")
@@ -522,8 +560,8 @@ mod tests {
         let outside = base.join("outside");
         fs::create_dir(&outside).unwrap();
         // The temp folder may itself be in a repository on some machines.
-        if repo(&base).is_none() {
-            assert_eq!(repo(&outside), None);
+        if repo(&base).unwrap().is_none() {
+            assert_eq!(repo(&outside).unwrap(), None);
         }
         fs::remove_dir_all(base).unwrap();
     }
