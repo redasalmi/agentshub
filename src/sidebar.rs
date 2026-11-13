@@ -32,6 +32,7 @@ pub const MIN_NAMED_RAIL_WIDTH: Pixels = px(120.);
 pub const MAX_RAIL_WIDTH: Pixels = px(300.);
 pub const FOLD_RAIL_BELOW: Pixels = px(100.);
 const TILE_SIZE: Pixels = px(40.);
+const TILE_GROUP: &str = "project-tile";
 /// A project's row in the rail while it names them, and its mark there.
 const ROW_HEIGHT: Pixels = px(34.);
 const MARK_SIZE: Pixels = px(22.);
@@ -1019,22 +1020,33 @@ impl Sidebar {
                 .flex()
                 .items_center()
                 .justify_center()
+                .group(TILE_GROUP)
                 .rounded(px(10.))
-                .border_1()
                 .bg(tint.soft)
                 .text_color(tint.text)
                 .text_sm()
                 .font_medium()
                 .font_family(theme.mono_font_family.clone())
-                .map(|this| {
-                    if selected {
-                        this.border_color(palette.accent)
-                    } else {
-                        this.border_color(transparent_black())
-                            .hover(|style| style.border_color(palette.border_strong))
-                    }
-                })
                 .child(mark)
+                // A div paints its border over its children, so the border
+                // is a child of its own, under the badge.
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(10.))
+                        .border_1()
+                        .map(|this| {
+                            if selected {
+                                this.border_color(palette.accent)
+                            } else {
+                                this.border_color(transparent_black())
+                                    .group_hover(TILE_GROUP, |style| {
+                                        style.border_color(palette.border_strong)
+                                    })
+                            }
+                        }),
+                )
                 .when(open > 0, |this| {
                     this.child(count().absolute().top(px(-5.)).left(px(-5.)))
                 })
