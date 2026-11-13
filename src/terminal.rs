@@ -35,6 +35,8 @@ use libghostty_vt::{
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use smol::future::FutureExt as _;
 
+#[cfg(target_os = "linux")]
+use crate::scope;
 use crate::status::{self, Report, Status};
 
 /// Output bursts are coalesced into at most one frame per interval, which is
@@ -219,6 +221,9 @@ impl Pty {
         }
         let child = pair.slave.spawn_command(command)?;
         let pid = Arc::new(Mutex::new(child.process_id()));
+        // Opened before the reaper starts, so it is the CLI's.
+        #[cfg(target_os = "linux")]
+        let pidfd = child.process_id().and_then(scope::pidfd);
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;
@@ -249,6 +254,24 @@ impl Pty {
         let (reaped_tx, reaped) = smol::channel::bounded::<()>(1);
         let exit_tx = tx.clone();
         let reaper_pid = pid.clone();
+        // The CLI's scope is stopped once the reaper is done, on a thread of
+        // its own so that a slow systemd never holds up the reaper. The CLI
+        // is only moved there after it starts, so what it starts in the
+        // meantime stays out of the scope.
+        #[cfg(target_os = "linux")]
+        let reaper_done = {
+            let (reaper_done, done) = mpsc::channel::<scope::Stopping>();
+            let program = program.to_owned();
+            thread::spawn(move || {
+                let scope = pidfd.and_then(|pidfd| scope::start(&program, pidfd));
+                // Held until the scope is stopped, which quitting waits for.
+                let _stopping = done.recv();
+                if let Some(scope) = scope {
+                    scope.stop();
+                }
+            });
+            reaper_done
+        };
         thread::spawn(move || {
             let _reaped_tx = reaped_tx;
             let mut child = child;
@@ -279,6 +302,10 @@ impl Pty {
                 }
             };
             exit_tx.send(Msg::Exited(success)).ok();
+            // Before the CLI counts as reaped, so that quitting once it is
+            // waits for its scope to be stopped too.
+            #[cfg(target_os = "linux")]
+            reaper_done.send(scope::stopping()).ok();
         });
 
         let failed_tx = updates_tx.clone();
@@ -1831,6 +1858,86 @@ mod tests {
             .is_ok_and(|stat| !stat.contains(") Z "))
         {
             assert!(Instant::now() < deadline, "{pid} outlived the terminal");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kills_what_left_the_session_on_shutdown() {
+        if !scope::available() {
+            eprintln!("skipped: systemd can't put the CLI in a scope");
+            return;
+        }
+        // The pause lets the CLI be moved into its scope first.
+        let pty = Pty::spawn(
+            "sh",
+            &[
+                "-c".into(),
+                "sleep 0.2; setsid sleep 100 & echo $!; wait".into(),
+            ],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid = loop {
+            assert!(Instant::now() < deadline, "no frame with the pid");
+            let Ok(Update::Frame(frame)) = smol::block_on(pty.updates.recv()) else {
+                continue;
+            };
+            if let Ok(pid) = row_text(&frame).trim().parse::<u32>() {
+                break pid;
+            }
+        };
+        // Long enough for `setsid` to have left the session.
+        thread::sleep(Duration::from_millis(100));
+        pty.tx.send(Msg::Shutdown).unwrap();
+        pty.reaped.recv_blocking().unwrap_err();
+        while fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.contains(") Z "))
+        {
+            assert!(Instant::now() < deadline, "{pid} outlived the terminal");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kills_what_the_child_left_behind_when_it_exits() {
+        if !scope::available() {
+            eprintln!("skipped: systemd can't put the CLI in a scope");
+            return;
+        }
+        let pty = Pty::spawn(
+            "sh",
+            &[
+                "-c".into(),
+                "sleep 0.2; setsid sleep 100 & echo $!; sleep 0.1".into(),
+            ],
+            &[],
+            Path::new("/"),
+            colors(),
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid = loop {
+            assert!(Instant::now() < deadline, "no frame with the pid");
+            let Ok(Update::Frame(frame)) = smol::block_on(pty.updates.recv()) else {
+                continue;
+            };
+            if let Ok(pid) = row_text(&frame).trim().parse::<u32>() {
+                break pid;
+            }
+        };
+        pty.reaped.recv_blocking().unwrap_err();
+        while fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.contains(") Z "))
+        {
+            assert!(Instant::now() < deadline, "{pid} outlived the CLI");
             thread::sleep(Duration::from_millis(10));
         }
     }

@@ -56,6 +56,13 @@ pub fn claim() -> Option<Instance> {
     Some(Instance { connection, shown })
 }
 
+impl Instance {
+    /// Whether this is the only instance on the session bus.
+    pub fn owns_name(&self) -> bool {
+        self.connection.is_some()
+    }
+}
+
 fn own(shown: smol::channel::Sender<Option<String>>) -> zbus::Result<zbus::blocking::Connection> {
     let connection = zbus::blocking::connection::Builder::session()?
         .serve_at(OBJECT_PATH, Application { shown })?

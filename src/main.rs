@@ -6,6 +6,8 @@ mod history;
 mod instance;
 mod palette;
 mod reports;
+#[cfg(target_os = "linux")]
+mod scope;
 mod sessions;
 mod settings;
 mod sidebar;
@@ -59,6 +61,10 @@ fn main() {
     let Some(instance) = instance::claim() else {
         return;
     };
+    #[cfg(target_os = "linux")]
+    if instance.owns_name() {
+        std::thread::spawn(scope::stop_leftovers);
+    }
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
         terminal_view::init(cx);

@@ -36,6 +36,8 @@ use crate::db::{self, Db};
 use crate::history::History;
 use crate::palette::{self, Entry, Lead, Pick};
 use crate::reports::{self, Reports};
+#[cfg(target_os = "linux")]
+use crate::scope;
 use crate::sessions;
 use crate::settings::{
     Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SHELL_SHARE, DEFAULT_SIDEBAR_WIDTH,
@@ -660,6 +662,8 @@ impl Workspace {
                 )
                 .collect();
             terminal::wait_reaped(reaped);
+            #[cfg(target_os = "linux")]
+            scope::wait_stopped();
             worktree::abandon(std::mem::take(&mut this.checkouts));
             // The worktrees of deleted chats, whose tasks won't run anymore.
             // One being removed already is waited for.
