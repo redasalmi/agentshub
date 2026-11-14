@@ -9,6 +9,8 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 
+use crate::agent::Agent;
+use crate::terminal::Pid;
 use crate::transcript::{self, clean_title};
 
 const CODEX_INDEX: &str = "session_index.jsonl";
@@ -33,13 +35,23 @@ fn codex_index() -> Option<PathBuf> {
     Some(codex_home()?.join(CODEX_INDEX))
 }
 
+/// The session a Codex CLI is in, with Codex's id for it. Its open files are
+/// listed under `pid`'s lock, so the CLI can't be reaped, and its pid go to
+/// another process, meanwhile. Only that is done under it.
+pub fn codex_session(pid: &Pid) -> Option<(String, PathBuf)> {
+    let dir = codex_sessions_dir()?;
+    let files = pid.with(|pid| codex_open_sessions(pid, &dir))?;
+    let path = codex_session_in(files)?;
+    Some((transcript::session_id(Agent::Codex, &path)?, path))
+}
+
 /// The session files a Codex process keeps open, including the sessions it
 /// switched away from. Resolve npm's Node launcher to its native child first,
 /// then inspect only that process: a `codex exec` it starts has a chat of its
 /// own. It only reads under /proc, so it is quick enough to run while the
 /// process is kept from being reaped (see `terminal::Pid`).
 #[cfg(target_os = "linux")]
-pub fn codex_open_sessions(pid: u32, dir: &Path) -> Option<Vec<PathBuf>> {
+fn codex_open_sessions(pid: u32, dir: &Path) -> Option<Vec<PathBuf>> {
     let process = codex_process_dir(&PathBuf::from(format!("/proc/{pid}")))?;
     Some(
         fs::read_dir(process.join("fd"))
@@ -56,7 +68,7 @@ pub fn codex_open_sessions(pid: u32, dir: &Path) -> Option<Vec<PathBuf>> {
 /// Of the session files a Codex process keeps open, the one written to last,
 /// leaving out subagent threads.
 #[cfg(target_os = "linux")]
-pub fn codex_session_in(files: Vec<PathBuf>) -> Option<PathBuf> {
+fn codex_session_in(files: Vec<PathBuf>) -> Option<PathBuf> {
     let mut files: Vec<(SystemTime, PathBuf)> = files
         .into_iter()
         .filter_map(|path| Some((fs::metadata(&path).ok()?.modified().ok()?, path)))
@@ -72,12 +84,12 @@ pub fn codex_session_in(files: Vec<PathBuf>) -> Option<PathBuf> {
 
 /// Codex keeps its sessions in files only Linux exposes the way this needs.
 #[cfg(not(target_os = "linux"))]
-pub fn codex_open_sessions(_: u32, _: &Path) -> Option<Vec<PathBuf>> {
+fn codex_open_sessions(_: u32, _: &Path) -> Option<Vec<PathBuf>> {
     None
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn codex_session_in(_: Vec<PathBuf>) -> Option<PathBuf> {
+fn codex_session_in(_: Vec<PathBuf>) -> Option<PathBuf> {
     None
 }
 

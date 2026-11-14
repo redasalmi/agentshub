@@ -569,11 +569,6 @@ impl Terminal {
         self.frame.clone()
     }
 
-    /// Calls `f` with the CLI's pid, as `Pid::with` does.
-    pub fn with_pid<T>(&self, f: impl FnOnce(u32) -> Option<T>) -> Option<T> {
-        self.pid.with(f)
-    }
-
     pub fn pid(&self) -> Pid {
         self.pid.clone()
     }
