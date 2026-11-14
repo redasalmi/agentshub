@@ -3,7 +3,7 @@
 //! once it's in. Kept apart from the window so every order of events can be
 //! tested.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -177,6 +177,8 @@ impl Codex {
 pub struct Lifecycle {
     phases: HashMap<i64, Phase>,
     deleting: HashMap<i64, Deleting>,
+    /// The chats whose delete was saved. Ids aren't reused.
+    gone: HashSet<i64>,
     adding: HashMap<Saving, Adding>,
     next_saving: u64,
     /// How many times all the chats were closed. A new chat asked for before
@@ -336,6 +338,10 @@ impl Lifecycle {
         worktree: Option<(Worktree, PathBuf)>,
         reaped: Option<Reaped>,
     ) {
+        // A listing from before its delete was saved can still have it.
+        if self.gone.contains(&id) {
+            return;
+        }
         let deleting = self.deleting.entry(id).or_insert(Deleting {
             worktree,
             reaped: None,
@@ -371,6 +377,20 @@ impl Lifecycle {
         let Deleting {
             worktree, reaped, ..
         } = self.deleting.remove(&id)?;
+        if deleted {
+            self.gone.insert(id);
+        } else if let Some(reaped) = reaped.clone()
+            && !self.phases.contains_key(&id)
+        {
+            // Its CLI may not be reaped yet, and nothing else waits for it.
+            self.phases.insert(
+                id,
+                Phase::Stopping {
+                    reaped,
+                    session: None,
+                },
+            );
+        }
         deleted.then_some(Deleted { worktree, reaped })
     }
 
@@ -660,6 +680,8 @@ mod tests {
         /// Whether a saved delete still has to give what to remove.
         to_remove: HashSet<i64>,
         gone: HashSet<i64>,
+        /// What the CLI stopped by a delete under way says once it's reaped.
+        deleting_reaped: HashMap<i64, Reaped>,
     }
 
     impl World {
@@ -786,6 +808,12 @@ mod tests {
                     } else {
                         self.lifecycle.reaping(id)
                     };
+                    if !self.lifecycle.is_deleting(id) {
+                        self.deleting_reaped.remove(&id);
+                    }
+                    if let Some(reaped) = &reaped {
+                        self.deleting_reaped.insert(id, reaped.clone());
+                    }
                     self.lifecycle.mark_deleting(id, None, reaped);
                     *self.deletes.entry(id).or_default() += 1;
                     self.to_remove.insert(id);
@@ -796,6 +824,7 @@ mod tests {
                         return false;
                     };
                     *pending -= 1;
+                    let was_deleting = self.lifecycle.is_deleting(id);
                     let finished = self.lifecycle.finish_deleting(id, deleted);
                     if finished.is_some() {
                         assert!(deleted, "{id} removed though its delete failed");
@@ -803,6 +832,14 @@ mod tests {
                     }
                     if deleted {
                         self.gone.insert(id);
+                    } else if was_deleting
+                        && !self.lifecycle.is_deleting(id)
+                        && let Some(reaped) = self.deleting_reaped.remove(&id)
+                        && !self.reads.contains_key(&id)
+                        && !self.stopping.contains_key(&id)
+                    {
+                        // The CLI a failed delete stopped is still waited for.
+                        self.stopping.insert(id, reaped);
                     }
                 }
             }
@@ -1699,5 +1736,514 @@ mod view_tests {
     fn only_the_latest_request_takes_the_view_in_every_order_of_events() {
         let played = explore(&mut Vec::new(), &events(), 6);
         assert!(played > 100_000, "{played}");
+    }
+}
+
+#[cfg(test)]
+mod deleting_tests {
+    use std::path::PathBuf;
+
+    use super::Lifecycle;
+    use crate::worktree::Worktree;
+
+    fn worktree() -> (Worktree, PathBuf) {
+        let root = PathBuf::from("/worktrees/1");
+        (
+            Worktree {
+                folder: root.clone(),
+                root,
+            },
+            PathBuf::from("/project"),
+        )
+    }
+
+    #[test]
+    fn a_failed_delete_still_waits_for_the_cli_it_stopped() {
+        let mut lifecycle = Lifecycle::default();
+        let (_cli, reaped) = smol::channel::bounded::<()>(1);
+        lifecycle.mark_deleting(1, Some(worktree()), Some(reaped.clone()));
+        assert!(lifecycle.finish_deleting_all(&[1], false).is_empty());
+        // The chat doesn't open again, nor does a delete forget it, until
+        // the CLI is reaped.
+        let waits = lifecycle.reaping(1).expect("the CLI is still waited for");
+        assert!(waits.same_channel(&reaped));
+        lifecycle.mark_deleting(1, Some(worktree()), lifecycle.reaping(1));
+        let deleted = lifecycle.finish_deleting_all(&[1], true);
+        let reaped_after = deleted[0].1.reaped.as_ref().expect("waits for the CLI");
+        assert!(reaped_after.same_channel(&reaped));
+    }
+
+    #[test]
+    fn a_chat_whose_delete_is_saved_isnt_deleted_again() {
+        let mut lifecycle = Lifecycle::default();
+        lifecycle.mark_deleting(1, Some(worktree()), None);
+        assert_eq!(lifecycle.finish_deleting_all(&[1], true).len(), 1);
+        // As from a project's listing made before that delete was saved.
+        lifecycle.mark_deleting(1, Some(worktree()), None);
+        assert!(!lifecycle.is_deleting(1));
+        assert!(lifecycle.finish_deleting_all(&[1], true).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+    use std::path::PathBuf;
+
+    use smol::channel::Sender;
+
+    use super::{Added, Lifecycle, Reaped, RemovalJob, Saved, Saving, take_and_remove};
+    use crate::worktree::Worktree;
+
+    const PROJECT: i64 = 1;
+    /// The chat that is added, if one is asked for.
+    const NEW: i64 = 3;
+
+    fn worktree(chat: i64) -> (Worktree, PathBuf) {
+        let root = PathBuf::from(format!("/worktrees/{chat}"));
+        (
+            Worktree {
+                folder: root.clone(),
+                root,
+            },
+            PathBuf::from("/project"),
+        )
+    }
+
+    fn chat_of(worktree: &Worktree) -> i64 {
+        worktree
+            .root
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Event {
+        Delete(i64),
+        RemoveProject,
+        /// A new chat is asked for, in a worktree of its own.
+        Ask,
+        /// The store gets to the next thing asked of it: a write, which
+        /// works or fails, or a read.
+        Store(bool),
+        /// The oldest listing for a project removal reaches the workspace.
+        Listed,
+        /// The oldest check that a new chat is still there reaches it.
+        Kept,
+        Reap(i64),
+        /// The oldest removal whose CLI and shells are reaped runs.
+        Removal,
+        Quit,
+    }
+
+    enum Op {
+        Delete(i64),
+        RemoveProject(Vec<i64>),
+        Add(Saving),
+        /// Lists the projects for a removal.
+        List,
+        /// Checks that the new chat is there, with `deletions` when asked.
+        Check(Saving, u64),
+    }
+
+    /// The database: whether the project is there, and its chats, with
+    /// whether each has a worktree.
+    #[derive(Clone)]
+    struct Store {
+        project: bool,
+        rows: BTreeMap<i64, bool>,
+    }
+
+    struct World {
+        lifecycle: Lifecycle,
+        store: Store,
+        ops: VecDeque<Op>,
+        listings: VecDeque<Store>,
+        checks: VecDeque<(Saving, u64, bool)>,
+        asked: bool,
+        /// The CLIs running, and the ones stopped but not reaped.
+        running: HashMap<i64, (Sender<()>, Reaped)>,
+        stopped: HashMap<i64, Sender<()>>,
+        /// Removals waiting for their CLI and shells to be reaped.
+        removals: Vec<(RemovalJob, Vec<Reaped>)>,
+        /// The worktrees removed, by chat.
+        removed: HashSet<i64>,
+        quit: bool,
+        played: Vec<Event>,
+    }
+
+    impl World {
+        fn new() -> Self {
+            let (tx, rx) = smol::channel::bounded(1);
+            World {
+                lifecycle: Lifecycle::default(),
+                store: Store {
+                    project: true,
+                    rows: BTreeMap::from([(1, true), (2, true)]),
+                },
+                ops: VecDeque::new(),
+                listings: VecDeque::new(),
+                checks: VecDeque::new(),
+                asked: false,
+                running: HashMap::from([(1, (tx, rx))]),
+                stopped: HashMap::new(),
+                removals: Vec::new(),
+                removed: HashSet::new(),
+                quit: false,
+                played: Vec::new(),
+            }
+        }
+
+        fn worktree_of(&self, chat: i64) -> Option<(Worktree, PathBuf)> {
+            self.store
+                .rows
+                .get(&chat)
+                .is_some_and(|has| *has)
+                .then(|| worktree(chat))
+        }
+
+        fn stop(&mut self, chat: i64) -> Option<Reaped> {
+            let (tx, rx) = self.running.remove(&chat)?;
+            self.stopped.insert(chat, tx);
+            Some(rx)
+        }
+
+        fn remove(&mut self, job: &RemovalJob) {
+            let Some(chat) = take_and_remove(job, |worktree, _| chat_of(worktree)) else {
+                return;
+            };
+            // Shutdown can come back to a worktree it removed, which only
+            // prunes git's record of it.
+            assert!(
+                self.removed.insert(chat) || self.quit,
+                "worktree {chat} removed twice: {:?}",
+                self.played
+            );
+            assert!(
+                !self.store.rows.contains_key(&chat),
+                "worktree {chat} removed though its chat is there: {:?}",
+                self.played
+            );
+            assert!(
+                !self.running.contains_key(&chat) && !self.stopped.contains_key(&chat),
+                "worktree {chat} removed before its CLI was reaped: {:?}",
+                self.played
+            );
+        }
+
+        fn remove_worktree(&mut self, worktree: &(Worktree, PathBuf), reaped: Option<Reaped>) {
+            let waits: Vec<Reaped> = reaped.into_iter().collect();
+            let job = self
+                .lifecycle
+                .track_removal(&worktree.0, &worktree.1, waits.clone());
+            self.removals.push((job, waits));
+        }
+
+        fn delete_chat(&mut self, chat: i64, worktree: Option<(Worktree, PathBuf)>) {
+            self.lifecycle.cancel_opening(chat);
+            let reaped = self.stop(chat).or_else(|| self.lifecycle.reaping(chat));
+            self.lifecycle.mark_deleting(chat, worktree, reaped);
+            self.ops.push_back(Op::Delete(chat));
+        }
+
+        fn finish_deleting(&mut self, chats: &[i64], deleted: bool) {
+            for (_, deleted) in self.lifecycle.finish_deleting_all(chats, deleted) {
+                if let Some(worktree) = &deleted.worktree {
+                    self.remove_worktree(worktree, deleted.reaped);
+                }
+            }
+        }
+
+        fn finish_adding(&mut self, saving: Saving, id: Result<Option<i64>, String>, kept: bool) {
+            let saved = Saved {
+                id,
+                kept: Ok(kept),
+                closed_all: self.lifecycle.closed_all(),
+                project_archived: false,
+                chat_archived: false,
+                chat_open: false,
+                window: true,
+            };
+            let (added, worktree) = self.lifecycle.added(saving, saved);
+            match added {
+                Added::Lost | Added::Failed(_) => {
+                    if let Some(worktree) = &worktree {
+                        self.remove_worktree(worktree, None);
+                    }
+                }
+                Added::Delete(id) => self.delete_chat(id, worktree),
+                Added::Unknown(_) | Added::Listed => {}
+                Added::Start(id) => {
+                    assert!(
+                        !self.lifecycle.is_removing_project(PROJECT),
+                        "started a chat in a project being removed"
+                    );
+                    assert!(
+                        self.store.rows.contains_key(&id),
+                        "started a chat that's gone"
+                    );
+                    self.running.insert(id, smol::channel::bounded(1));
+                }
+            }
+        }
+
+        fn apply(&mut self, event: Event) -> bool {
+            if self.quit {
+                return false;
+            }
+            self.played.push(event);
+            match event {
+                Event::Delete(chat) => {
+                    if !self.store.rows.contains_key(&chat) {
+                        return false;
+                    }
+                    let worktree = self.worktree_of(chat);
+                    self.delete_chat(chat, worktree);
+                }
+                Event::RemoveProject => {
+                    if !self.store.project
+                        || !self
+                            .lifecycle
+                            .remove_project(PROJECT, PathBuf::from("/project"))
+                    {
+                        return false;
+                    }
+                    self.ops.push_back(Op::List);
+                }
+                Event::Ask => {
+                    if self.asked || !self.store.project {
+                        return false;
+                    }
+                    self.asked = true;
+                    let saving = self.lifecycle.save(PROJECT, Some(worktree(NEW)));
+                    self.ops.push_back(Op::Add(saving));
+                }
+                Event::Store(works) => {
+                    let Some(op) = self.ops.pop_front() else {
+                        return false;
+                    };
+                    match op {
+                        Op::List | Op::Check(..) if !works => {
+                            self.ops.push_front(op);
+                            return false;
+                        }
+                        Op::List => self.listings.push_back(self.store.clone()),
+                        Op::Check(saving, deletions) => {
+                            let kept = self.store.rows.contains_key(&NEW);
+                            self.checks.push_back((saving, deletions, kept));
+                        }
+                        Op::Delete(chat) => {
+                            if works {
+                                self.store.rows.remove(&chat);
+                            }
+                            self.finish_deleting(&[chat], works);
+                        }
+                        Op::RemoveProject(chats) => {
+                            if works {
+                                self.store.project = false;
+                                self.store.rows.clear();
+                            }
+                            self.lifecycle.project_removed(PROJECT);
+                            self.finish_deleting(&chats, works);
+                        }
+                        Op::Add(saving) => {
+                            if !works {
+                                self.finish_adding(saving, Err("no".to_string()), true);
+                            } else if self.store.project {
+                                self.store.rows.insert(NEW, true);
+                                self.ops
+                                    .push_back(Op::Check(saving, self.lifecycle.deletions()));
+                            } else {
+                                self.finish_adding(saving, Ok(None), true);
+                            }
+                        }
+                    }
+                }
+                Event::Listed => {
+                    let Some(listing) = self.listings.pop_front() else {
+                        return false;
+                    };
+                    if !listing.project {
+                        self.lifecycle.project_removed(PROJECT);
+                        return true;
+                    }
+                    let chats: Vec<i64> = listing.rows.keys().copied().collect();
+                    for (&chat, &has) in &listing.rows {
+                        self.lifecycle.cancel_opening(chat);
+                        let reaped = self.stop(chat).or_else(|| self.lifecycle.reaping(chat));
+                        let worktree = has.then(|| worktree(chat));
+                        self.lifecycle.mark_deleting(chat, worktree, reaped);
+                    }
+                    self.ops.push_back(Op::RemoveProject(chats));
+                }
+                Event::Kept => {
+                    let Some((saving, deletions, kept)) = self.checks.pop_front() else {
+                        return false;
+                    };
+                    if self.lifecycle.deletions() != deletions {
+                        self.ops
+                            .push_back(Op::Check(saving, self.lifecycle.deletions()));
+                    } else {
+                        self.finish_adding(saving, Ok(Some(NEW)), kept);
+                    }
+                }
+                Event::Reap(chat) => {
+                    if self.stopped.remove(&chat).is_none() {
+                        return false;
+                    }
+                }
+                Event::Removal => {
+                    let Some(index) = self
+                        .removals
+                        .iter()
+                        .position(|(_, waits)| waits.iter().all(Reaped::is_closed))
+                    else {
+                        return false;
+                    };
+                    let (job, _) = self.removals.remove(index);
+                    self.remove(&job);
+                }
+                Event::Quit => self.quit(),
+            }
+            true
+        }
+
+        /// Shutdown, as `Workspace`'s release does it.
+        fn quit(&mut self) {
+            self.quit = true;
+            // The writes asked for are done, but nothing hears of them.
+            for op in std::mem::take(&mut self.ops) {
+                match op {
+                    Op::Delete(chat) => {
+                        self.store.rows.remove(&chat);
+                    }
+                    Op::RemoveProject(_) => {
+                        self.store.project = false;
+                        self.store.rows.clear();
+                    }
+                    Op::Add(_) if self.store.project => {
+                        self.store.rows.insert(NEW, true);
+                    }
+                    Op::Add(_) | Op::List | Op::Check(..) => {}
+                }
+            }
+            for _ in self.lifecycle.take_removing() {
+                if self.store.project {
+                    self.store.project = false;
+                    for (chat, has) in std::mem::take(&mut self.store.rows) {
+                        if has {
+                            let (worktree, project) = worktree(chat);
+                            self.lifecycle
+                                .track_removal(&worktree, &project, Vec::new());
+                        }
+                    }
+                }
+            }
+            for (chat, deleted) in self.lifecycle.take_deleting() {
+                if let Some((worktree, project)) = deleted.worktree
+                    && !self.store.rows.contains_key(&chat)
+                {
+                    self.lifecycle.track_removal(
+                        &worktree,
+                        &project,
+                        deleted.reaped.into_iter().collect(),
+                    );
+                }
+            }
+            for (worktree, project) in self.lifecycle.take_adding() {
+                if !self.store.rows.contains_key(&chat_of(&worktree)) {
+                    self.lifecycle
+                        .track_removal(&worktree, &project, Vec::new());
+                }
+            }
+            // Every CLI is killed, and shutdown waits for them to be reaped.
+            self.running.clear();
+            self.stopped.clear();
+            assert!(self.lifecycle.removal_waits().all(Reaped::is_closed));
+            for job in self.lifecycle.take_removals() {
+                self.remove(&job);
+            }
+            for chat in [1, 2, NEW] {
+                let made = chat != NEW || self.asked;
+                assert_eq!(
+                    self.removed.contains(&chat),
+                    made && !self.store.rows.contains_key(&chat),
+                    "worktree {chat} left behind or removed wrongly"
+                );
+            }
+        }
+    }
+
+    fn events() -> Vec<Event> {
+        vec![
+            Event::Delete(1),
+            Event::Delete(2),
+            Event::Delete(NEW),
+            Event::RemoveProject,
+            Event::Ask,
+            Event::Store(true),
+            Event::Store(false),
+            Event::Listed,
+            Event::Kept,
+            Event::Reap(1),
+            Event::Reap(NEW),
+            Event::Removal,
+            Event::Quit,
+        ]
+    }
+
+    fn explore(played: &mut Vec<Event>, events: &[Event], depth: usize) -> usize {
+        let mut count = 1;
+        if depth == 0 {
+            return count;
+        }
+        for &event in events {
+            let mut world = World::new();
+            for &event in played.iter() {
+                world.apply(event);
+            }
+            if !world.apply(event) {
+                continue;
+            }
+            played.push(event);
+            count += explore(played, events, depth - 1);
+            played.pop();
+        }
+        count
+    }
+
+    /// Quitting after every sequence, so what's left is checked too.
+    fn explore_then_quit(played: &mut Vec<Event>, events: &[Event], depth: usize) {
+        let mut world = World::new();
+        for &event in played.iter() {
+            world.apply(event);
+        }
+        world.apply(Event::Quit);
+        if depth == 0 {
+            return;
+        }
+        for &event in events {
+            let mut world = World::new();
+            for &event in played.iter() {
+                world.apply(event);
+            }
+            if !world.apply(event) {
+                continue;
+            }
+            played.push(event);
+            explore_then_quit(played, events, depth - 1);
+            played.pop();
+        }
+    }
+
+    #[test]
+    fn worktrees_go_once_and_only_with_their_chat_in_every_order_of_events() {
+        let played = explore(&mut Vec::new(), &events(), 7);
+        assert!(played > 100_000, "{played}");
+        explore_then_quit(&mut Vec::new(), &events(), 7);
     }
 }
