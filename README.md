@@ -1,6 +1,6 @@
 # Agents Hub
 
-A light Linux desktop home for the agent CLIs you already use: [Claude Code](https://code.claude.com), [Codex](https://developers.openai.com/codex) and [Pi](https://github.com/badlogic/pi-mono). Each chat runs the real CLI in a real terminal, so every feature of the CLI works as it does in your own terminal.
+A light Linux desktop home for the agent CLIs you already use: [Claude Code](https://code.claude.com), [Codex](https://developers.openai.com/codex) and [Pi](https://github.com/earendil-works/pi). Each chat runs the real CLI in a real terminal, so every feature of the CLI works as it does in your own terminal.
 
 - Projects in a sidebar, each with its chats and a shell of its own.
 - A chat can get its own git worktree and branch.
