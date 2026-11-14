@@ -606,13 +606,12 @@ impl Db {
         restore_project(&self.write(), id)
     }
 
-    /// A setting that is on or off, or `None` while it has its default.
-    pub fn flag(&self, key: &str) -> Result<Option<bool>> {
-        self.read()
-            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })
-            .optional()
+    /// The saved settings, by name. A setting without a row has its default.
+    pub fn settings(&self) -> Result<HashMap<String, rusqlite::types::Value>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect()
     }
 
     pub fn set_flag(&self, key: &str, value: bool) -> Result<()> {
@@ -624,16 +623,6 @@ impl Db {
         Ok(())
     }
 
-    /// A setting that is one of several words, or `None` while it has its
-    /// default.
-    pub fn text(&self, key: &str) -> Result<Option<String>> {
-        self.read()
-            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })
-            .optional()
-    }
-
     pub fn set_text(&self, key: &str, value: &str) -> Result<()> {
         self.write().execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -641,16 +630,6 @@ impl Db {
             params![key, value],
         )?;
         Ok(())
-    }
-
-    /// A setting that is a number, or `None` while it has its default. The
-    /// column stores a whole number as an integer, which reads back as well.
-    pub fn number(&self, key: &str) -> Result<Option<f64>> {
-        self.read()
-            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })
-            .optional()
     }
 
     pub fn set_number(&self, key: &str, value: f64) -> Result<()> {
@@ -2151,32 +2130,23 @@ mod tests {
     }
 
     #[test]
-    fn flags_keep_their_last_value() {
-        let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.flag("x").unwrap(), None);
-        db.set_flag("x", true).unwrap();
-        db.set_flag("x", false).unwrap();
-        assert_eq!(db.flag("x").unwrap(), Some(false));
-    }
+    fn settings_keep_their_last_value() {
+        use rusqlite::types::Value;
 
-    #[test]
-    fn numbers_read_back_whole_or_fractional() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.number("x").unwrap(), None);
+        assert!(db.settings().unwrap().is_empty());
+        db.set_flag("flag", true).unwrap();
+        db.set_flag("flag", false).unwrap();
+        db.set_text("text", "light").unwrap();
+        db.set_text("text", "dark").unwrap();
         // The column's affinity stores this one as an integer.
-        db.set_number("x", 450.).unwrap();
-        assert_eq!(db.number("x").unwrap(), Some(450.));
-        db.set_number("x", 312.5).unwrap();
-        assert_eq!(db.number("x").unwrap(), Some(312.5));
-    }
-
-    #[test]
-    fn texts_keep_their_last_value() {
-        let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.text("x").unwrap(), None);
-        db.set_text("x", "light").unwrap();
-        db.set_text("x", "dark").unwrap();
-        assert_eq!(db.text("x").unwrap().as_deref(), Some("dark"));
+        db.set_number("whole", 450.).unwrap();
+        db.set_number("fraction", 312.5).unwrap();
+        let saved = db.settings().unwrap();
+        assert_eq!(saved["flag"], Value::Integer(0));
+        assert_eq!(saved["text"], Value::Text("dark".into()));
+        assert_eq!(saved["whole"], Value::Integer(450));
+        assert_eq!(saved["fraction"], Value::Real(312.5));
     }
 
     #[test]

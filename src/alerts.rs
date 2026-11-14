@@ -16,9 +16,9 @@ use smol::stream::StreamExt as _;
 use zbus::zvariant::Value;
 
 use crate::agent::Agent;
-use crate::db::Item;
 use crate::settings::Settings;
 use crate::status::Status;
+use crate::store::Item;
 use crate::transcript::Kind;
 use crate::workspace::{self, Workspace};
 
@@ -1035,8 +1035,8 @@ mod tests {
     use serde_json::json;
 
     use super::{Alert, Click, Effect, Note, Signal, Tracker, chime, details, escape};
-    use crate::db::Item;
     use crate::status::{Need, Status};
+    use crate::store::Item;
     use crate::transcript::Kind;
 
     fn note(text: &str) -> Note {

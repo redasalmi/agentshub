@@ -15,8 +15,10 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::agent::Agent;
-use crate::db::{Db, Transcript};
 use crate::sessions;
+#[cfg(test)]
+use crate::store::Db;
+use crate::store::Transcript;
 
 const TITLE_CHARS: usize = 80;
 
@@ -148,20 +150,6 @@ pub fn parse(transcript: &Transcript) -> io::Result<Read> {
     )?;
     read.reset |= outdated && transcript.offset > 0;
     Ok(read)
-}
-
-/// The sessions whose transcripts hold something the database doesn't, which
-/// the search can't find until they're read.
-pub fn behind(db: &Db) -> anyhow::Result<Vec<i64>> {
-    Ok(db
-        .read_states()?
-        .into_iter()
-        .filter(|(_, path, offset, parser)| {
-            path.metadata()
-                .is_ok_and(|file| *parser < PARSER || file.len() != *offset)
-        })
-        .map(|(id, ..)| id)
-        .collect())
 }
 
 /// The CLI's id for the session in a transcript. Claude and pi name their

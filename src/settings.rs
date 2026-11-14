@@ -1,9 +1,11 @@
 //! The app's settings, kept in the database and shared with the app as a
 //! global.
 
-use gpui_kit::*;
+use std::collections::HashMap;
 
-use crate::db::Db;
+use gpui_kit::*;
+use rusqlite::types::{FromSql, Value};
+
 use crate::store::Store;
 
 const CLOSE_TO_TRAY: &str = "close_to_tray";
@@ -190,46 +192,46 @@ impl Default for Settings {
 impl Global for Settings {}
 
 impl Settings {
-    /// The saved settings. One that can't be read has its default.
-    pub fn load(db: &Db) -> Self {
-        fn read<T>(value: rusqlite::Result<Option<T>>) -> Option<T> {
-            value
+    /// The settings saved in `saved`, by name. One that can't be read has its
+    /// default.
+    pub fn load(saved: &HashMap<String, Value>) -> Self {
+        fn read<T: FromSql>(saved: &HashMap<String, Value>, key: &str) -> Option<T> {
+            T::column_result(saved.get(key)?.into())
                 .inspect_err(|err| eprintln!("can't read the settings: {err}"))
                 .ok()
-                .flatten()
         }
         let defaults = Self::default();
         Self {
-            close_to_tray: read(db.flag(CLOSE_TO_TRAY)).unwrap_or(defaults.close_to_tray),
-            appearance: read(db.text(APPEARANCE))
+            close_to_tray: read::<bool>(saved, CLOSE_TO_TRAY).unwrap_or(defaults.close_to_tray),
+            appearance: read::<String>(saved, APPEARANCE)
                 .and_then(|key| Appearance::from_key(&key))
                 .unwrap_or(defaults.appearance),
-            theme: read(db.text(THEME))
+            theme: read::<String>(saved, THEME)
                 .and_then(|key| ThemeFamily::from_key(&key))
                 .unwrap_or(defaults.theme),
-            notification_popups: read(db.flag(NOTIFICATION_POPUPS))
+            notification_popups: read::<bool>(saved, NOTIFICATION_POPUPS)
                 .unwrap_or(defaults.notification_popups),
-            notification_sound: read(db.flag(NOTIFICATION_SOUND))
+            notification_sound: read::<bool>(saved, NOTIFICATION_SOUND)
                 .unwrap_or(defaults.notification_sound),
-            sidebar_width: read(db.number(SIDEBAR_WIDTH))
+            sidebar_width: read::<f64>(saved, SIDEBAR_WIDTH)
                 .map(|width| width as f32)
                 .filter(|width| width.is_finite() && *width > 0.)
                 .unwrap_or(defaults.sidebar_width),
-            worktree_by_default: read(db.flag(WORKTREE_BY_DEFAULT))
+            worktree_by_default: read::<bool>(saved, WORKTREE_BY_DEFAULT)
                 .unwrap_or(defaults.worktree_by_default),
-            project_names: read(db.flag(PROJECT_NAMES)).unwrap_or(defaults.project_names),
-            rail_width: read(db.number(RAIL_WIDTH))
+            project_names: read::<bool>(saved, PROJECT_NAMES).unwrap_or(defaults.project_names),
+            rail_width: read::<f64>(saved, RAIL_WIDTH)
                 .map(|width| width as f32)
                 .filter(|width| width.is_finite() && *width > 0.)
                 .unwrap_or(defaults.rail_width),
-            shell_share: read(db.number(SHELL_SHARE))
+            shell_share: read::<f64>(saved, SHELL_SHARE)
                 .map(|share| share as f32)
                 .filter(|share| share.is_finite() && *share > 0. && *share < 1.)
                 .unwrap_or(defaults.shell_share),
-            motion: read(db.text(MOTION))
+            motion: read::<String>(saved, MOTION)
                 .and_then(|key| Motion::from_key(&key))
                 .unwrap_or(defaults.motion),
-            terminal_font_size: read(db.number(TERMINAL_FONT_SIZE))
+            terminal_font_size: read::<f64>(saved, TERMINAL_FONT_SIZE)
                 .map(|size| size as f32)
                 .filter(|size| (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(size))
                 .unwrap_or(defaults.terminal_font_size),
@@ -391,7 +393,28 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{Appearance, Motion, ThemeFamily};
+    use super::{
+        APPEARANCE, Appearance, CLOSE_TO_TRAY, MOTION, Motion, SHELL_SHARE, SIDEBAR_WIDTH,
+        Settings, ThemeFamily,
+    };
+    use crate::store::Db;
+
+    #[test]
+    fn loads_what_was_saved() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_flag(CLOSE_TO_TRAY, true).unwrap();
+        db.set_text(APPEARANCE, Appearance::Dark.key()).unwrap();
+        // Saved as a whole number, it reads back as an integer.
+        db.set_number(SIDEBAR_WIDTH, 450.).unwrap();
+        db.set_number(SHELL_SHARE, 0.5).unwrap();
+        db.set_text(MOTION, "wobbly").unwrap();
+        let settings = Settings::load(&db.settings().unwrap());
+        assert!(settings.close_to_tray);
+        assert_eq!(settings.appearance, Appearance::Dark);
+        assert_eq!(settings.sidebar_width, 450.);
+        assert_eq!(settings.shell_share, 0.5);
+        assert_eq!(settings.motion, Settings::default().motion);
+    }
 
     #[test]
     fn appearances_read_back_as_saved() {

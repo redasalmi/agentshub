@@ -16,17 +16,34 @@ use std::thread;
 use anyhow::Context as _;
 use smol::channel::{self, Sender};
 
+pub use self::db::{
+    Chat, Hit, Imported, Item, PendingImport, Project, Session, Transcript, now, path,
+    prepare_import,
+};
+// Only tests reach the database other than through the store.
+#[cfg(not(test))]
+use self::db::Db;
+#[cfg(test)]
+pub use self::db::Db;
 use crate::agent::Agent;
-use crate::db::{self, Db, Hit, Imported, Item, Project, Session};
 use crate::settings::Settings;
 use crate::transcript;
 use crate::worktree::Worktree;
 
+mod db;
+
+/// What recording a reported session changed.
+pub struct Recorded {
+    pub session_id: i64,
+    /// The session the chat was in before, if it switched away from one,
+    /// and what says, once it is read, whether its history shows anything
+    /// new.
+    pub left: Option<(i64, channel::Receiver<anyhow::Result<bool>>)>,
+}
+
 /// The database as startup opened it.
 pub struct Opened {
     pub store: Store,
-    /// The same database, for what doesn't go through the store.
-    pub db: Db,
     /// Keeps a second Agents Hub off the database while it is held.
     pub lock: Option<fs::File>,
     pub imported: Option<Imported>,
@@ -41,18 +58,18 @@ pub struct Opened {
 /// the lock, finishing an import and migrating, which first backs the
 /// database up, can each take a while, so they run on a thread of their own.
 pub async fn open() -> Opened {
-    let (store, db, lock, imported, broken) = smol::unblock(|| {
+    let (store, lock, imported, broken) = smol::unblock(|| {
         let opened = db::open_locked().and_then(|(db, lock, imported)| {
-            let store = Store::new(db.clone()).context("Couldn't read the database")?;
-            Ok((store, db, lock, imported))
+            let store = Store::new(db).context("Couldn't read the database")?;
+            Ok((store, lock, imported))
         });
         match opened {
-            Ok((store, db, lock, imported)) => (store, db, Some(lock), imported, None),
+            Ok((store, lock, imported)) => (store, Some(lock), imported, None),
             Err(err) => {
                 eprintln!("{err:#}");
                 let db = Db::open_in_memory().expect("SQLite opens in memory");
-                let store = Store::new(db.clone()).expect("the database's threads start");
-                (store, db, None, None, Some(format!("{err:#}")))
+                let store = Store::new(db).expect("the database's threads start");
+                (store, None, None, Some(format!("{err:#}")))
             }
         }
     })
@@ -69,7 +86,6 @@ pub async fn open() -> Opened {
         .unwrap_or_default();
     Opened {
         store,
-        db,
         lock,
         imported,
         settings,
@@ -230,6 +246,9 @@ struct Order {
     asked: Mutex<u64>,
     done: Mutex<u64>,
     finished: Condvar,
+    /// Sessions that recordings left and that are still being read.
+    left: Mutex<usize>,
+    read_left: Condvar,
 }
 
 impl Store {
@@ -273,12 +292,29 @@ impl Store {
 
     /// The saved settings. One that can't be read has its default.
     pub fn settings(&self) -> impl Future<Output = anyhow::Result<Settings>> + use<> {
-        self.read(|db| Ok(Settings::load(db)))
+        self.read(|db| Ok(Settings::load(&db.settings()?)))
     }
 
     /// The projects, in the order the user put them in, with their chats.
     pub fn projects(&self) -> impl Future<Output = anyhow::Result<Vec<Project>>> + use<> {
         self.read(|db| Ok(db.projects()?))
+    }
+
+    /// A project's folder, or `None` once it is removed.
+    pub fn project_path(
+        &self,
+        id: i64,
+    ) -> impl Future<Output = anyhow::Result<Option<PathBuf>>> + use<> {
+        self.read(move |db| Ok(db.project_path(id)?))
+    }
+
+    /// A chat's agent and the folder it runs in, or `None` once it is
+    /// deleted.
+    pub fn chat(
+        &self,
+        id: i64,
+    ) -> impl Future<Output = anyhow::Result<Option<(Agent, PathBuf)>>> + use<> {
+        self.read(move |db| Ok(db.chat(id)?))
     }
 
     /// A chat's sessions, the one it is in last.
@@ -298,9 +334,28 @@ impl Store {
         self.read(move |db| Ok(db.items(session_id, limit)?))
     }
 
+    /// Whether a session was prompted, and when its last prompt with a time
+    /// was sent, in seconds since the Unix epoch.
+    pub fn last_prompt(
+        &self,
+        session_id: i64,
+    ) -> impl Future<Output = anyhow::Result<(bool, Option<i64>)>> + use<> {
+        self.read(move |db| Ok(db.last_prompt(session_id)?))
+    }
+
     /// The sessions whose transcripts hold something the database doesn't.
     pub fn transcripts_behind(&self) -> impl Future<Output = anyhow::Result<Vec<i64>>> + use<> {
-        self.read(transcript::behind)
+        self.read(|db| {
+            Ok(db
+                .read_states()?
+                .into_iter()
+                .filter(|(_, path, offset, parser)| {
+                    path.metadata()
+                        .is_ok_and(|file| *parser < transcript::PARSER || file.len() != *offset)
+                })
+                .map(|(id, ..)| id)
+                .collect())
+        })
     }
 
     /// Finds what was said in the chats. A newer search stops this one, which
@@ -341,29 +396,94 @@ impl Store {
         &self,
         session_id: i64,
     ) -> impl Future<Output = anyhow::Result<bool>> + use<> {
+        let store = self.clone();
+        smol::unblock(move || store.read_transcript_here(session_id))
+    }
+
+    /// The same, on the thread it's called on, which it blocks.
+    fn read_transcript_here(&self, session_id: i64) -> anyhow::Result<bool> {
         let reading = {
             let mut transcripts = lock(&self.transcripts);
             transcripts.retain(|_, reading| Arc::strong_count(reading) > 1);
             transcripts.entry(session_id).or_default().clone()
         };
+        let _reading = lock(&reading);
+        let read = self.read(move |db| Ok(db.transcript(session_id)?));
+        let Some(transcript) = smol::block_on(read)? else {
+            return Ok(false);
+        };
+        match transcript::parse(&transcript) {
+            Ok(read) => {
+                smol::block_on(self.write(move |db| Ok(db.save_read_state(session_id, &read)?)))
+            }
+            // Its items stay.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                smol::block_on(self.write(move |db| Ok(db.set_missing(session_id)?)))?;
+                Ok(false)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// Records that a chat's CLI is in a session, for the given reason. The
+    /// session it left, if it left one, is read once that is saved, whether
+    /// or not anything waits for the answer.
+    pub fn record_session(
+        &self,
+        chat_id: i64,
+        agent: Agent,
+        agent_id: String,
+        transcript_path: PathBuf,
+        reason: Option<String>,
+    ) -> impl Future<Output = anyhow::Result<Recorded>> + use<> {
+        let store = self.clone();
+        self.write(move |db| {
+            let recorded = db.record_session(
+                chat_id,
+                agent,
+                &agent_id,
+                &transcript_path,
+                reason.as_deref(),
+            )?;
+            Ok(Recorded {
+                session_id: recorded.session_id,
+                left: recorded.left.map(|left| (left, store.read_left(left))),
+            })
+        })
+    }
+
+    /// Reads a session a recording left, on a thread of its own, counted
+    /// until it's done so that `wait_for_writes` waits for it.
+    fn read_left(&self, session_id: i64) -> channel::Receiver<anyhow::Result<bool>> {
+        *lock(&self.order.left) += 1;
+        let (send, read) = channel::bounded(1);
         let store = self.clone();
         smol::unblock(move || {
-            let _reading = lock(&reading);
-            let read = store.read(move |db| Ok(db.transcript(session_id)?));
-            let Some(transcript) = smol::block_on(read)? else {
-                return Ok(false);
-            };
-            match transcript::parse(&transcript) {
-                Ok(read) => smol::block_on(
-                    store.write(move |db| Ok(db.save_read_state(session_id, &read)?)),
-                ),
-                // Its items stay.
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    smol::block_on(store.write(move |db| Ok(db.set_missing(session_id)?)))?;
-                    Ok(false)
-                }
-                Err(err) => Err(err.into()),
+            let answer =
+                panic::catch_unwind(AssertUnwindSafe(|| store.read_transcript_here(session_id)))
+                    .unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!("reading session {session_id} panicked"))
+                    });
+            send.try_send(answer).ok();
+            *lock(&store.order.left) -= 1;
+            store.order.read_left.notify_all();
+        })
+        .detach();
+        read
+    }
+
+    /// Marks a session's transcript as gone, and if it wasn't yet, says so in
+    /// its history with `notice`.
+    pub fn lose_transcript(
+        &self,
+        session_id: i64,
+        notice: &'static str,
+    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+        self.write(move |db| {
+            if db.set_missing(session_id)? {
+                db.add_notice(session_id, notice)?;
             }
+            Ok(())
         })
     }
 
@@ -473,11 +593,24 @@ impl Store {
         self.write(move |db| db.export(&path))
     }
 
-    /// Waits until every write asked for so far is done, as quitting does so
-    /// that none is lost. It blocks the thread it's called on.
+    /// Waits until every write asked for so far is done, with the reads of
+    /// the sessions their recordings left, as quitting does so that none is
+    /// lost. It blocks the thread it's called on.
     pub fn wait_for_writes(&self) {
-        let asked = *lock(&self.order.asked);
-        self.order.wait_for(asked);
+        loop {
+            let asked = *lock(&self.order.asked);
+            self.order.wait_for(asked);
+            drop(
+                self.order
+                    .read_left
+                    .wait_while(lock(&self.order.left), |left| *left > 0)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+            // What those reads found is saved with writes of their own.
+            if *lock(&self.order.asked) == asked {
+                return;
+            }
+        }
     }
 
     fn write<T, F>(&self, job: F) -> impl Future<Output = anyhow::Result<T>> + use<T, F>
@@ -771,6 +904,39 @@ mod tests {
         store.wait_for_writes();
         assert_eq!(*lock(&order.done), 1);
         drop(slow);
+    }
+
+    #[test]
+    fn waits_for_the_session_a_recording_left_to_be_read() {
+        let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("agentshub.db")).unwrap();
+        let project = db.add_project(&dir).unwrap();
+        let chat = db.add_chat(project, Agent::Claude, None).unwrap();
+        let (first, second) = (dir.join("first.jsonl"), dir.join("second.jsonl"));
+        let left = db
+            .record_session(chat, Agent::Claude, "first", &first, Some("startup"))
+            .unwrap()
+            .session_id;
+        let prompt = serde_json::json!({
+            "type": "user", "uuid": "1", "parentUuid": null,
+            "message": { "role": "user", "content": [{ "type": "text", "text": "kept" }] }
+        });
+        fs::write(&first, format!("{prompt}\n")).unwrap();
+        let store = Store::new(db.clone()).unwrap();
+        let recorded = smol::block_on(store.record_session(
+            chat,
+            Agent::Claude,
+            "second".into(),
+            second,
+            Some("clear".into()),
+        ))
+        .unwrap();
+        assert_eq!(recorded.left.map(|(id, _)| id), Some(left));
+        // Nothing waits for the read but quitting.
+        store.wait_for_writes();
+        assert_eq!(db.items(left, 10).unwrap()[0].payload["text"], "kept");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

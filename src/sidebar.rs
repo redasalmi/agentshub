@@ -16,10 +16,9 @@ use gpui_kit::*;
 
 use crate::agent::Agent;
 use crate::appearance::{self, Tint};
-use crate::db::{self, Chat, Project};
 use crate::settings::Settings;
 use crate::status::{Need, Status};
-use crate::store::Change;
+use crate::store::{self, Change, Chat, Project};
 
 /// How often the ages of the chats are brought up to date.
 const AGE_INTERVAL: Duration = Duration::from_secs(60);
@@ -2069,7 +2068,7 @@ pub fn activity(agent: Agent, running: Option<Option<Status>>) -> String {
 /// How long ago something happened, given in seconds since the Unix epoch,
 /// in its largest whole unit.
 pub fn age(at: i64) -> String {
-    let minutes = (db::now() - at).max(0) / 60;
+    let minutes = (store::now() - at).max(0) / 60;
     match minutes {
         0 => "now".to_string(),
         1..60 => format!("{minutes}m"),

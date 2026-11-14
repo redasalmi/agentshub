@@ -469,7 +469,7 @@ fn rescue(root: &Path, head: &str) -> anyhow::Result<String> {
 
 /// Where the worktrees live: beside the database, in `worktrees`.
 fn worktrees_dir() -> Option<PathBuf> {
-    Some(crate::db::path()?.parent()?.join("worktrees"))
+    Some(crate::store::path()?.parent()?.join("worktrees"))
 }
 
 /// The folder a repository's worktrees go in, named after it.

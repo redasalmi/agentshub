@@ -8,9 +8,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::Value;
 
-use crate::db::{Item, Session};
 use crate::sidebar::age;
-use crate::store::Store;
+use crate::store::{Item, Session, Store};
 use crate::transcript::Kind;
 
 const ROW_HEIGHT: Pixels = px(32.);

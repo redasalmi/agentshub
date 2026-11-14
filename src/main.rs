@@ -1,7 +1,6 @@
 mod agent;
 mod alerts;
 mod appearance;
-mod db;
 mod history;
 mod instance;
 mod palette;
