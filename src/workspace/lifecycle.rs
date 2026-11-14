@@ -1,5 +1,6 @@
-//! Where each chat is on its way in or out, and whether it is being deleted,
-//! kept apart from the window so every order of events can be tested.
+//! Where each chat is on its way in or out: being added, opened, closed once
+//! a Codex lookup is done, stopped or deleted. Kept apart from the window so
+//! every order of events can be tested.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -84,6 +85,51 @@ pub enum Added {
     Start(i64),
 }
 
+/// A look for the sessions running Codex CLIs are in among their open
+/// files, as Codex doesn't report them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lookup(u64);
+
+/// An open Codex chat's part in those lookups. One can take longer than the
+/// next, so an older one that finishes later mustn't move the chat back to
+/// a session it has left.
+#[derive(Default)]
+pub struct Codex {
+    /// The lookup that last looked at it.
+    lookup: u64,
+    /// Whether that lookup is still under way.
+    pending: bool,
+    /// Whether the chat closes once that lookup has recorded what it found.
+    closing: bool,
+}
+
+impl Codex {
+    /// Closes the chat once the lookup under way has recorded the session
+    /// its CLI was in, if one is. Returns whether one is.
+    pub fn close_after_lookup(&mut self) -> bool {
+        if self.pending {
+            self.closing = true;
+        }
+        self.pending
+    }
+
+    /// Whether `lookup` is the last that looked at the chat, so what it
+    /// found can be recorded.
+    pub fn looked_up_by(&self, lookup: Lookup) -> bool {
+        self.lookup == lookup.0
+    }
+
+    /// Ends `lookup` for the chat, unless a newer one looks at it, and says
+    /// whether the chat closes now.
+    pub fn looked_up(&mut self, lookup: Lookup) -> bool {
+        if !self.pending || !self.looked_up_by(lookup) {
+            return false;
+        }
+        self.pending = false;
+        self.closing
+    }
+}
+
 #[derive(Default)]
 pub struct Lifecycle {
     phases: HashMap<i64, Phase>,
@@ -96,6 +142,8 @@ pub struct Lifecycle {
     /// How many times a project was archived, which a chat added meanwhile
     /// doesn't start in.
     archived_projects: u64,
+    /// The last Codex lookup started.
+    codex_lookup: u64,
 }
 
 impl Lifecycle {
@@ -315,6 +363,24 @@ impl Lifecycle {
             return Added::Listed;
         }
         Added::Start(id)
+    }
+
+    /// Starts a Codex lookup of `chats`, unless there are none.
+    pub fn look_up_codex<'a>(
+        &mut self,
+        chats: impl IntoIterator<Item = &'a mut Codex>,
+    ) -> Option<Lookup> {
+        let lookup = self.codex_lookup.wrapping_add(1);
+        let mut any = false;
+        for codex in chats {
+            codex.lookup = lookup;
+            codex.pending = true;
+            any = true;
+        }
+        any.then(|| {
+            self.codex_lookup = lookup;
+            Lookup(lookup)
+        })
     }
 
     /// The worktrees of chats still being added, which shutdown removes
@@ -925,6 +991,240 @@ mod adding_tests {
             Event::Quit,
         ];
         let played = explore(&mut Vec::new(), &events, 6);
+        assert!(played > 100_000, "{played}");
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::{Codex, Lifecycle, Lookup};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Event {
+        /// A lookup starts, of the running chats in the mask.
+        LookUp(u8),
+        /// The lookup started that many before the newest still under way
+        /// finishes.
+        Finish(usize),
+        /// The chat's CLI is started, as on opening or restarting it.
+        Open(i64),
+        /// The user quits the chat's CLI.
+        Quit(i64),
+        /// The chat is closed, and its CLI's open files show no session.
+        Suspend(i64),
+        /// The chat's CLI is stopped without waiting, as on deleting it.
+        Stop(i64),
+    }
+
+    struct Chat {
+        id: i64,
+        /// Which of the chat's CLIs this is.
+        terminal: u32,
+        codex: Codex,
+        /// Whether its CLI has exited, so no lookup sees it.
+        quit: bool,
+        /// Whether it should close once nothing more can be found.
+        wants_close: bool,
+    }
+
+    #[derive(Default)]
+    struct World {
+        lifecycle: Lifecycle,
+        chats: Vec<Chat>,
+        terminals: u32,
+        /// Lookups under way, oldest first, with the CLIs they look at.
+        lookups: Vec<(Lookup, Vec<(i64, u32)>)>,
+        /// The newest lookup that looked at each CLI.
+        newest: Vec<((i64, u32), Lookup)>,
+    }
+
+    impl World {
+        fn chat(&mut self, id: i64) -> Option<&mut Chat> {
+            self.chats.iter_mut().find(|chat| chat.id == id)
+        }
+
+        fn newest(&self, cli: (i64, u32)) -> Option<Lookup> {
+            self.newest
+                .iter()
+                .rev()
+                .find(|(each, _)| *each == cli)
+                .map(|(_, lookup)| *lookup)
+        }
+
+        fn under_way(&self, cli: (i64, u32)) -> bool {
+            self.newest(cli).is_some_and(|newest| {
+                self.lookups
+                    .iter()
+                    .any(|(lookup, clis)| *lookup == newest && clis.contains(&cli))
+            })
+        }
+
+        fn close(&mut self, id: i64) {
+            self.chats.retain(|chat| chat.id != id);
+        }
+
+        fn apply(&mut self, event: Event) -> bool {
+            match event {
+                Event::LookUp(mask) => {
+                    let mut clis = Vec::new();
+                    let looked_at = self.chats.iter_mut().filter_map(|chat| {
+                        if chat.quit || mask & 1 << chat.id == 0 {
+                            return None;
+                        }
+                        clis.push((chat.id, chat.terminal));
+                        Some(&mut chat.codex)
+                    });
+                    let lookup = self.lifecycle.look_up_codex(looked_at);
+                    assert_eq!(lookup.is_some(), !clis.is_empty());
+                    let Some(lookup) = lookup else {
+                        return false;
+                    };
+                    assert!(
+                        self.lookups.iter().all(|(each, _)| *each != lookup),
+                        "two lookups under way are the same"
+                    );
+                    self.newest.extend(clis.iter().map(|&cli| (cli, lookup)));
+                    self.lookups.push((lookup, clis));
+                }
+                Event::Finish(back) => {
+                    let Some(index) = self.lookups.len().checked_sub(back + 1) else {
+                        return false;
+                    };
+                    let (lookup, clis) = self.lookups.remove(index);
+                    for cli in clis {
+                        let recorded = self
+                            .chats
+                            .iter()
+                            .find(|chat| (chat.id, chat.terminal) == cli)
+                            .is_some_and(|chat| chat.codex.looked_up_by(lookup));
+                        assert_eq!(
+                            recorded,
+                            self.chats
+                                .iter()
+                                .any(|chat| (chat.id, chat.terminal) == cli)
+                                && self.newest(cli) == Some(lookup),
+                            "recorded what a lookup that isn't the newest found"
+                        );
+                    }
+                    let mut closing = Vec::new();
+                    for chat in &mut self.chats {
+                        if chat.codex.looked_up(lookup) {
+                            closing.push(chat.id);
+                        }
+                    }
+                    for id in closing {
+                        let chat = self.chat(id).expect("a chat closing is open");
+                        assert!(chat.wants_close, "closed a chat nobody closed");
+                        self.close(id);
+                    }
+                }
+                Event::Open(id) => {
+                    if self.chat(id).is_some() {
+                        return false;
+                    }
+                    self.terminals += 1;
+                    self.chats.push(Chat {
+                        id,
+                        terminal: self.terminals,
+                        codex: Codex::default(),
+                        quit: false,
+                        wants_close: false,
+                    });
+                }
+                Event::Quit(id) => {
+                    let Some(chat) = self.chat(id).filter(|chat| !chat.quit) else {
+                        return false;
+                    };
+                    chat.quit = true;
+                    chat.wants_close = true;
+                    if !chat.codex.close_after_lookup() {
+                        self.close(id);
+                    }
+                }
+                Event::Suspend(id) => {
+                    let Some(chat) = self.chat(id) else {
+                        return false;
+                    };
+                    chat.wants_close = true;
+                    if !chat.codex.close_after_lookup() {
+                        self.close(id);
+                    }
+                }
+                Event::Stop(id) => {
+                    if self.chat(id).is_none() {
+                        return false;
+                    }
+                    self.close(id);
+                }
+            }
+            true
+        }
+
+        fn check(&self) {
+            for chat in &self.chats {
+                let cli = (chat.id, chat.terminal);
+                assert_eq!(
+                    chat.codex.pending,
+                    self.under_way(cli),
+                    "pending doesn't match the newest lookup of {cli:?}"
+                );
+                assert_eq!(
+                    chat.wants_close, chat.codex.closing,
+                    "closing doesn't match what was asked of {cli:?}"
+                );
+                // Otherwise nothing would ever close it.
+                assert!(
+                    !chat.wants_close || chat.codex.pending,
+                    "{cli:?} stays open"
+                );
+            }
+        }
+    }
+
+    fn events() -> Vec<Event> {
+        let mut events = vec![
+            Event::LookUp(0b010),
+            Event::LookUp(0b100),
+            Event::LookUp(0b110),
+        ];
+        events.extend([0, 1, 2].map(Event::Finish));
+        for id in [1, 2] {
+            events.extend([
+                Event::Open(id),
+                Event::Quit(id),
+                Event::Suspend(id),
+                Event::Stop(id),
+            ]);
+        }
+        events
+    }
+
+    fn explore(played: &mut Vec<Event>, events: &[Event], depth: usize) -> usize {
+        let mut count = 1;
+        if depth == 0 {
+            return count;
+        }
+        for &event in events {
+            let mut next = World::default();
+            next.apply(Event::Open(1));
+            next.apply(Event::Open(2));
+            for &event in played.iter() {
+                next.apply(event);
+            }
+            if !next.apply(event) {
+                continue;
+            }
+            next.check();
+            played.push(event);
+            count += explore(played, events, depth - 1);
+            played.pop();
+        }
+        count
+    }
+
+    #[test]
+    fn codex_lookups_hold_in_every_order_of_events() {
+        let played = explore(&mut Vec::new(), &events(), 6);
         assert!(played > 100_000, "{played}");
     }
 }

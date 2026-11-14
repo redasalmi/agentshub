@@ -52,7 +52,7 @@ mod lifecycle;
 mod search;
 mod settings_view;
 
-use lifecycle::{Added, Deleted, Lifecycle, Reaped, Saved, Saving};
+use lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
 
 use settings_view::render_settings;
 
@@ -222,10 +222,6 @@ pub struct Workspace {
     navigations: u64,
     /// The chats on their way in or out, and the ones being deleted.
     lifecycle: Lifecycle,
-    /// The last Codex session lookup started. Each lookup marks the chats it
-    /// looked at with this, so an older lookup that finishes later can be
-    /// told apart from a newer one.
-    codex_lookup: u64,
     reports: Reports,
     codex_watcher: Option<notify::RecommendedWatcher>,
     /// What the watcher looks at: Codex's session folder, or while it doesn't
@@ -490,15 +486,8 @@ struct Chat {
     /// Whether the CLI finished while another chat was shown, and hasn't been
     /// looked at since.
     unseen: bool,
-    /// The Codex session lookup that last looked at this chat. A lookup that
-    /// started earlier must not record its result after a newer one, or it
-    /// would move the chat back to a session it has left.
-    codex_lookup: u64,
-    /// Whether that lookup is still running.
-    codex_pending: bool,
-    /// Whether the user quit the CLI, so the chat closes once that lookup has
-    /// recorded what it found.
-    closing: bool,
+    /// The lookups of the session its CLI is in, if it's Codex.
+    codex: Codex,
     /// Something about the session to show above the terminal, without a
     /// restart button.
     notice: Option<SharedString>,
@@ -871,7 +860,6 @@ impl Workspace {
             requested: None,
             navigations: 0,
             lifecycle: Lifecycle::default(),
-            codex_lookup: 0,
             reports,
             codex_watcher,
             codex_watch: None,
@@ -2659,27 +2647,21 @@ impl Workspace {
         // can finish first. Marking the chats a lookup looks at with its
         // generation lets a result that has been superseded be dropped rather
         // than move a chat back to the session it has already left.
-        let lookup = self.codex_lookup.wrapping_add(1);
         let mut chats = Vec::new();
-        for chat in &mut self.chats {
+        let looked_at = self.chats.iter_mut().filter_map(|chat| {
             if chat.agent != Agent::Codex {
-                continue;
+                return None;
             }
-            let Some(terminal) = &chat.terminal else {
-                continue;
-            };
-            let pid = terminal.terminal.read(cx).pid();
+            let pid = chat.terminal.as_ref()?.terminal.read(cx).pid();
             if !pid.may_be_running() {
-                continue;
+                return None;
             }
-            chat.codex_lookup = lookup;
-            chat.codex_pending = true;
             chats.push((chat.id, chat.report.clone(), pid));
-        }
-        if chats.is_empty() {
+            Some(&mut chat.codex)
+        });
+        let Some(lookup) = self.lifecycle.look_up_codex(looked_at) else {
             return;
-        }
-        self.codex_lookup = lookup;
+        };
         cx.spawn(async move |this, cx| {
             // Looking through a process's open files, and reading the first
             // line of the newest one, doesn't belong on the window's thread.
@@ -2710,7 +2692,8 @@ impl Workspace {
                         .iter()
                         .find(|chat| chat.id == id && chat.report == report)
                         .is_some_and(|chat| {
-                            chat.codex_lookup == lookup && chat.transcript.as_ref() != Some(&path)
+                            chat.codex.looked_up_by(lookup)
+                                && chat.transcript.as_ref() != Some(&path)
                         });
                     if !current {
                         continue;
@@ -2719,11 +2702,8 @@ impl Workspace {
                 }
                 let mut closing = Vec::new();
                 for chat in &mut this.chats {
-                    if chat.codex_pending && chat.codex_lookup == lookup {
-                        chat.codex_pending = false;
-                        if chat.closing {
-                            closing.push(chat.id);
-                        }
+                    if chat.codex.looked_up(lookup) {
+                        closing.push(chat.id);
                     }
                 }
                 closing
@@ -3289,9 +3269,7 @@ impl Workspace {
             status: None,
             turn: None,
             unseen: false,
-            codex_lookup: 0,
-            codex_pending: false,
-            closing: false,
+            codex: Codex::default(),
             notice: None,
             fresh_on_restart: false,
         });
@@ -3379,9 +3357,7 @@ impl Workspace {
         if quit {
             // A running Codex lookup may still find the session the CLI was
             // in, and nothing else would record it.
-            if chat.codex_pending {
-                chat.closing = true;
-            } else {
+            if !chat.codex.close_after_lookup() {
                 self.close_chat(id, cx);
             }
             return;
@@ -3492,8 +3468,7 @@ impl Workspace {
         // has no open files left to look through, so only that lookup can
         // find the session it was in. The chat stops once it has recorded it,
         // as when the user quits the CLI.
-        if chat.codex_pending && codex.is_none() {
-            chat.closing = true;
+        if codex.is_none() && chat.codex.close_after_lookup() {
             return;
         }
         // A queued report can say the CLI went into another session.
