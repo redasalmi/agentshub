@@ -48,8 +48,11 @@ use crate::transcript;
 use crate::tray;
 use crate::worktree::{self, Worktree};
 
+mod lifecycle;
 mod search;
 mod settings_view;
+
+use lifecycle::{Deleted, Lifecycle, Reaped};
 
 use settings_view::render_settings;
 
@@ -197,8 +200,6 @@ pub struct Workspace {
     /// A project to select once the projects are listed, as one just added
     /// isn't before.
     select_listed: Option<i64>,
-    /// The chats being deleted, which can't be opened until that is saved.
-    deleting: HashMap<i64, Deleting>,
     /// The projects being removed, with their folders, which a chat added
     /// meanwhile goes with.
     removing: HashMap<i64, PathBuf>,
@@ -225,14 +226,8 @@ pub struct Workspace {
     /// later than it started, like a chat's worktree being checked out, only
     /// takes the view if this hasn't changed meanwhile.
     navigations: u64,
-    /// The chats whose last session is being read before their CLI starts,
-    /// with whether it still should once the read is done. Closing all the
-    /// chats cancels them, and opening one again revives its read.
-    opening: HashMap<i64, bool>,
-    /// The chats whose CLI was stopped to free what it held, until it has been
-    /// reaped, with the session it was in. Until then the CLI may still write
-    /// to that session, so nothing else may run in it.
-    stopping: HashMap<i64, (smol::channel::Receiver<()>, Option<i64>)>,
+    /// The chats on their way in or out, and the ones being deleted.
+    lifecycle: Lifecycle,
     /// The last Codex session lookup started. Each lookup marks the chats it
     /// looked at with this, so an older lookup that finishes later can be
     /// told apart from a newer one.
@@ -532,16 +527,6 @@ struct PendingChat {
     archived: u64,
 }
 
-/// A chat being deleted, with what goes once that is saved.
-struct Deleting {
-    /// The worktree Agents Hub made for it, and its project's folder.
-    worktree: Option<(Worktree, PathBuf)>,
-    /// What says its stopped CLI has been reaped.
-    reaped: Option<smol::channel::Receiver<()>>,
-    /// How many deletes of it, its own or its project's, aren't saved yet.
-    pending: usize,
-}
-
 struct ChatTerminal {
     terminal: Entity<Terminal>,
     view: Entity<TerminalView>,
@@ -715,7 +700,7 @@ impl Workspace {
                 }
             }
             let mut deleted_reaped = Vec::new();
-            for (id, deleting) in std::mem::take(&mut this.deleting) {
+            for (id, deleting) in this.lifecycle.take_deleting() {
                 match deleting.worktree {
                     Some((worktree, project))
                         if matches!(smol::block_on(this.store.chat(id)), Ok(None)) =>
@@ -749,16 +734,16 @@ impl Workspace {
             // The sessions they left before were read when they left them.
             let mut sessions = this.reading.clone();
             sessions.extend(
-                this.stopping
-                    .iter()
-                    .filter(|(id, _)| !removed.contains(*id))
-                    .filter_map(|(_, (_, session))| *session),
+                this.lifecycle
+                    .stopping()
+                    .filter(|(id, ..)| !removed.contains(id))
+                    .filter_map(|(.., session)| session),
             );
             // A session saved by now may not have reached its chat, whose
             // callback can't run anymore, but it is the chat's last.
             let chats = this.chats.iter().map(|chat| chat.id);
             let chats: Vec<i64> = chats
-                .chain(this.stopping.keys().copied())
+                .chain(this.lifecycle.stopping().map(|(id, ..)| id))
                 .chain(this.reading_last.iter().copied())
                 .filter(|id| !removed.contains(id))
                 .collect();
@@ -768,7 +753,7 @@ impl Workspace {
             // A chat being opened reads its last session on a thread of its
             // own, which isn't in `reading`, so it is read again here, the
             // way `open_chat` reads it.
-            for &id in this.opening.keys().filter(|id| !removed.contains(*id)) {
+            for id in this.lifecycle.opening().filter(|id| !removed.contains(id)) {
                 let listed = smol::block_on(this.store.sessions(id)).unwrap_or_else(|err| {
                     eprintln!("can't list the sessions of chat {id}: {err}");
                     Vec::new()
@@ -809,7 +794,11 @@ impl Workspace {
                 .iter()
                 .filter_map(|chat| chat.terminal.as_ref())
                 .map(|terminal| terminal.terminal.read(cx).shutdown())
-                .chain(this.stopping.values().map(|(reaped, _)| reaped.clone()))
+                .chain(
+                    this.lifecycle
+                        .stopping()
+                        .map(|(_, reaped, _)| reaped.clone()),
+                )
                 .chain(deleted_reaped)
                 .chain(
                     this.shells
@@ -885,7 +874,6 @@ impl Workspace {
             unsaved: 0,
             _listing: None,
             select_listed: None,
-            deleting: HashMap::new(),
             removing: HashMap::new(),
             deletions: 0,
             adding: Vec::new(),
@@ -894,8 +882,7 @@ impl Workspace {
             active: None,
             requested: None,
             navigations: 0,
-            opening: HashMap::new(),
-            stopping: HashMap::new(),
+            lifecycle: Lifecycle::default(),
             codex_lookup: 0,
             reports,
             codex_watcher,
@@ -1298,11 +1285,11 @@ impl Workspace {
             self.cancel_opening(chat.id);
             let reaped = self
                 .stop_chat(chat.id, cx)
-                .or_else(|| self.reaping(chat.id));
+                .or_else(|| self.lifecycle.reaping(chat.id));
             let worktree = chat
                 .worktree
                 .map(|worktree| (worktree, project.path.clone()));
-            self.mark_deleting(chat.id, worktree, reaped);
+            self.lifecycle.mark_deleting(chat.id, worktree, reaped);
         }
         // Dropping its terminal kills the shell.
         self.shells.remove(&project.path);
@@ -1418,8 +1405,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.cancel_opening(id);
-        let reaped = self.stop_chat(id, cx).or_else(|| self.reaping(id));
-        self.mark_deleting(id, worktree, reaped);
+        let reaped = self
+            .stop_chat(id, cx)
+            .or_else(|| self.lifecycle.reaping(id));
+        self.lifecycle.mark_deleting(id, worktree, reaped);
         let deleted = self.store.delete_chat(id);
         cx.spawn(async move |this, cx| {
             let deleted = deleted.await;
@@ -1435,26 +1424,6 @@ impl Workspace {
         .detach();
     }
 
-    /// Keeps chat `id` from being opened until deleting it is saved. A
-    /// chat can be deleted again meanwhile, with its project, once its CLI
-    /// is already stopped, so what says that CLI was reaped is kept.
-    fn mark_deleting(
-        &mut self,
-        id: i64,
-        worktree: Option<(Worktree, PathBuf)>,
-        reaped: Option<smol::channel::Receiver<()>>,
-    ) {
-        let deleting = self.deleting.entry(id).or_insert(Deleting {
-            worktree,
-            reaped: None,
-            pending: 0,
-        });
-        deleting.pending += 1;
-        if reaped.is_some() {
-            deleting.reaped = reaped;
-        }
-    }
-
     /// Lets `chats` be opened again, once deleting them is done, and if they
     /// were deleted, removes their worktrees.
     fn finish_deleting(&mut self, chats: &[i64], deleted: bool, cx: &mut Context<Self>) {
@@ -1462,23 +1431,10 @@ impl Workspace {
             self.deletions += 1;
         }
         for id in chats {
-            let Some(deleting) = self.deleting.get_mut(id) else {
-                continue;
-            };
-            deleting.pending -= 1;
-            // Another delete of it may still be saved.
-            if !deleted && deleting.pending > 0 {
-                continue;
-            }
-            let Some(Deleting {
-                worktree, reaped, ..
-            }) = self.deleting.remove(id)
+            let Some(Deleted { worktree, reaped }) = self.lifecycle.finish_deleting(*id, deleted)
             else {
                 continue;
             };
-            if !deleted {
-                continue;
-            }
             // Its notification can't open it anymore.
             alerts::withdraw(*id, cx);
             if let Some((worktree, project)) = &worktree {
@@ -1646,9 +1602,7 @@ impl Workspace {
     /// Keeps a chat whose last session is being read, or whose stopped CLI
     /// is being reaped, from starting once that's done.
     fn cancel_opening(&mut self, id: i64) {
-        if let Some(start) = self.opening.get_mut(&id) {
-            *start = false;
-        }
+        self.lifecycle.cancel_opening(id);
         if self.requested == Some(id) {
             self.requested = None;
         }
@@ -1730,15 +1684,6 @@ impl Workspace {
                 .autohide(true),
             cx,
         );
-    }
-
-    /// What says a chat's CLI that was stopped to free what it held has
-    /// been reaped, while it hasn't yet.
-    fn reaping(&self, id: i64) -> Option<smol::channel::Receiver<()>> {
-        self.stopping
-            .get(&id)
-            .map(|(reaped, _)| reaped.clone())
-            .filter(|reaped| !reaped.is_closed())
     }
 
     fn open_rename_dialog(
@@ -2418,8 +2363,8 @@ impl Workspace {
                 .any(|chat| chat.id == id && chat.archived_at.is_some())
         });
         if chat_archived
-            || self.deleting.contains_key(&id)
-            || self.opening.contains_key(&id)
+            || self.lifecycle.is_deleting(id)
+            || self.lifecycle.is_opening(id)
             || self.chats.iter().any(|chat| chat.id == id)
         {
             self.refresh(cx);
@@ -2543,7 +2488,7 @@ impl Workspace {
     /// Shows a chat, starting its CLI unless it runs. An archived chat, or
     /// one in an archived project, is brought back first.
     pub fn open_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.deleting.contains_key(&id) || self.is_removing(id, cx) {
+        if self.lifecycle.is_deleting(id) || self.is_removing(id, cx) {
             return;
         }
         if self.is_archived(id, cx) {
@@ -2560,12 +2505,7 @@ impl Workspace {
         }
         // A CLI that was stopped to free what it held opens again once it's
         // gone, so the two never run in one session.
-        if let Some((reaped, _)) = self
-            .stopping
-            .get(&id)
-            .filter(|(reaped, _)| !reaped.is_closed())
-        {
-            let reaped = reaped.clone();
+        if let Some(reaped) = self.lifecycle.reaping(id) {
             self.requested = Some(id);
             cx.spawn_in(window, async move |this, cx| {
                 reaped.recv().await.ok();
@@ -2584,16 +2524,14 @@ impl Workspace {
         // it took over from still shows when it opens.
         let overtaken = self
             .requested
-            .filter(|each| self.opening.contains_key(each));
+            .filter(|each| self.lifecycle.is_opening(*each));
         let navigations = self.navigations;
         self.requested = Some(id);
         // Clicks that arrive while the session is read would start a second
         // CLI in the same chat. A read that was cancelled starts it after all.
-        if let Some(start) = self.opening.get_mut(&id) {
-            *start = true;
+        if !self.lifecycle.open(id) {
             return;
         }
-        self.opening.insert(id, true);
 
         // The last session decides how the CLI starts, so it's read first: the
         // CLI may have gone on without agentshub. Transcripts can be large
@@ -2648,7 +2586,7 @@ impl Workspace {
             if this
                 .update_in(cx, |this, window, cx| {
                     // The chats may have been closed meanwhile.
-                    if this.opening.remove(&id) != Some(true) {
+                    if !this.lifecycle.opened(id) {
                         return;
                     }
                     // The chat may have been deleted, or opened elsewhere, meanwhile,
@@ -2736,7 +2674,7 @@ impl Workspace {
             {
                 // The window closed meanwhile, so the chat isn't started, but
                 // it can be opened again.
-                this.update(cx, |this, _| this.opening.remove(&id)).ok();
+                this.update(cx, |this, _| this.lifecycle.opened(id)).ok();
             }
         })
         .detach();
@@ -3420,9 +3358,7 @@ impl Workspace {
                         && chat.recording.as_ref().is_some_and(|recording| {
                             !recording.done.is_closed() && recording.agent_id == session.agent_id
                         }))
-        }) || self.stopping.iter().any(|(&id, (reaped, stopped))| {
-            id != chat_id && *stopped == Some(session.id) && !reaped.is_closed()
-        })
+        }) || self.lifecycle.stopped_elsewhere(chat_id, session.id)
     }
 
     /// Shows a chat whose CLI wasn't started, with the reason above the
@@ -3634,33 +3570,22 @@ impl Workspace {
     fn track_stopping(
         &mut self,
         id: i64,
-        reaped: smol::channel::Receiver<()>,
+        reaped: Reaped,
         session: Option<i64>,
         cx: &mut Context<Self>,
     ) {
-        self.stopping.insert(id, (reaped.clone(), session));
+        self.lifecycle.stop(id, reaped.clone(), session);
         let last = self.last_session(id);
         cx.spawn(async move |this, cx| {
             let session = last.await.or(session);
             this.update(cx, |this, _| {
-                if let Some((stopping, stopped_in)) = this.stopping.get_mut(&id)
-                    && stopping.same_channel(&reaped)
-                {
-                    *stopped_in = session;
-                }
+                this.lifecycle.stopped_in(id, &reaped, session)
             })
             .ok();
             // What the CLI writes as it exits is part of the session.
             reaped.recv().await.ok();
             this.update(cx, |this, cx| {
-                // The chat may have been opened and stopped again since.
-                if this
-                    .stopping
-                    .get(&id)
-                    .is_some_and(|(stopping, _)| stopping.same_channel(&reaped))
-                {
-                    this.stopping.remove(&id);
-                }
+                this.lifecycle.reaped(id, &reaped);
                 this.read_sessions(session.into_iter().collect(), false, cx)
                     .detach();
             })
@@ -4119,9 +4044,7 @@ impl Workspace {
     fn close_all_chats(&mut self, _: &CloseAllChats, window: &mut Window, cx: &mut Context<Self>) {
         // A chat waiting for its last session to be read, or for its stopped
         // CLI to be reaped, would start once that's done.
-        for start in self.opening.values_mut() {
-            *start = false;
-        }
+        self.lifecycle.cancel_all_opening();
         // So would a new chat once its worktree is checked out. The checkouts
         // stay listed, so shutdown still removes what they make if the app
         // quits first.
