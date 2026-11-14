@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as ExtraIcon;
@@ -197,11 +197,6 @@ pub struct Workspace {
     /// A project to select once the projects are listed, as one just added
     /// isn't before.
     select_listed: Option<i64>,
-    /// The projects being removed, with their folders, which a chat added
-    /// meanwhile goes with.
-    removing: HashMap<i64, PathBuf>,
-    /// How many deletes, of a chat or of a project, have been saved.
-    deletions: u64,
     /// Open chats, including exited terminals and history whose CLI couldn't
     /// start. Running processes keep running while another chat is shown,
     /// until the user closes them.
@@ -249,10 +244,6 @@ pub struct Workspace {
     /// chat once git is done, or by shutdown, so none is left without a chat
     /// to remove it.
     checkouts: Vec<worktree::Checkout>,
-    /// The worktrees of deleted chats waiting for their CLI and shells to be
-    /// reaped. Each is removed by its task, or by shutdown if the app quits
-    /// first, so none is left once its chat is gone.
-    removals: Vec<PendingRemoval>,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
     /// The projects' shells, by folder, for quick commands next to their
@@ -282,32 +273,11 @@ pub struct Workspace {
     importing: bool,
 }
 
-/// A worktree and its project's folder, until someone takes them to remove
-/// the worktree. The remover holds the lock while git runs, so shutdown
-/// waits for a removal under way rather than quit midway.
-type RemovalJob = Arc<Mutex<Option<(Worktree, PathBuf)>>>;
-
-/// A worktree to remove once what ran in it has been reaped.
-struct PendingRemoval {
-    job: RemovalJob,
-    /// The CLI and the shells that ran in it, until they're reaped.
-    waits: Vec<smol::channel::Receiver<()>>,
-}
-
-impl PendingRemoval {
-    /// Whether it still has to be removed, or is being removed.
-    fn is_pending(&self) -> bool {
-        self.job.try_lock().map_or(true, |job| job.is_some())
-    }
-}
-
 /// Takes the worktree out of `job` and removes it, unless it was taken.
 fn take_and_remove(
     job: &Mutex<Option<(Worktree, PathBuf)>>,
 ) -> Option<anyhow::Result<worktree::Removal>> {
-    let mut job = job.lock().unwrap_or_else(PoisonError::into_inner);
-    let (worktree, project) = job.take()?;
-    Some(worktree::remove(&worktree, &project))
+    lifecycle::take_and_remove(job, worktree::remove)
 }
 
 /// What dragging the sidebar's edge carries, and draws: nothing, since the
@@ -608,7 +578,7 @@ impl Workspace {
             this.store.wait_for_writes();
             // A removal confirmed while its project's chats were being listed
             // isn't saved yet, so it is here, with their worktrees.
-            let removing: Vec<(i64, PathBuf)> = this.removing.drain().collect();
+            let removing = this.lifecycle.take_removing();
             // Their chats are gone with them, so nothing is read or recorded
             // for them below. Their CLIs are still stopped.
             let mut removed = HashSet::new();
@@ -627,7 +597,7 @@ impl Workspace {
                             for chat in &project.chats {
                                 removed.insert(chat.id);
                                 if let Some(worktree) = &chat.worktree {
-                                    this.track_removal(worktree, &path, Vec::new());
+                                    this.lifecycle.track_removal(worktree, &path, Vec::new());
                                 }
                             }
                         }
@@ -641,7 +611,7 @@ impl Workspace {
                     Some((worktree, project))
                         if matches!(smol::block_on(this.store.chat(id)), Ok(None)) =>
                     {
-                        this.track_removal(
+                        this.lifecycle.track_removal(
                             &worktree,
                             &project,
                             deleting.reaped.into_iter().collect(),
@@ -661,7 +631,8 @@ impl Workspace {
                     .collect();
                 for (worktree, project) in adding {
                     if !taken.contains(worktree.root.as_path()) {
-                        this.track_removal(&worktree, &project, Vec::new());
+                        this.lifecycle
+                            .track_removal(&worktree, &project, Vec::new());
                     }
                 }
             }
@@ -736,11 +707,7 @@ impl Workspace {
                         .values()
                         .map(|shell| shell.terminal.read(cx).shutdown()),
                 )
-                .chain(
-                    this.removals
-                        .iter()
-                        .flat_map(|removal| removal.waits.iter().cloned()),
-                )
+                .chain(this.lifecycle.removal_waits().cloned())
                 .collect();
             terminal::wait_reaped(reaped);
             #[cfg(target_os = "linux")]
@@ -751,8 +718,8 @@ impl Workspace {
             worktree::abandon(std::mem::take(&mut this.checkouts));
             // The worktrees of deleted chats, whose tasks won't run anymore.
             // One being removed already is waited for.
-            for removal in std::mem::take(&mut this.removals) {
-                if let Some(Err(err)) = take_and_remove(&removal.job) {
+            for job in this.lifecycle.take_removals() {
+                if let Some(Err(err)) = take_and_remove(&job) {
                     eprintln!("can't remove a worktree on shutdown: {err:#}");
                 }
             }
@@ -805,8 +772,6 @@ impl Workspace {
             unsaved: 0,
             _listing: None,
             select_listed: None,
-            removing: HashMap::new(),
-            deletions: 0,
             chats: Vec::new(),
             active: None,
             lifecycle: Lifecycle::default(),
@@ -828,7 +793,6 @@ impl Workspace {
             reading: Vec::new(),
             reading_last: Vec::new(),
             checkouts: Vec::new(),
-            removals: Vec::new(),
             _lock: lock,
             shells: HashMap::new(),
             settings_shown: false,
@@ -1167,10 +1131,6 @@ impl Workspace {
     /// The worktrees of its chats go once that is saved, and until then, its
     /// chats can't be opened, nor a chat added to it start.
     fn remove_project(&mut self, id: i64, cx: &mut Context<Self>) {
-        // Its id may name another project once the first removal is saved.
-        if self.removing.contains_key(&id) {
-            return;
-        }
         let Some(path) = self
             .sidebar
             .read(cx)
@@ -1181,7 +1141,9 @@ impl Workspace {
         else {
             return;
         };
-        self.removing.insert(id, path.clone());
+        if !self.lifecycle.remove_project(id, path.clone()) {
+            return;
+        }
         // The listing has the chats asked for before it, including one still
         // being added, which the sidebar doesn't list yet.
         let listed = self.store.projects();
@@ -1194,9 +1156,7 @@ impl Workspace {
                 .find(|project| project.id == id && project.path == path);
             this.update(cx, |this, cx| match project {
                 Some(project) => this.remove_listed(project, cx),
-                None => {
-                    this.removing.remove(&id);
-                }
+                None => this.lifecycle.project_removed(id),
             })
             .ok();
         })
@@ -1223,7 +1183,7 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let removed = removed.await;
             this.update(cx, |this, cx| {
-                this.removing.remove(&id);
+                this.lifecycle.project_removed(id);
                 if let Err(err) = &removed {
                     eprintln!("can't remove project {id}: {err:#}");
                     this.say(format!("Couldn't remove the project: {err}"), cx);
@@ -1352,16 +1312,10 @@ impl Workspace {
     /// Lets `chats` be opened again, once deleting them is done, and if they
     /// were deleted, removes their worktrees.
     fn finish_deleting(&mut self, chats: &[i64], deleted: bool, cx: &mut Context<Self>) {
-        if deleted {
-            self.deletions += 1;
-        }
-        for id in chats {
-            let Some(Deleted { worktree, reaped }) = self.lifecycle.finish_deleting(*id, deleted)
-            else {
-                continue;
-            };
+        for (id, Deleted { worktree, reaped }) in self.lifecycle.finish_deleting_all(chats, deleted)
+        {
             // Its notification can't open it anymore.
-            alerts::withdraw(*id, cx);
+            alerts::withdraw(id, cx);
             if let Some((worktree, project)) = &worktree {
                 self.remove_worktree(worktree, project, reaped, cx);
             }
@@ -2102,7 +2056,8 @@ impl Workspace {
                 let app: &mut AsyncApp = cx;
                 let job = this
                     .update(app, |this, _| {
-                        this.track_removal(&worktree, &project, Vec::new())
+                        this.lifecycle
+                            .track_removal(&worktree, &project, Vec::new())
                     })
                     .unwrap_or_else(|_| Arc::new(Mutex::new(Some((worktree, project)))));
                 if let Some(Err(err)) = smol::unblock(move || take_and_remove(&job)).await {
@@ -2138,9 +2093,10 @@ impl Workspace {
         let added =
             self.store
                 .add_chat(project_id, project.clone(), agent, worktree.clone(), title);
-        let saving = self
-            .lifecycle
-            .save(worktree.map(|worktree| (worktree, project.clone())));
+        let saving = self.lifecycle.save(
+            project_id,
+            worktree.map(|worktree| (worktree, project.clone())),
+        );
         let store = self.store.clone();
         let new = PendingChat {
             project_id,
@@ -2157,7 +2113,7 @@ impl Workspace {
             let kept = match added {
                 Ok(Some(id)) => loop {
                     let Ok((deletions, chat)) =
-                        this.read_with(cx, |this, _| (this.deletions, store.chat(id)))
+                        this.read_with(cx, |this, _| (this.lifecycle.deletions(), store.chat(id)))
                     else {
                         return;
                     };
@@ -2166,7 +2122,7 @@ impl Workspace {
                         .map(|chat| chat.is_some())
                         .map_err(|err| err.to_string());
                     if this
-                        .read_with(cx, |this, _| this.deletions)
+                        .read_with(cx, |this, _| this.lifecycle.deletions())
                         .is_ok_and(|now| now != deletions)
                     {
                         continue;
@@ -2227,7 +2183,6 @@ impl Workspace {
         let saved = Saved {
             kept,
             closed_all: asked.closed_all,
-            project_removing: self.removing.contains_key(&project_id),
             project_archived: projects
                 .iter()
                 .any(|each| each.id == project_id && each.archived_at.is_some()),
@@ -2283,23 +2238,6 @@ impl Workspace {
         }
     }
 
-    /// Has shutdown remove `worktree` once `waits` are reaped, unless the
-    /// job it returns is taken first.
-    fn track_removal(
-        &mut self,
-        worktree: &Worktree,
-        project: &Path,
-        waits: Vec<smol::channel::Receiver<()>>,
-    ) -> RemovalJob {
-        let job = Arc::new(Mutex::new(Some((worktree.clone(), project.to_path_buf()))));
-        self.removals.retain(PendingRemoval::is_pending);
-        self.removals.push(PendingRemoval {
-            job: job.clone(),
-            waits,
-        });
-        job
-    }
-
     /// Removes the worktree a chat ran in once its CLI, if it had one, and
     /// the shells running in it have been reaped. Git keeps one that has
     /// changes nobody committed, which the user is told about.
@@ -2327,7 +2265,9 @@ impl Workspace {
             cx.notify();
         }
         let folder = worktree.root.clone();
-        let job = self.track_removal(worktree, project, waits.clone());
+        let job = self
+            .lifecycle
+            .track_removal(worktree, project, waits.clone());
         cx.spawn(async move |this, cx| {
             // What the CLI and the shells write as they exit, like a shell's
             // history, would otherwise go to a folder being deleted.
@@ -3573,7 +3513,7 @@ impl Workspace {
         // Removing the project stopped its shell, and nothing would stop
         // another one started before it is gone.
         let selected = self.sidebar.read(cx).selected().map(|project| project.id);
-        if selected.is_some_and(|id| self.removing.contains_key(&id)) {
+        if selected.is_some_and(|id| self.lifecycle.is_removing_project(id)) {
             return;
         }
         let Some(cwd) = self.shell_cwd(cx) else {
@@ -3675,7 +3615,7 @@ impl Workspace {
     /// Whether chat `id`'s project is being removed.
     fn is_removing(&self, id: i64, cx: &App) -> bool {
         self.sidebar.read(cx).projects().iter().any(|project| {
-            self.removing.contains_key(&project.id)
+            self.lifecycle.is_removing_project(project.id)
                 && project.chats.iter().any(|chat| chat.id == id)
         })
     }
@@ -5435,8 +5375,8 @@ fn plural(count: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SHELL_SHARE, MIN_SHELL_HEIGHT, PendingRemoval, Turn, duration, import_chat,
-        shell_height, shell_share, take_and_remove,
+        Lifecycle, MAX_SHELL_SHARE, MIN_SHELL_HEIGHT, Turn, duration, import_chat, shell_height,
+        shell_share, take_and_remove,
     };
     use crate::store::{Db, Store};
     use crate::worktree::{Removal, Worktree};
@@ -5444,7 +5384,6 @@ mod tests {
     use gpui_kit::px;
     use serde_json::json;
     use std::fs;
-    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -5601,18 +5540,17 @@ mod tests {
             root: root.clone(),
             folder: root,
         };
-        let removal = PendingRemoval {
-            job: Arc::new(Mutex::new(Some((worktree, dir.clone())))),
-            waits: Vec::new(),
-        };
-        assert!(removal.is_pending());
+        let mut lifecycle = Lifecycle::default();
+        let job = lifecycle.track_removal(&worktree, &dir, Vec::new());
         // Whichever of its task and shutdown comes first removes it.
-        assert_eq!(
-            take_and_remove(&removal.job).unwrap().unwrap(),
-            Removal::Removed
+        assert_eq!(take_and_remove(&job).unwrap().unwrap(), Removal::Removed);
+        assert!(take_and_remove(&job).is_none());
+        assert!(
+            lifecycle
+                .take_removals()
+                .iter()
+                .all(|job| take_and_remove(job).is_none())
         );
-        assert!(take_and_remove(&removal.job).is_none());
-        assert!(!removal.is_pending());
         fs::remove_dir_all(dir).ok();
     }
 }

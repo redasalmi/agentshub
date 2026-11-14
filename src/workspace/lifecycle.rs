@@ -4,7 +4,8 @@
 //! tested.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::worktree::Worktree;
 
@@ -43,12 +44,43 @@ pub struct Deleted {
     pub reaped: Option<Reaped>,
 }
 
+/// A worktree and its project's folder, until someone takes them to remove
+/// the worktree. The remover holds the lock while git runs, so shutdown
+/// waits for a removal under way rather than quit midway.
+pub type RemovalJob = Arc<Mutex<Option<(Worktree, PathBuf)>>>;
+
+/// A worktree to remove once what ran in it has been reaped.
+struct Removal {
+    job: RemovalJob,
+    /// The CLI and the shells that ran in it, until they're reaped.
+    waits: Vec<Reaped>,
+}
+
+impl Removal {
+    /// Whether it still has to be removed, or is being removed.
+    fn is_pending(&self) -> bool {
+        self.job.try_lock().map_or(true, |job| job.is_some())
+    }
+}
+
+/// Takes the worktree out of `job` and removes it with `remove`, unless it
+/// was taken.
+pub fn take_and_remove<T>(
+    job: &Mutex<Option<(Worktree, PathBuf)>>,
+    remove: impl FnOnce(&Worktree, &Path) -> T,
+) -> Option<T> {
+    let mut job = job.lock().unwrap_or_else(PoisonError::into_inner);
+    let (worktree, project) = job.take()?;
+    Some(remove(&worktree, &project))
+}
+
 /// A chat being added, until that is saved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Saving(u64);
 
-/// A chat being added, with the worktree made for it.
+/// A chat being added, with its project and the worktree made for it.
 struct Adding {
+    project: i64,
     worktree: Option<(Worktree, PathBuf)>,
     /// How many times a project had been archived when it was asked for.
     archived_projects: u64,
@@ -62,7 +94,6 @@ pub struct Saved {
     pub kept: Result<bool, String>,
     /// How many times all the chats had been closed when it was asked for.
     pub closed_all: u64,
-    pub project_removing: bool,
     pub project_archived: bool,
     pub chat_archived: bool,
     pub chat_open: bool,
@@ -156,6 +187,15 @@ pub struct Lifecycle {
     archived_projects: u64,
     /// The last Codex lookup started.
     codex_lookup: u64,
+    /// The projects being removed, with their folders, which a chat added
+    /// meanwhile goes with.
+    removing: HashMap<i64, PathBuf>,
+    /// How many deletes, of a chat or of a project, have been saved.
+    deletions: u64,
+    /// The worktrees of deleted chats waiting for their CLI and shells to be
+    /// reaped. Each is removed by its task, or by shutdown if the app quits
+    /// first, so none is left once its chat is gone.
+    removals: Vec<Removal>,
     /// The chat the user last asked to show. Opening a chat reads its last
     /// session before starting its CLI, so a request can finish after a newer
     /// one; only the latest one may take the view.
@@ -307,9 +347,21 @@ impl Lifecycle {
         }
     }
 
+    /// Lets `chats` be opened again once deleting them is done, and gives
+    /// what to remove of the ones that were deleted.
+    pub fn finish_deleting_all(&mut self, chats: &[i64], deleted: bool) -> Vec<(i64, Deleted)> {
+        if deleted {
+            self.deletions += 1;
+        }
+        chats
+            .iter()
+            .filter_map(|&id| Some((id, self.finish_deleting(id, deleted)?)))
+            .collect()
+    }
+
     /// Lets chat `id` be opened again once deleting it is done, and gives
     /// what to remove if it was deleted.
-    pub fn finish_deleting(&mut self, id: i64, deleted: bool) -> Option<Deleted> {
+    fn finish_deleting(&mut self, id: i64, deleted: bool) -> Option<Deleted> {
         let deleting = self.deleting.get_mut(&id)?;
         deleting.pending -= 1;
         // Another delete of it may still be saved.
@@ -326,6 +378,65 @@ impl Lifecycle {
         self.deleting.contains_key(&id)
     }
 
+    pub fn deletions(&self) -> u64 {
+        self.deletions
+    }
+
+    /// Starts removing project `id`, in `path`, unless it's being removed
+    /// already, as its id may name another project once that is saved.
+    pub fn remove_project(&mut self, id: i64, path: PathBuf) -> bool {
+        if self.removing.contains_key(&id) {
+            return false;
+        }
+        self.removing.insert(id, path);
+        true
+    }
+
+    /// Ends removing project `id`, which is saved, failed, or found gone.
+    pub fn project_removed(&mut self, id: i64) {
+        self.removing.remove(&id);
+    }
+
+    pub fn is_removing_project(&self, id: i64) -> bool {
+        self.removing.contains_key(&id)
+    }
+
+    /// The projects being removed, which shutdown removes.
+    pub fn take_removing(&mut self) -> Vec<(i64, PathBuf)> {
+        self.removing.drain().collect()
+    }
+
+    /// Has shutdown remove `worktree` once `waits` are reaped, unless the
+    /// job this returns is taken first.
+    pub fn track_removal(
+        &mut self,
+        worktree: &Worktree,
+        project: &Path,
+        waits: Vec<Reaped>,
+    ) -> RemovalJob {
+        let job = Arc::new(Mutex::new(Some((worktree.clone(), project.to_path_buf()))));
+        self.removals.retain(Removal::is_pending);
+        self.removals.push(Removal {
+            job: job.clone(),
+            waits,
+        });
+        job
+    }
+
+    /// What the worktrees still to remove wait for.
+    pub fn removal_waits(&self) -> impl Iterator<Item = &Reaped> + '_ {
+        self.removals.iter().flat_map(|removal| &removal.waits)
+    }
+
+    /// The worktrees still to remove, which shutdown removes once everything
+    /// is reaped.
+    pub fn take_removals(&mut self) -> Vec<RemovalJob> {
+        std::mem::take(&mut self.removals)
+            .into_iter()
+            .map(|removal| removal.job)
+            .collect()
+    }
+
     pub fn closed_all(&self) -> u64 {
         self.closed_all
     }
@@ -335,14 +446,15 @@ impl Lifecycle {
         self.archived_projects += 1;
     }
 
-    /// Starts adding a chat, made the `worktree` of its project if it has
-    /// one, until `added` says what then becomes of it.
-    pub fn save(&mut self, worktree: Option<(Worktree, PathBuf)>) -> Saving {
+    /// Starts adding a chat to `project`, made the `worktree` of the project
+    /// if it has one, until `added` says what then becomes of it.
+    pub fn save(&mut self, project: i64, worktree: Option<(Worktree, PathBuf)>) -> Saving {
         let saving = Saving(self.next_saving);
         self.next_saving += 1;
         self.adding.insert(
             saving,
             Adding {
+                project,
                 worktree,
                 archived_projects: self.archived_projects,
             },
@@ -354,21 +466,22 @@ impl Lifecycle {
     /// back.
     pub fn added(&mut self, saving: Saving, saved: Saved) -> (Added, Option<(Worktree, PathBuf)>) {
         let Adding {
+            project,
             worktree,
             archived_projects,
         } = self.adding.remove(&saving).expect("a chat is added once");
         let added = match saved.id {
-            Ok(Some(id)) => self.decide(id, archived_projects, saved),
+            Ok(Some(id)) => self.decide(id, project, archived_projects, saved),
             Ok(None) => Added::Lost,
             Err(err) => Added::Failed(err),
         };
         (added, worktree)
     }
 
-    fn decide(&self, id: i64, archived_projects: u64, saved: Saved) -> Added {
+    fn decide(&self, id: i64, project: i64, archived_projects: u64, saved: Saved) -> Added {
         // Its project may have been removed while it was added, with the
         // chats it had before this one.
-        if saved.project_removing {
+        if self.is_removing_project(project) {
             return Added::Delete(id);
         }
         match saved.kept {
@@ -807,7 +920,6 @@ mod adding_tests {
             id: Ok(Some(1)),
             kept: Ok(true),
             closed_all,
-            project_removing: false,
             project_archived: false,
             chat_archived: false,
             chat_open: false,
@@ -826,7 +938,11 @@ mod adding_tests {
                     let (closed_all, archived, deleting, opening) =
                         (flag(0), flag(1), flag(2), flag(3));
                     let mut lifecycle = Lifecycle::default();
-                    let saving = lifecycle.save(Some(worktree(1)));
+                    let saving = lifecycle.save(7, Some(worktree(1)));
+                    let project_removing = flag(4);
+                    if project_removing {
+                        lifecycle.remove_project(7, PathBuf::from("/project"));
+                    }
                     if closed_all {
                         lifecycle.close_all();
                     }
@@ -843,7 +959,6 @@ mod adding_tests {
                         id: id.clone(),
                         kept: kept.clone(),
                         closed_all: 0,
-                        project_removing: flag(4),
                         project_archived: flag(5),
                         chat_archived: flag(6),
                         chat_open: flag(7),
@@ -852,7 +967,7 @@ mod adding_tests {
                     let expected = match (id, kept) {
                         (Ok(None), _) => Added::Lost,
                         (Err(err), _) => Added::Failed(err.clone()),
-                        _ if saved.project_removing => Added::Delete(1),
+                        _ if project_removing => Added::Delete(1),
                         (_, Ok(false)) => Added::Lost,
                         (_, Err(err)) => Added::Unknown(err.clone()),
                         _ if closed_all
@@ -914,7 +1029,7 @@ mod adding_tests {
         fn save(&mut self, closed_all: u64, worktree: Option<u32>) {
             let saving = self
                 .lifecycle
-                .save(worktree.map(super::adding_tests::worktree));
+                .save(1, worktree.map(super::adding_tests::worktree));
             self.saving.push((saving, closed_all, worktree, false));
         }
 
