@@ -279,9 +279,6 @@ pub struct Workspace {
     /// be recorded are, which shutdown reads itself instead. A chat is in it
     /// once per read.
     reading_last: Vec<i64>,
-    /// The chats whose sessions are being recorded, once per batch until it
-    /// has read the sessions they left, which shutdown can't tell apart, so
-    /// it reads all of those chats' sessions.
     /// The worktrees being checked out for new chats. Each is taken by its
     /// chat once git is done, or by shutdown, so none is left without a chat
     /// to remove it.
@@ -383,8 +380,6 @@ impl Render for ResizeShell {
     }
 }
 
-/// The shell's height in a window `viewport` tall, taking `share` of it but
-/// kept within the shell's limits.
 /// When the user asked for a new chat, which what finishes later, git's
 /// answers and the checkout of the chat's worktree, is checked against.
 #[derive(Clone, Copy, PartialEq)]
@@ -413,6 +408,8 @@ fn start_entries(project_id: i64, agents: &[Agent]) -> Vec<Entry> {
         .collect()
 }
 
+/// The shell's height in a window `viewport` tall, taking `share` of it but
+/// kept within the shell's limits.
 fn shell_height(share: f32, viewport: Pixels) -> Pixels {
     (viewport * share.min(MAX_SHELL_SHARE)).max(MIN_SHELL_HEIGHT)
 }
@@ -6462,7 +6459,7 @@ fn render_settings(
                         .checked(close_to_tray)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             let saved = Settings::set_close_to_tray(&this.store, *checked, cx);
-this.save_setting(saved, cx);
+                            this.save_setting(saved, cx);
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -6480,7 +6477,7 @@ this.save_setting(saved, cx);
                         .checked(worktree_by_default)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             let saved = Settings::set_worktree_by_default(&this.store, *checked, cx);
-this.save_setting(saved, cx);
+                            this.save_setting(saved, cx);
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -6502,7 +6499,7 @@ this.save_setting(saved, cx);
                         .checked(notification_popups)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             let saved = Settings::set_notification_popups(&this.store, *checked, cx);
-this.save_setting(saved, cx);
+                            this.save_setting(saved, cx);
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -6515,7 +6512,7 @@ this.save_setting(saved, cx);
                         .checked(notification_sound)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             let saved = Settings::set_notification_sound(&this.store, *checked, cx);
-this.save_setting(saved, cx);
+                            this.save_setting(saved, cx);
                             cx.notify();
                         }))
                         .into_any_element(),
