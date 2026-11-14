@@ -219,6 +219,10 @@ impl Pty {
         for (key, value) in env {
             command.env(key, value);
         }
+        // Taken before the CLI starts, as nothing would stop it if they failed
+        // once it has.
+        let mut reader = pair.master.try_clone_reader()?;
+        let writer = pair.master.take_writer()?;
         let child = pair.slave.spawn_command(command)?;
         let pid = Arc::new(Mutex::new(child.process_id()));
         // Opened before the reaper starts, so it is the CLI's.
@@ -226,8 +230,6 @@ impl Pty {
         let pidfd = child.process_id().and_then(scope::pidfd);
         drop(pair.slave);
 
-        let mut reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
         let (tx, rx) = mpsc::channel();
         let (updates_tx, updates) = smol::channel::bounded(UPDATE_QUEUE);
 
