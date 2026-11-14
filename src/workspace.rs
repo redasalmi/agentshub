@@ -1006,16 +1006,26 @@ impl Workspace {
     /// and selects the first. A folder that already is a project is selected
     /// where it is.
     fn add_folders(&mut self, folders: &[PathBuf], cx: &mut Context<Self>) {
-        // Each one goes on top, so the last goes in first.
-        let added: Vec<_> = folders
-            .iter()
-            .rev()
-            .map(|path| {
-                let path = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                (path.clone(), self.store.add_project(path))
-            })
-            .collect();
+        let folders = folders.to_vec();
         cx.spawn(async move |this, cx| {
+            // Each one goes on top, so the last goes in first.
+            let folders = cx
+                .background_spawn(async move {
+                    folders
+                        .into_iter()
+                        .rev()
+                        .map(|path| fs::canonicalize(&path).unwrap_or(path))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let Ok(added) = this.update(cx, |this, _| {
+                folders
+                    .into_iter()
+                    .map(|path| (path.clone(), this.store.add_project(path)))
+                    .collect::<Vec<_>>()
+            }) else {
+                return;
+            };
             let mut first = None;
             for (path, added) in added {
                 match added.await {
