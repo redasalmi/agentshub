@@ -3452,7 +3452,14 @@ impl Workspace {
             .iter()
             .find(|chat| chat.id == id && chat.fresh_on_restart)
             .map(|chat| (chat.agent, chat.cwd.clone()));
-        self.stop_chat(id, cx);
+        let session = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .and_then(|chat| chat.session);
+        if let Some(reaped) = self.stop_chat(id, cx) {
+            self.track_stopping(id, reaped, session, cx);
+        }
         if let Some((agent, cwd)) = fresh {
             if self.start_chat(id, agent, &cwd, None, window, cx) {
                 self.activate(id, window, cx);
@@ -3518,8 +3525,10 @@ impl Workspace {
             .iter()
             .find(|chat| chat.id == id)
             .and_then(|chat| chat.session);
-        self.stop_chat(id, cx);
-        self.read_last_session(id, session, cx);
+        match self.stop_chat(id, cx) {
+            Some(reaped) => self.track_stopping(id, reaped, session, cx),
+            None => self.read_last_session(id, session, cx),
+        }
     }
 
     /// Kills the chat's CLI, if it has one, and closes the chat. The channel
@@ -3616,6 +3625,19 @@ impl Workspace {
         let Some(reaped) = self.stop_chat(id, cx) else {
             return;
         };
+        self.track_stopping(id, reaped, session, cx);
+    }
+
+    /// Keeps chat `id` from starting again, and its session from being
+    /// resumed elsewhere, until its stopped CLI has been reaped, then reads
+    /// the session it was in: its last, or else `session`.
+    fn track_stopping(
+        &mut self,
+        id: i64,
+        reaped: smol::channel::Receiver<()>,
+        session: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
         self.stopping.insert(id, (reaped.clone(), session));
         let last = self.last_session(id);
         cx.spawn(async move |this, cx| {
