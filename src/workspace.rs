@@ -52,7 +52,7 @@ mod lifecycle;
 mod search;
 mod settings_view;
 
-use lifecycle::{Deleted, Lifecycle, Reaped};
+use lifecycle::{Added, Deleted, Lifecycle, Reaped, Saved, Saving};
 
 use settings_view::render_settings;
 
@@ -205,12 +205,6 @@ pub struct Workspace {
     removing: HashMap<i64, PathBuf>,
     /// How many deletes, of a chat or of a project, have been saved.
     deletions: u64,
-    /// The worktrees checked out for chats being added, with their
-    /// project's folder. Shutdown removes one no chat took.
-    adding: Vec<(Worktree, PathBuf)>,
-    /// How many times a project was archived, which a chat added meanwhile
-    /// doesn't start in.
-    archived_projects: u64,
     /// Open chats, including exited terminals and history whose CLI couldn't
     /// start. Running processes keep running while another chat is shown,
     /// until the user closes them.
@@ -270,9 +264,6 @@ pub struct Workspace {
     /// chat once git is done, or by shutdown, so none is left without a chat
     /// to remove it.
     checkouts: Vec<worktree::Checkout>,
-    /// How many times all the chats were closed. A worktree checked out for
-    /// a new chat before then doesn't start its chat, and goes again.
-    closed_all: u64,
     /// The worktrees of deleted chats waiting for their CLI and shells to be
     /// reaped. Each is removed by its task, or by shutdown if the app quits
     /// first, so none is left once its chat is gone.
@@ -521,10 +512,8 @@ struct PendingChat {
     project_id: i64,
     agent: Agent,
     project: PathBuf,
-    worktree: Option<Worktree>,
+    saving: Saving,
     asked: Asked,
-    /// How many times a project had been archived when it was asked for.
-    archived: u64,
 }
 
 struct ChatTerminal {
@@ -714,7 +703,8 @@ impl Workspace {
                     _ => deleted_reaped.extend(deleting.reaped),
                 }
             }
-            if !this.adding.is_empty()
+            let adding = this.lifecycle.take_adding();
+            if !adding.is_empty()
                 && let Ok(projects) = smol::block_on(this.store.projects())
             {
                 let taken: HashSet<&Path> = projects
@@ -722,7 +712,7 @@ impl Workspace {
                     .flat_map(|project| &project.chats)
                     .filter_map(|chat| Some(chat.worktree.as_ref()?.root.as_path()))
                     .collect();
-                for (worktree, project) in std::mem::take(&mut this.adding) {
+                for (worktree, project) in adding {
                     if !taken.contains(worktree.root.as_path()) {
                         this.track_removal(&worktree, &project, Vec::new());
                     }
@@ -876,8 +866,6 @@ impl Workspace {
             select_listed: None,
             removing: HashMap::new(),
             deletions: 0,
-            adding: Vec::new(),
-            archived_projects: 0,
             chats: Vec::new(),
             active: None,
             requested: None,
@@ -902,7 +890,6 @@ impl Workspace {
             reading: Vec::new(),
             reading_last: Vec::new(),
             checkouts: Vec::new(),
-            closed_all: 0,
             removals: Vec::new(),
             _lock: lock,
             shells: HashMap::new(),
@@ -1565,7 +1552,7 @@ impl Workspace {
         if self.shells.len() != shells {
             self.sync_terminals(cx);
         }
-        self.archived_projects += 1;
+        self.lifecycle.archive_project();
         self.change(
             Change::ArchiveProject {
                 project: id,
@@ -2084,7 +2071,7 @@ impl Workspace {
                 ),
                 // Starting it in the project's folder would have it share
                 // that with other chats, which the settings asked to avoid.
-                Err(err) if this.closed_all == asked.closed_all => {
+                Err(err) if this.lifecycle.closed_all() == asked.closed_all => {
                     window.push_notification(format!("{err:#}"), cx)
                 }
                 Err(_) => {}
@@ -2106,7 +2093,7 @@ impl Workspace {
     fn asked(&self) -> Asked {
         Asked {
             navigations: self.navigations,
-            closed_all: self.closed_all,
+            closed_all: self.lifecycle.closed_all(),
         }
     }
 
@@ -2131,7 +2118,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // All the chats were closed meanwhile, this one with them.
-        if self.closed_all != asked.closed_all {
+        if self.lifecycle.closed_all() != asked.closed_all {
             return;
         }
         if !worktree {
@@ -2158,10 +2145,10 @@ impl Workspace {
             };
             let added = this.update_in(cx, |this, window, cx| match &created {
                 // All the chats were closed meanwhile, this one with them.
-                Ok(worktree) if this.closed_all != closed_all => {
+                Ok(worktree) if this.lifecycle.closed_all() != closed_all => {
                     this.remove_worktree(worktree, &project, None, cx)
                 }
-                Err(_) if this.closed_all != closed_all => {}
+                Err(_) if this.lifecycle.closed_all() != closed_all => {}
                 Ok(worktree) => this.add_chat(
                     project_id,
                     agent,
@@ -2223,18 +2210,16 @@ impl Workspace {
         let added =
             self.store
                 .add_chat(project_id, project.clone(), agent, worktree.clone(), title);
-        if let Some(worktree) = &worktree {
-            self.adding.push((worktree.clone(), project.clone()));
-        }
-        let archived = self.archived_projects;
+        let saving = self
+            .lifecycle
+            .save(worktree.map(|worktree| (worktree, project.clone())));
         let store = self.store.clone();
         let new = PendingChat {
             project_id,
             agent,
             project,
-            worktree,
+            saving,
             asked,
-            archived,
         };
         cx.spawn(async move |this, cx| {
             let added = added.await.map_err(|err| err.to_string());
@@ -2293,6 +2278,7 @@ impl Workspace {
         mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        let has_window = window.is_some();
         // Inside the window's update, the window has to say it itself.
         let mut say =
             |this: &Self, message: String, cx: &mut Context<Self>| match window.as_deref_mut() {
@@ -2303,105 +2289,70 @@ impl Workspace {
             project_id,
             agent,
             project,
-            worktree,
+            saving,
             asked,
-            archived,
         } = new;
-        if let Some(worktree) = &worktree {
-            self.adding.retain(|(each, _)| each.root != worktree.root);
-        }
-        let id = match added {
-            Ok(Some(id)) => id,
-            // Its project was removed before it could be added.
-            Ok(None) => {
-                if let Some(worktree) = &worktree {
-                    self.remove_worktree(worktree, &project, None, cx);
-                }
-                self.refresh(cx);
-                return;
-            }
-            Err(err) => {
-                say(self, format!("Couldn't add the chat: {err}"), cx);
-                if let Some(worktree) = &worktree {
-                    self.remove_worktree(worktree, &project, None, cx);
-                }
-                return;
-            }
+        let id = added.as_ref().ok().copied().flatten();
+        // A listing since it was saved shows it, so it may have been opened,
+        // archived or deleted from there meanwhile.
+        let projects = self.sidebar.read(cx).projects();
+        let saved = Saved {
+            kept,
+            closed_all: asked.closed_all,
+            project_removing: self.removing.contains_key(&project_id),
+            project_archived: projects
+                .iter()
+                .any(|each| each.id == project_id && each.archived_at.is_some()),
+            chat_archived: projects.iter().any(|project| {
+                project
+                    .chats
+                    .iter()
+                    .any(|chat| Some(chat.id) == id && chat.archived_at.is_some())
+            }),
+            chat_open: self.chats.iter().any(|chat| Some(chat.id) == id),
+            window: has_window,
+            id: added,
         };
-        // Its project may have been removed while it was added, with the
-        // chats it had before this one.
-        let worktree = worktree.map(|worktree| (worktree, project.clone()));
-        if self.removing.contains_key(&project_id) {
-            self.delete_chat(id, worktree, cx);
-            return;
-        }
-        match kept {
-            Ok(true) => {}
-            Ok(false) => {
+        let (added, worktree) = self.lifecycle.added(saving, saved);
+        match added {
+            Added::Lost => {
                 if let Some((worktree, project)) = &worktree {
                     self.remove_worktree(worktree, project, None, cx);
                 }
                 self.refresh(cx);
-                return;
             }
-            Err(err) => {
-                say(self, format!("Couldn't start the chat: {err}"), cx);
-                return;
+            Added::Failed(err) => {
+                say(self, format!("Couldn't add the chat: {err}"), cx);
+                if let Some((worktree, project)) = &worktree {
+                    self.remove_worktree(worktree, project, None, cx);
+                }
+            }
+            Added::Delete(id) => self.delete_chat(id, worktree, cx),
+            Added::Unknown(err) => say(self, format!("Couldn't start the chat: {err}"), cx),
+            Added::Listed => self.refresh(cx),
+            Added::Start(id) => {
+                let window = window.expect("a chat starts in a window");
+                let cwd = worktree
+                    .as_ref()
+                    .map_or(&project, |(worktree, _)| &worktree.folder);
+                // Its first session report adds its first session.
+                if !self.start_chat(id, agent, cwd, None, window, cx) {
+                    self.delete_chat(id, worktree, cx);
+                } else if self.navigations == asked.navigations {
+                    self.activate(id, window, cx);
+                    // The sidebar doesn't list the new chat yet, so it can't
+                    // find its project by itself.
+                    self.sidebar
+                        .update(cx, |sidebar, cx| sidebar.select(project_id, cx));
+                } else {
+                    // As a chat opened in the background does, it only shows
+                    // in the sidebar as running.
+                    self.sync_sidebar(cx);
+                    cx.notify();
+                }
+                self.refresh(cx);
             }
         }
-        // All the chats were closed while it was added, this one with them.
-        if self.closed_all != asked.closed_all {
-            self.refresh(cx);
-            return;
-        }
-        // A listing since it was saved shows it, so it may have been opened,
-        // archived or deleted from there meanwhile.
-        let chat_archived = self.sidebar.read(cx).projects().iter().any(|project| {
-            project
-                .chats
-                .iter()
-                .any(|chat| chat.id == id && chat.archived_at.is_some())
-        });
-        if chat_archived
-            || self.lifecycle.is_deleting(id)
-            || self.lifecycle.is_opening(id)
-            || self.chats.iter().any(|chat| chat.id == id)
-        {
-            self.refresh(cx);
-            return;
-        }
-        // Archiving its project while it was added stops the agents in it,
-        // which this one would have been among.
-        let archived = self.archived_projects != archived
-            && self
-                .sidebar
-                .read(cx)
-                .projects()
-                .iter()
-                .any(|each| each.id == project_id && each.archived_at.is_some());
-        let Some(window) = window.filter(|_| !archived) else {
-            self.refresh(cx);
-            return;
-        };
-        let cwd = worktree
-            .as_ref()
-            .map_or(&project, |(worktree, _)| &worktree.folder);
-        // Its first session report adds its first session.
-        if !self.start_chat(id, agent, cwd, None, window, cx) {
-            self.delete_chat(id, worktree, cx);
-        } else if self.navigations == asked.navigations {
-            self.activate(id, window, cx);
-            // The sidebar doesn't list the new chat yet, so it can't find its
-            // project by itself.
-            self.sidebar
-                .update(cx, |sidebar, cx| sidebar.select(project_id, cx));
-        } else {
-            // As a chat opened in the background does, it only shows in the
-            // sidebar as running.
-            self.sync_sidebar(cx);
-            cx.notify();
-        }
-        self.refresh(cx);
     }
 
     /// Has shutdown remove `worktree` once `waits` are reaped, unless the
@@ -4043,12 +3994,10 @@ impl Workspace {
     /// resumes its session.
     fn close_all_chats(&mut self, _: &CloseAllChats, window: &mut Window, cx: &mut Context<Self>) {
         // A chat waiting for its last session to be read, or for its stopped
-        // CLI to be reaped, would start once that's done.
-        self.lifecycle.cancel_all_opening();
-        // So would a new chat once its worktree is checked out. The checkouts
-        // stay listed, so shutdown still removes what they make if the app
-        // quits first.
-        self.closed_all += 1;
+        // CLI to be reaped, would start once that's done, and so would a new
+        // chat once its worktree is checked out. The checkouts stay listed, so
+        // shutdown still removes what they make if the app quits first.
+        self.lifecycle.close_all();
         for checkout in &self.checkouts {
             checkout.cancel();
         }

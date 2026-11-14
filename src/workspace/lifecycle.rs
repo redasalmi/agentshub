@@ -41,10 +41,61 @@ pub struct Deleted {
     pub reaped: Option<Reaped>,
 }
 
+/// A chat being added, until that is saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Saving(u64);
+
+/// A chat being added, with the worktree made for it.
+struct Adding {
+    worktree: Option<(Worktree, PathBuf)>,
+    /// How many times a project had been archived when it was asked for.
+    archived_projects: u64,
+}
+
+/// What the workspace sees of a chat once adding it is saved.
+pub struct Saved {
+    /// Its id, or none if its project was removed before it was added.
+    pub id: Result<Option<i64>, String>,
+    /// Whether it was still there once added.
+    pub kept: Result<bool, String>,
+    /// How many times all the chats had been closed when it was asked for.
+    pub closed_all: u64,
+    pub project_removing: bool,
+    pub project_archived: bool,
+    pub chat_archived: bool,
+    pub chat_open: bool,
+    /// Whether there is a window to start it in.
+    pub window: bool,
+}
+
+/// What to do with a chat once adding it is saved.
+#[derive(Debug, PartialEq)]
+pub enum Added {
+    /// It wasn't added, or is gone already, so its worktree goes.
+    Lost,
+    /// It couldn't be added, so its worktree goes.
+    Failed(String),
+    /// Its project is being removed, so it goes too, with its worktree.
+    Delete(i64),
+    /// Whether it's still there is unknown, so it is left as it is.
+    Unknown(String),
+    /// It's listed, but doesn't start.
+    Listed,
+    Start(i64),
+}
+
 #[derive(Default)]
 pub struct Lifecycle {
     phases: HashMap<i64, Phase>,
     deleting: HashMap<i64, Deleting>,
+    adding: HashMap<Saving, Adding>,
+    next_saving: u64,
+    /// How many times all the chats were closed. A new chat asked for before
+    /// then doesn't start.
+    closed_all: u64,
+    /// How many times a project was archived, which a chat added meanwhile
+    /// doesn't start in.
+    archived_projects: u64,
 }
 
 impl Lifecycle {
@@ -95,8 +146,10 @@ impl Lifecycle {
         }
     }
 
-    /// Keeps every chat being opened from starting.
-    pub fn cancel_all_opening(&mut self) {
+    /// Closing all the chats keeps every chat being opened, or asked for
+    /// before, from starting.
+    pub fn close_all(&mut self) {
+        self.closed_all += 1;
         for phase in self.phases.values_mut() {
             if let Phase::Opening { start } = phase {
                 *start = false;
@@ -196,6 +249,81 @@ impl Lifecycle {
 
     pub fn is_deleting(&self, id: i64) -> bool {
         self.deleting.contains_key(&id)
+    }
+
+    pub fn closed_all(&self) -> u64 {
+        self.closed_all
+    }
+
+    /// A project was archived, which stops its chats.
+    pub fn archive_project(&mut self) {
+        self.archived_projects += 1;
+    }
+
+    /// Starts adding a chat, made the `worktree` of its project if it has
+    /// one, until `added` says what then becomes of it.
+    pub fn save(&mut self, worktree: Option<(Worktree, PathBuf)>) -> Saving {
+        let saving = Saving(self.next_saving);
+        self.next_saving += 1;
+        self.adding.insert(
+            saving,
+            Adding {
+                worktree,
+                archived_projects: self.archived_projects,
+            },
+        );
+        saving
+    }
+
+    /// Ends adding a chat, saying what becomes of it, and gives its worktree
+    /// back.
+    pub fn added(&mut self, saving: Saving, saved: Saved) -> (Added, Option<(Worktree, PathBuf)>) {
+        let Adding {
+            worktree,
+            archived_projects,
+        } = self.adding.remove(&saving).expect("a chat is added once");
+        let added = match saved.id {
+            Ok(Some(id)) => self.decide(id, archived_projects, saved),
+            Ok(None) => Added::Lost,
+            Err(err) => Added::Failed(err),
+        };
+        (added, worktree)
+    }
+
+    fn decide(&self, id: i64, archived_projects: u64, saved: Saved) -> Added {
+        // Its project may have been removed while it was added, with the
+        // chats it had before this one.
+        if saved.project_removing {
+            return Added::Delete(id);
+        }
+        match saved.kept {
+            Ok(true) => {}
+            Ok(false) => return Added::Lost,
+            Err(err) => return Added::Unknown(err),
+        }
+        // All the chats were closed while it was added, this one with them,
+        // or it was opened, archived or deleted from a listing since it was
+        // saved, or its project was archived, which stops its agents.
+        if self.closed_all != saved.closed_all
+            || saved.chat_archived
+            || self.is_deleting(id)
+            || self.is_opening(id)
+            || saved.chat_open
+            || self.archived_projects != archived_projects && saved.project_archived
+            || !saved.window
+        {
+            return Added::Listed;
+        }
+        Added::Start(id)
+    }
+
+    /// The worktrees of chats still being added, which shutdown removes
+    /// unless a chat took them.
+    pub fn take_adding(&mut self) -> Vec<(Worktree, PathBuf)> {
+        std::mem::take(&mut self.adding)
+            .into_values()
+            .filter_map(|adding| adding.worktree)
+            .collect()
     }
 
     /// The chats being deleted, which shutdown finishes.
@@ -347,7 +475,7 @@ mod tests {
                     self.close(id);
                 }
                 Event::CloseAll => {
-                    self.lifecycle.cancel_all_opening();
+                    self.lifecycle.close_all();
                     for id in CHATS {
                         self.cancel(id);
                         self.close(id);
@@ -499,5 +627,304 @@ mod tests {
             let played = explore(open, &mut Vec::new(), &events(), 6);
             assert!(played > 100_000, "{played}");
         }
+    }
+}
+
+#[cfg(test)]
+mod adding_tests {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    use super::{Added, Lifecycle, Saved, Saving};
+    use crate::worktree::Worktree;
+
+    fn worktree(n: u32) -> (Worktree, PathBuf) {
+        let root = PathBuf::from(format!("/worktrees/{n}"));
+        (
+            Worktree {
+                folder: root.clone(),
+                root,
+            },
+            PathBuf::from("/project"),
+        )
+    }
+
+    fn saved(closed_all: u64) -> Saved {
+        Saved {
+            id: Ok(Some(1)),
+            kept: Ok(true),
+            closed_all,
+            project_removing: false,
+            project_archived: false,
+            chat_archived: false,
+            chat_open: false,
+            window: true,
+        }
+    }
+
+    #[test]
+    fn starts_a_new_chat_only_when_nothing_says_otherwise() {
+        let ids = [Ok(Some(1)), Ok(None), Err("no".to_string())];
+        let kepts = [Ok(true), Ok(false), Err("no".to_string())];
+        for id in &ids {
+            for kept in &kepts {
+                for flags in 0..1u32 << 9 {
+                    let flag = |n: u32| flags & 1 << n != 0;
+                    let (closed_all, archived, deleting, opening) =
+                        (flag(0), flag(1), flag(2), flag(3));
+                    let mut lifecycle = Lifecycle::default();
+                    let saving = lifecycle.save(Some(worktree(1)));
+                    if closed_all {
+                        lifecycle.close_all();
+                    }
+                    if archived {
+                        lifecycle.archive_project();
+                    }
+                    if deleting {
+                        lifecycle.mark_deleting(1, None, None);
+                    }
+                    if opening {
+                        lifecycle.open(1);
+                    }
+                    let saved = Saved {
+                        id: id.clone(),
+                        kept: kept.clone(),
+                        closed_all: 0,
+                        project_removing: flag(4),
+                        project_archived: flag(5),
+                        chat_archived: flag(6),
+                        chat_open: flag(7),
+                        window: flag(8),
+                    };
+                    let expected = match (id, kept) {
+                        (Ok(None), _) => Added::Lost,
+                        (Err(err), _) => Added::Failed(err.clone()),
+                        _ if saved.project_removing => Added::Delete(1),
+                        (_, Ok(false)) => Added::Lost,
+                        (_, Err(err)) => Added::Unknown(err.clone()),
+                        _ if closed_all
+                            || saved.chat_archived
+                            || deleting
+                            || opening
+                            || saved.chat_open
+                            || archived && saved.project_archived
+                            || !saved.window =>
+                        {
+                            Added::Listed
+                        }
+                        _ => Added::Start(1),
+                    };
+                    let (added, given) = lifecycle.added(saving, saved);
+                    assert_eq!(added, expected, "{id:?} {kept:?} {flags:#b}");
+                    assert_eq!(given, Some(worktree(1)));
+                    assert!(lifecycle.take_adding().is_empty());
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Event {
+        /// The user asks for a new chat, in a worktree of its own or not.
+        Ask {
+            worktree: bool,
+        },
+        /// Git is done with the oldest checkout, which it made or not.
+        CheckedOut(bool),
+        /// The oldest add is saved, as asked, after its project went, after
+        /// it failed, or after the chat was deleted from a listing.
+        Saved(u8),
+        CloseAll,
+        ArchiveProject,
+        RestoreProject,
+        Quit,
+    }
+
+    /// The workspace around the lifecycle, and who has each worktree.
+    #[derive(Default)]
+    struct World {
+        lifecycle: Lifecycle,
+        made: u32,
+        /// Checkouts git is still on, with `closed_all` when asked for.
+        checkouts: Vec<u64>,
+        /// Adds being saved, with `closed_all` when asked for, their
+        /// worktree, and whether a project was archived since.
+        saving: Vec<(Saving, u64, Option<u32>, bool)>,
+        /// Worktrees a chat has, and the ones removed.
+        chats: HashSet<u32>,
+        removed: HashSet<u32>,
+        project_archived: bool,
+        quit: bool,
+    }
+
+    impl World {
+        fn save(&mut self, closed_all: u64, worktree: Option<u32>) {
+            let saving = self
+                .lifecycle
+                .save(worktree.map(super::adding_tests::worktree));
+            self.saving.push((saving, closed_all, worktree, false));
+        }
+
+        fn apply(&mut self, event: Event) -> bool {
+            if self.quit {
+                return false;
+            }
+            match event {
+                Event::Ask { worktree } => {
+                    let closed_all = self.lifecycle.closed_all();
+                    if worktree {
+                        self.checkouts.push(closed_all);
+                    } else {
+                        self.save(closed_all, None);
+                    }
+                }
+                Event::CheckedOut(made) => {
+                    if self.checkouts.is_empty() {
+                        return false;
+                    }
+                    let closed_all = self.checkouts.remove(0);
+                    if made {
+                        self.made += 1;
+                        if self.lifecycle.closed_all() != closed_all {
+                            self.removed.insert(self.made);
+                        } else {
+                            self.save(closed_all, Some(self.made));
+                        }
+                    }
+                }
+                Event::Saved(how) => {
+                    if self.saving.is_empty() {
+                        return false;
+                    }
+                    let (saving, closed_all, made, archived_since) = self.saving.remove(0);
+                    let mut saved = saved(closed_all);
+                    saved.project_archived = self.project_archived;
+                    match how {
+                        0 => {}
+                        1 => saved.id = Ok(None),
+                        2 => saved.id = Err("no".to_string()),
+                        _ => saved.kept = Ok(false),
+                    }
+                    let (added, given) = self.lifecycle.added(saving, saved);
+                    assert_eq!(
+                        given.map(|(worktree, _)| worktree.root),
+                        made.map(|n| super::adding_tests::worktree(n).0.root)
+                    );
+                    match added {
+                        Added::Lost | Added::Failed(_) | Added::Delete(_) => {
+                            self.removed.extend(made);
+                        }
+                        Added::Unknown(_) | Added::Listed => self.chats.extend(made),
+                        Added::Start(_) => {
+                            assert_eq!(
+                                closed_all,
+                                self.lifecycle.closed_all(),
+                                "started after close-all"
+                            );
+                            assert!(
+                                !(archived_since && self.project_archived),
+                                "started in an archived project"
+                            );
+                            self.chats.extend(made);
+                        }
+                    }
+                }
+                Event::CloseAll => self.lifecycle.close_all(),
+                Event::ArchiveProject => {
+                    self.lifecycle.archive_project();
+                    self.project_archived = true;
+                    for saving in &mut self.saving {
+                        saving.3 = true;
+                    }
+                }
+                Event::RestoreProject => self.project_archived = false,
+                Event::Quit => {
+                    self.quit = true;
+                    let adding: HashSet<PathBuf> = self
+                        .lifecycle
+                        .take_adding()
+                        .into_iter()
+                        .map(|(worktree, _)| worktree.root)
+                        .collect();
+                    let made: Vec<u32> = self
+                        .saving
+                        .drain(..)
+                        .filter_map(|(_, _, made, _)| made)
+                        .collect();
+                    let saving: HashSet<PathBuf> = made
+                        .iter()
+                        .map(|&n| super::adding_tests::worktree(n).0.root)
+                        .collect();
+                    // No chat took them, so shutdown removes them.
+                    self.removed.extend(made);
+                    assert_eq!(adding, saving, "shutdown's worktrees");
+                    // Git still checking out is abandoned, which removes what
+                    // it made.
+                    self.checkouts.clear();
+                }
+            }
+            true
+        }
+
+        fn check(&self) {
+            let saving: Vec<u32> = self
+                .saving
+                .iter()
+                .filter_map(|(_, _, made, _)| *made)
+                .collect();
+            for n in 1..=self.made {
+                let owners = [
+                    saving.contains(&n),
+                    self.chats.contains(&n),
+                    self.removed.contains(&n),
+                ];
+                assert_eq!(
+                    owners.iter().filter(|owned| **owned).count(),
+                    1,
+                    "worktree {n}: {owners:?}"
+                );
+            }
+        }
+    }
+
+    fn explore(sequence: &mut Vec<Event>, events: &[Event], depth: usize) -> usize {
+        let mut played = 1;
+        if sequence.len() == depth {
+            return played;
+        }
+        for &event in events {
+            let mut world = World::default();
+            for &earlier in sequence.iter() {
+                assert!(world.apply(earlier));
+            }
+            if !world.apply(event) {
+                continue;
+            }
+            sequence.push(event);
+            world.check();
+            played += explore(sequence, events, depth);
+            sequence.pop();
+        }
+        played
+    }
+
+    #[test]
+    fn new_chats_hold_in_every_order_of_events() {
+        let events = [
+            Event::Ask { worktree: true },
+            Event::Ask { worktree: false },
+            Event::CheckedOut(true),
+            Event::CheckedOut(false),
+            Event::Saved(0),
+            Event::Saved(1),
+            Event::Saved(2),
+            Event::Saved(3),
+            Event::CloseAll,
+            Event::ArchiveProject,
+            Event::RestoreProject,
+            Event::Quit,
+        ];
+        let played = explore(&mut Vec::new(), &events, 6);
+        assert!(played > 100_000, "{played}");
     }
 }
