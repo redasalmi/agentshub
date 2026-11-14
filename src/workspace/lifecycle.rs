@@ -1,6 +1,7 @@
 //! Where each chat is on its way in or out: being added, opened, closed once
-//! a Codex lookup is done, stopped or deleted. Kept apart from the window so
-//! every order of events can be tested.
+//! a Codex lookup is done, stopped or deleted, and which may take the view
+//! once it's in. Kept apart from the window so every order of events can be
+//! tested.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -85,6 +86,17 @@ pub enum Added {
     Start(i64),
 }
 
+/// The user asking to show a chat, which takes the view once it's open
+/// unless something else was asked for meanwhile.
+#[derive(Clone, Copy)]
+pub struct Request {
+    /// `navigations` once asked.
+    navigations: u64,
+    /// The chat being opened that was asked for before, which the view goes
+    /// back to if this one turns out to be gone.
+    overtaken: Option<i64>,
+}
+
 /// A look for the sessions running Codex CLIs are in among their open
 /// files, as Codex doesn't report them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +156,16 @@ pub struct Lifecycle {
     archived_projects: u64,
     /// The last Codex lookup started.
     codex_lookup: u64,
+    /// The chat the user last asked to show. Opening a chat reads its last
+    /// session before starting its CLI, so a request can finish after a newer
+    /// one; only the latest one may take the view.
+    requested: Option<i64>,
+    /// How many times the user has asked to show something: a chat, a
+    /// project, a new chat, or the settings, or the chat again in their
+    /// place. Something that finishes later than it started, like a chat's
+    /// worktree being checked out, only takes the view if this hasn't changed
+    /// meanwhile.
+    navigations: u64,
 }
 
 impl Lifecycle {
@@ -187,10 +209,14 @@ impl Lifecycle {
         }
     }
 
-    /// Keeps chat `id` from starting once its last session is read.
+    /// Keeps chat `id` from starting, and from taking the view, once its last
+    /// session is read or its stopped CLI is reaped.
     pub fn cancel_opening(&mut self, id: i64) {
         if let Some(Phase::Opening { start }) = self.phases.get_mut(&id) {
             *start = false;
+        }
+        if self.requested == Some(id) {
+            self.requested = None;
         }
     }
 
@@ -198,6 +224,7 @@ impl Lifecycle {
     /// before, from starting.
     pub fn close_all(&mut self) {
         self.closed_all += 1;
+        self.requested = None;
         for phase in self.phases.values_mut() {
             if let Phase::Opening { start } = phase {
                 *start = false;
@@ -363,6 +390,66 @@ impl Lifecycle {
             return Added::Listed;
         }
         Added::Start(id)
+    }
+
+    pub fn navigations(&self) -> u64 {
+        self.navigations
+    }
+
+    /// The user asked to show a project.
+    pub fn navigate(&mut self) {
+        self.navigations += 1;
+    }
+
+    /// Asking for a new chat supersedes the chats still opening, and the new
+    /// chats asked for before, which start in the background.
+    pub fn ask(&mut self) {
+        self.navigations += 1;
+        self.requested = None;
+    }
+
+    /// The user showed the settings, or the chat again in their place. A
+    /// chat still opening mustn't take the view from the settings.
+    pub fn show_settings(&mut self, shown: bool) {
+        self.navigations += 1;
+        if shown {
+            self.requested = None;
+        }
+    }
+
+    /// The user asked to show chat `id`.
+    pub fn request(&mut self, id: i64) -> Request {
+        self.navigations += 1;
+        let overtaken = self.requested.filter(|each| self.is_opening(*each));
+        self.requested = Some(id);
+        Request {
+            navigations: self.navigations,
+            overtaken,
+        }
+    }
+
+    /// Whether chat `id` is the last the user asked to show, so it takes the
+    /// view once it's open.
+    pub fn is_requested(&self, id: i64) -> bool {
+        self.requested == Some(id)
+    }
+
+    /// Chat `id`, asked for by `request`, turned out to be gone. Gives the
+    /// chat it took the request over from, which is asked for again, unless
+    /// something else was asked for since.
+    pub fn give_back(&mut self, id: i64, request: Request) -> Option<i64> {
+        if !self.is_requested(id) || self.navigations != request.navigations {
+            return None;
+        }
+        let overtaken = request.overtaken?;
+        self.requested = Some(overtaken);
+        Some(overtaken)
+    }
+
+    /// Chat `id` was shown.
+    pub fn shown(&mut self, id: i64) {
+        self.requested = Some(id);
+        self.navigations += 1;
     }
 
     /// Starts a Codex lookup of `chats`, unless there are none.
@@ -1224,6 +1311,277 @@ mod codex_tests {
 
     #[test]
     fn codex_lookups_hold_in_every_order_of_events() {
+        let played = explore(&mut Vec::new(), &events(), 6);
+        assert!(played > 100_000, "{played}");
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use std::collections::HashSet;
+
+    use super::{Lifecycle, Request};
+
+    /// What the user, or a chat taking the view, did.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Act {
+        Open(i64),
+        Shown(i64),
+        GaveBack(i64),
+        Ask,
+        Settings(bool),
+        Select,
+        Cancel(i64),
+        CloseAll,
+    }
+
+    impl Act {
+        /// Whether it is the user asking to show something, which a new chat
+        /// asked for before mustn't take the view from.
+        fn navigates(self) -> bool {
+            matches!(
+                self,
+                Act::Open(_) | Act::Shown(_) | Act::Ask | Act::Settings(_) | Act::Select
+            )
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Event {
+        Open(i64),
+        /// The read of that many before the newest finishes, with the chat
+        /// found or gone.
+        Read(usize, bool),
+        Ask,
+        /// The oldest new chat is added.
+        Added,
+        Settings(bool),
+        Select,
+        /// The chat is archived or deleted.
+        Cancel(i64),
+        CloseAll,
+        Close(i64),
+        /// The chat, open without a CLI, starts a new session and shows.
+        Restart(i64),
+    }
+
+    #[derive(Default)]
+    struct World {
+        lifecycle: Lifecycle,
+        acts: Vec<Act>,
+        /// Last sessions being read, with the request and the act that
+        /// started each.
+        reads: Vec<(i64, Request, usize)>,
+        /// New chats being added, with the act that asked for each, and
+        /// `closed_all` and `navigations` then.
+        asks: Vec<(usize, u64, u64)>,
+        added: i64,
+        open: HashSet<i64>,
+        shown: Option<i64>,
+    }
+
+    impl World {
+        /// The chat the user last asked to show, from what happened.
+        fn target(&self, acts: &[Act]) -> Option<i64> {
+            acts.iter().fold(None, |target, act| match *act {
+                Act::Open(id) | Act::Shown(id) | Act::GaveBack(id) => Some(id),
+                Act::Ask | Act::Settings(true) | Act::CloseAll => None,
+                Act::Cancel(id) if target == Some(id) => None,
+                _ => target,
+            })
+        }
+
+        fn navigated_since(&self, act: usize) -> bool {
+            self.acts[act + 1..].iter().any(|act| act.navigates())
+        }
+
+        fn show(&mut self, id: i64) {
+            assert!(
+                self.open.contains(&id),
+                "showed chat {id}, which isn't open"
+            );
+            self.lifecycle.shown(id);
+            self.acts.push(Act::Shown(id));
+            self.shown = Some(id);
+        }
+
+        fn apply(&mut self, event: Event) -> bool {
+            match event {
+                Event::Open(id) => {
+                    let opening: Vec<i64> = self.reads.iter().map(|read| read.0).collect();
+                    let before = self.target(&self.acts);
+                    self.acts.push(Act::Open(id));
+                    let request = self.lifecycle.request(id);
+                    assert_eq!(
+                        request.overtaken,
+                        before.filter(|each| opening.contains(each)),
+                        "took over from the wrong chat"
+                    );
+                    if self.open.contains(&id) {
+                        self.show(id);
+                    } else if self.lifecycle.open(id) {
+                        self.reads.push((id, request, self.acts.len() - 1));
+                    }
+                }
+                Event::Read(back, gone) => {
+                    let Some(index) = self.reads.len().checked_sub(back + 1) else {
+                        return false;
+                    };
+                    let (id, request, act) = self.reads.remove(index);
+                    if !self.lifecycle.opened(id) {
+                        return true;
+                    }
+                    if gone {
+                        let expected =
+                            if self.target(&self.acts) == Some(id) && !self.navigated_since(act) {
+                                request.overtaken
+                            } else {
+                                None
+                            };
+                        let given = self.lifecycle.give_back(id, request);
+                        assert_eq!(given, expected, "gave the view back wrongly");
+                        if let Some(overtaken) = given {
+                            self.acts.push(Act::GaveBack(overtaken));
+                            if self.open.contains(&overtaken) {
+                                self.show(overtaken);
+                            }
+                        }
+                    } else {
+                        self.open.insert(id);
+                        let show = self.lifecycle.is_requested(id);
+                        assert_eq!(
+                            show,
+                            self.target(&self.acts) == Some(id),
+                            "chat {id} took the view wrongly"
+                        );
+                        if show {
+                            self.show(id);
+                        }
+                    }
+                }
+                Event::Ask => {
+                    self.acts.push(Act::Ask);
+                    self.lifecycle.ask();
+                    self.asks.push((
+                        self.acts.len() - 1,
+                        self.lifecycle.closed_all(),
+                        self.lifecycle.navigations(),
+                    ));
+                }
+                Event::Added => {
+                    if self.asks.is_empty() {
+                        return false;
+                    }
+                    let (act, closed_all, navigations) = self.asks.remove(0);
+                    if self.lifecycle.closed_all() != closed_all {
+                        return true;
+                    }
+                    self.added += 1;
+                    let id = 10 + self.added;
+                    self.open.insert(id);
+                    let show = self.lifecycle.navigations() == navigations;
+                    assert_eq!(
+                        show,
+                        !self.navigated_since(act),
+                        "new chat {id} took the view wrongly"
+                    );
+                    if show {
+                        self.show(id);
+                    }
+                }
+                Event::Settings(shown) => {
+                    self.acts.push(Act::Settings(shown));
+                    self.lifecycle.show_settings(shown);
+                }
+                Event::Select => {
+                    self.acts.push(Act::Select);
+                    self.lifecycle.navigate();
+                }
+                Event::Cancel(id) => {
+                    self.acts.push(Act::Cancel(id));
+                    self.lifecycle.cancel_opening(id);
+                    self.open.remove(&id);
+                }
+                Event::CloseAll => {
+                    self.acts.push(Act::CloseAll);
+                    self.lifecycle.close_all();
+                    self.open.clear();
+                    self.shown = None;
+                }
+                Event::Restart(id) => {
+                    if !self.open.contains(&id) {
+                        return false;
+                    }
+                    self.show(id);
+                }
+                Event::Close(id) => {
+                    if !self.open.remove(&id) {
+                        return false;
+                    }
+                    if self.shown == Some(id) {
+                        self.shown = None;
+                    }
+                }
+            }
+            true
+        }
+
+        fn check(&self) {
+            let target = self.target(&self.acts);
+            for id in [1, 2] {
+                assert_eq!(
+                    self.lifecycle.is_requested(id),
+                    target == Some(id),
+                    "{:?}",
+                    self.acts
+                );
+            }
+        }
+    }
+
+    fn events() -> Vec<Event> {
+        let mut events = vec![
+            Event::Read(0, false),
+            Event::Read(1, false),
+            Event::Read(0, true),
+            Event::Read(1, true),
+            Event::Ask,
+            Event::Added,
+            Event::Settings(true),
+            Event::Settings(false),
+            Event::Select,
+            Event::CloseAll,
+            Event::Restart(1),
+        ];
+        for id in [1, 2] {
+            events.extend([Event::Open(id), Event::Cancel(id), Event::Close(id)]);
+        }
+        events
+    }
+
+    fn explore(played: &mut Vec<Event>, events: &[Event], depth: usize) -> usize {
+        let mut count = 1;
+        if depth == 0 {
+            return count;
+        }
+        for &event in events {
+            let mut world = World::default();
+            for &event in played.iter() {
+                world.apply(event);
+            }
+            if !world.apply(event) {
+                continue;
+            }
+            world.check();
+            played.push(event);
+            count += explore(played, events, depth - 1);
+            played.pop();
+        }
+        count
+    }
+
+    #[test]
+    fn only_the_latest_request_takes_the_view_in_every_order_of_events() {
         let played = explore(&mut Vec::new(), &events(), 6);
         assert!(played > 100_000, "{played}");
     }

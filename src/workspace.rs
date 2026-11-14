@@ -211,16 +211,8 @@ pub struct Workspace {
     chats: Vec<Chat>,
     /// The chat that is shown.
     active: Option<i64>,
-    /// The chat the user last asked to show. Opening a chat reads its last
-    /// session before starting its CLI, so a request can finish after a newer
-    /// one; only the latest one may take the view.
-    requested: Option<i64>,
-    /// How many times the user has asked to show something: a chat, or the
-    /// settings, or the chat again in their place. Something that finishes
-    /// later than it started, like a chat's worktree being checked out, only
-    /// takes the view if this hasn't changed meanwhile.
-    navigations: u64,
-    /// The chats on their way in or out, and the ones being deleted.
+    /// The chats on their way in or out, the ones being deleted, and which
+    /// of them may take the view.
     lifecycle: Lifecycle,
     reports: Reports,
     codex_watcher: Option<notify::RecommendedWatcher>,
@@ -857,8 +849,6 @@ impl Workspace {
             deletions: 0,
             chats: Vec::new(),
             active: None,
-            requested: None,
-            navigations: 0,
             lifecycle: Lifecycle::default(),
             reports,
             codex_watcher,
@@ -1257,7 +1247,7 @@ impl Workspace {
         let id = project.id;
         let chats: Vec<i64> = project.chats.iter().map(|chat| chat.id).collect();
         for chat in project.chats {
-            self.cancel_opening(chat.id);
+            self.lifecycle.cancel_opening(chat.id);
             let reaped = self
                 .stop_chat(chat.id, cx)
                 .or_else(|| self.lifecycle.reaping(chat.id));
@@ -1379,7 +1369,7 @@ impl Workspace {
         worktree: Option<(Worktree, PathBuf)>,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_opening(id);
+        self.lifecycle.cancel_opening(id);
         let reaped = self
             .stop_chat(id, cx)
             .or_else(|| self.lifecycle.reaping(id));
@@ -1453,7 +1443,7 @@ impl Workspace {
     /// Closes a chat and archives it. Opening it again brings it back and
     /// resumes its session.
     fn archive_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_opening(id);
+        self.lifecycle.cancel_opening(id);
         self.close_chats(vec![id], window, cx);
         self.change(
             Change::ArchiveChat {
@@ -1529,7 +1519,7 @@ impl Workspace {
         };
         let ids = self.chats_of(id, cx);
         for id in &ids {
-            self.cancel_opening(*id);
+            self.lifecycle.cancel_opening(*id);
         }
         self.close_chats(ids.clone(), window, cx);
         // Dropping their terminals kills the shells, as removing the project
@@ -1572,15 +1562,6 @@ impl Workspace {
             .flat_map(|project| &project.chats)
             .map(|chat| chat.id)
             .collect()
-    }
-
-    /// Keeps a chat whose last session is being read, or whose stopped CLI
-    /// is being reaped, from starting once that's done.
-    fn cancel_opening(&mut self, id: i64) {
-        self.lifecycle.cancel_opening(id);
-        if self.requested == Some(id) {
-            self.requested = None;
-        }
     }
 
     /// Shows `change` at once, and saves it. The projects are listed as saved
@@ -2073,14 +2054,13 @@ impl Workspace {
     /// supersedes the chats still opening and the new chats still on their
     /// way for earlier requests, which start in the background.
     fn ask_for_chat(&mut self) -> Asked {
-        self.navigations += 1;
-        self.requested = None;
+        self.lifecycle.ask();
         self.asked()
     }
 
     fn asked(&self) -> Asked {
         Asked {
-            navigations: self.navigations,
+            navigations: self.lifecycle.navigations(),
             closed_all: self.lifecycle.closed_all(),
         }
     }
@@ -2326,7 +2306,7 @@ impl Workspace {
                 // Its first session report adds its first session.
                 if !self.start_chat(id, agent, cwd, None, window, cx) {
                     self.delete_chat(id, worktree, cx);
-                } else if self.navigations == asked.navigations {
+                } else if self.lifecycle.navigations() == asked.navigations {
                     self.activate(id, window, cx);
                     // The sidebar doesn't list the new chat yet, so it can't
                     // find its project by itself.
@@ -2433,23 +2413,21 @@ impl Workspace {
         if self.is_archived(id, cx) {
             self.change(Change::RestoreChat(id), cx);
         }
-        self.navigations += 1;
+        // Reading a chat's last session takes long enough for another chat
+        // to be asked for meanwhile. This is the request that a completion
+        // compares itself with.
+        let request = self.lifecycle.request(id);
         if self.chats.iter().any(|chat| chat.id == id) {
-            // Reading a chat's last session takes long enough for another
-            // chat to be asked for meanwhile. This is the request that a
-            // completion compares itself with.
-            self.requested = Some(id);
             self.activate(id, window, cx);
             return;
         }
         // A CLI that was stopped to free what it held opens again once it's
         // gone, so the two never run in one session.
         if let Some(reaped) = self.lifecycle.reaping(id) {
-            self.requested = Some(id);
             cx.spawn_in(window, async move |this, cx| {
                 reaped.recv().await.ok();
                 this.update_in(cx, |this, window, cx| {
-                    if this.requested == Some(id) {
+                    if this.lifecycle.is_requested(id) {
                         this.open_chat(id, window, cx);
                     }
                 })
@@ -2458,14 +2436,6 @@ impl Workspace {
             .detach();
             return;
         }
-        // This request is now the one that decides what the view shows when
-        // the read below finishes. If the chat turns out to be gone, the chat
-        // it took over from still shows when it opens.
-        let overtaken = self
-            .requested
-            .filter(|each| self.lifecycle.is_opening(*each));
-        let navigations = self.navigations;
-        self.requested = Some(id);
         // Clicks that arrive while the session is read would start a second
         // CLI in the same chat. A read that was cancelled starts it after all.
         if !self.lifecycle.open(id) {
@@ -2538,14 +2508,12 @@ impl Workspace {
                             (agent, cwd, sessions, last_exists)
                         }
                         Ok((None, ..)) => {
-                            if this.requested == Some(id)
-                                && this.navigations == navigations
-                                && let Some(overtaken) = overtaken
+                            // If the chat is gone, the one it took over the
+                            // view from still shows when it opens.
+                            if let Some(overtaken) = this.lifecycle.give_back(id, request)
+                                && this.chats.iter().any(|chat| chat.id == overtaken)
                             {
-                                this.requested = Some(overtaken);
-                                if this.chats.iter().any(|chat| chat.id == overtaken) {
-                                    this.activate(overtaken, window, cx);
-                                }
+                                this.activate(overtaken, window, cx);
                             }
                             return;
                         }
@@ -2580,7 +2548,7 @@ impl Workspace {
                     // A chat the user selected while this one was being read
                     // keeps the view. This one still starts, but in the
                     // background, so its completion can't steal focus.
-                    let show = this.requested == Some(id);
+                    let show = this.lifecycle.is_requested(id);
                     // Two CLIs in one session would append to the same transcript,
                     // so a session another chat is running can't be resumed here.
                     if let Some(last) = resumed
@@ -3526,8 +3494,7 @@ impl Workspace {
         }
         alerts::withdraw(id, cx);
         self.active = Some(id);
-        self.requested = Some(id);
-        self.navigations += 1;
+        self.lifecycle.shown(id);
         self.settings_shown = false;
         self.focus_chat(window, cx);
         self.sync_terminals(cx);
@@ -3593,7 +3560,7 @@ impl Workspace {
         }
         // Selecting a project is asking to show something, so a new chat or
         // New Chat dialog asked for before doesn't take the view from it.
-        self.navigations += 1;
+        self.lifecycle.navigate();
         self.sync_terminals(cx);
         self.look_up_installed(cx);
         cx.notify();
@@ -3666,10 +3633,9 @@ impl Workspace {
     /// leaves the covered terminals, so keys can't reach a CLI out of sight.
     pub fn show_settings(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_shown = shown;
-        self.navigations += 1;
+        // A chat still opening mustn't take the view from the settings.
+        self.lifecycle.show_settings(shown);
         if shown {
-            // A chat still opening mustn't take the view from the settings.
-            self.requested = None;
             self.focus_handle.focus(window, cx);
         } else {
             self.focus_chat(window, cx);
@@ -3976,7 +3942,6 @@ impl Workspace {
         for checkout in &self.checkouts {
             checkout.cancel();
         }
-        self.requested = None;
         let ids = self.chats.iter().map(|chat| chat.id).collect();
         self.close_chats(ids, window, cx);
     }
