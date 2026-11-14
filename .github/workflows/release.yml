@@ -13,7 +13,13 @@ on:
 permissions: {}
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   linux:
+    needs: ci
     # The oldest supported runner, so the binary links against an old glibc
     # and runs on older distros too.
     runs-on: ubuntu-22.04
@@ -50,7 +56,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
 
       - name: Build
         run: cargo build --release --locked
