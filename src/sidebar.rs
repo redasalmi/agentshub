@@ -1336,9 +1336,10 @@ impl Sidebar {
     }
 
     /// An archived chat, which opening brings back.
-    fn render_archived_chat(&self, chat: &Chat, cx: &Context<Self>) -> Stateful<Div> {
+    fn render_archived_chat(&self, chat: &Chat, cx: &Context<Self>) -> ContextMenu<Stateful<Div>> {
         let theme = cx.theme();
         let id = chat.id;
+        let sidebar = cx.entity();
         let group = SharedString::from(format!("archived-{id}"));
         let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
         let archived = chat.archived_at.map(age).unwrap_or_default();
@@ -1411,6 +1412,25 @@ impl Sidebar {
                     ),
             )
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::OpenChat(id))))
+            .context_menu(move |menu, _, _| {
+                let emit = |event| emit(&sidebar, event);
+                menu.item(
+                    PopupMenuItem::new("Open")
+                        .icon(IconName::ExternalLink)
+                        .on_click(emit(SidebarEvent::OpenChat(id))),
+                )
+                .item(
+                    PopupMenuItem::new("Bring back")
+                        .icon(ExtraIcon::ArchiveRestore)
+                        .on_click(emit(SidebarEvent::RestoreChat(id))),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Delete")
+                        .icon(IconName::Delete)
+                        .on_click(emit(SidebarEvent::DeleteChat(id))),
+                )
+            })
     }
 
     fn render_filter(&self, project: &Project, cx: &Context<Self>) -> impl IntoElement {
