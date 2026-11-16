@@ -12,6 +12,8 @@ A light Linux desktop home for the agent CLIs you already use: [Claude Code](htt
 
 It is not an orchestrator: no fleets of agents, task queues or PR review panes.
 
+New to Agents Hub? The [user guide](docs/README.md) shows how to use it, step by step.
+
 ## Requirements
 
 - Linux on x86_64.
