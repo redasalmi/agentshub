@@ -2496,12 +2496,7 @@ impl Workspace {
         else {
             return;
         };
-        let sessions = self
-            .reports
-            .read(key, agent)
-            .into_iter()
-            .map(|(agent_id, report)| (agent_id, report.transcript_path, report.reason))
-            .collect();
+        let sessions = reported_sessions(&mut self.reports, key, agent);
         self.record_sessions(id, sessions, cx);
     }
 
@@ -3058,6 +3053,9 @@ impl Workspace {
             .iter()
             .find(|chat| chat.id == id && chat.fresh_on_restart)
             .map(|chat| (chat.agent, chat.cwd.clone()));
+        // The CLI goes, so what it is in is recorded while it is still there.
+        let codex = self.codex_session(id, cx);
+        self.record_running(id, codex, cx);
         let session = self
             .chats
             .iter()
@@ -3182,21 +3180,51 @@ impl Workspace {
             && (kept || matches!(last_prompt, Ok((false, _))))
     }
 
+    /// The session a chat's Codex CLI is in, looked for among the files its
+    /// process keeps open, which only that process can tell. `None` for the
+    /// other agents, which report their sessions. That's a few reads under
+    /// /proc, which a chat stopping now and then can afford on this thread.
+    fn codex_session(&self, id: i64, cx: &App) -> Option<(String, PathBuf)> {
+        let chat = self.chats.iter().find(|chat| chat.id == id)?;
+        let terminal = chat
+            .terminal
+            .as_ref()
+            .filter(|_| chat.agent == Agent::Codex)?;
+        sessions::codex_session(&terminal.terminal.read(cx).pid())
+    }
+
+    /// Records what a chat's CLI is in before it is stopped: the sessions in
+    /// its queued reports, and `codex` where its open files told the one it
+    /// is in. Everything that kills a CLI goes through here first, or the
+    /// chat opens again on a session it had already left, and the one it was
+    /// really in is never recorded, nor its transcript ever read.
+    fn record_running(
+        &mut self,
+        id: i64,
+        codex: Option<(String, PathBuf)>,
+        cx: &mut Context<Self>,
+    ) {
+        let report = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .map(|chat| chat.report.clone());
+        // A queued report can say the CLI went into another session.
+        if let Some(report) = report {
+            self.read_reports(&report, cx);
+        }
+        if let Some((agent_id, path)) = codex {
+            self.record_sessions(id, vec![(agent_id, path, None)], cx);
+        }
+    }
+
     /// Stops a chat's CLI after recording the session it's in, which opening
     /// the chat again resumes, and reads that session once the CLI is gone.
     fn suspend(&mut self, id: i64, cx: &mut Context<Self>) {
+        let codex = self.codex_session(id, cx);
         let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) else {
             return;
         };
-        let report = chat.report.clone();
-        // Codex doesn't report its sessions, so the one it's in is looked for
-        // among its open files before it goes. That's a few reads under /proc,
-        // which a chat stopping now and then can afford on this thread.
-        let codex = chat
-            .terminal
-            .as_ref()
-            .filter(|_| chat.agent == Agent::Codex)
-            .and_then(|terminal| sessions::codex_session(&terminal.terminal.read(cx).pid()));
         // A Codex that exited, or is exiting, while a lookup was under way
         // has no open files left to look through, so only that lookup can
         // find the session it was in. The chat stops once it has recorded it,
@@ -3204,11 +3232,7 @@ impl Workspace {
         if codex.is_none() && chat.codex.close_after_lookup() {
             return;
         }
-        // A queued report can say the CLI went into another session.
-        self.read_reports(&report, cx);
-        if let Some((agent_id, path)) = codex {
-            self.record_sessions(id, vec![(agent_id, path, None)], cx);
-        }
+        self.record_running(id, codex, cx);
         let Some(session) = self
             .chats
             .iter()
@@ -5221,6 +5245,20 @@ fn capitalized(text: &str) -> String {
     }
 }
 
+/// The sessions in a terminal's queued reports, taken out of them, in the
+/// order its CLI went into them.
+fn reported_sessions(
+    reports: &mut Reports,
+    key: &str,
+    agent: Agent,
+) -> Vec<(String, PathBuf, Option<String>)> {
+    reports
+        .read(key, agent)
+        .into_iter()
+        .map(|(agent_id, report)| (agent_id, report.transcript_path, report.reason))
+        .collect()
+}
+
 /// Records the sessions a chat's CLI reported last, and reads `sessions`
 /// along with the ones those reports moved the chat into or out of. One
 /// transcript that can't be read doesn't stop the others.
@@ -5375,8 +5413,8 @@ fn plural(count: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Lifecycle, MAX_SHELL_SHARE, MIN_SHELL_HEIGHT, Turn, duration, import_chat, shell_height,
-        shell_share, take_and_remove,
+        Lifecycle, MAX_SHELL_SHARE, MIN_SHELL_HEIGHT, Turn, duration, import_chat,
+        reported_sessions, shell_height, shell_share, take_and_remove,
     };
     use crate::store::{Db, Store};
     use crate::worktree::{Removal, Worktree};
@@ -5500,6 +5538,61 @@ mod tests {
             db.items(sessions[1].id, 100).unwrap()[0].payload["text"],
             "second prompt"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Restarting a chat kills its CLI and opens the chat again on its last
+    /// recorded session. A report the CLI left queued says it had gone into
+    /// another one, so it has to be recorded before the CLI goes, or the
+    /// restart resumes a session the CLI had already left and the one it was
+    /// really in is never recorded.
+    #[test]
+    fn restarting_records_the_session_the_cli_reported() {
+        let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let db = Db::open_in_memory().unwrap();
+        let project = db.add_project(&dir).unwrap();
+        let chat = db.add_chat(project, Agent::Claude, None).unwrap();
+        let first = dir.join("first.jsonl");
+        let second = dir.join("second.jsonl");
+        fs::write(&first, message("1", None, "user", "first prompt")).unwrap();
+        fs::write(&second, message("2", None, "user", "second prompt")).unwrap();
+        db.record_session(chat, Agent::Claude, "first", &first, Some("startup"))
+            .unwrap();
+        let (mut reports, _) = Reports::new();
+        // The CLI reported the switch, and the report is still queued.
+        fs::write(
+            reports.path("cli"),
+            format!(
+                "{}\n",
+                json!({
+                    "session_id": "second", "transcript_path": second, "source": "clear"
+                })
+            ),
+        )
+        .unwrap();
+        let last = |db: &Db| db.sessions(chat).unwrap().pop().unwrap().agent_id;
+        assert_eq!(last(&db), "first");
+
+        let queued = reported_sessions(&mut reports, "cli", Agent::Claude);
+        assert_eq!(
+            queued,
+            vec![(
+                "second".to_string(),
+                second.clone(),
+                Some("clear".to_string())
+            )]
+        );
+        for (agent_id, path, reason) in queued {
+            db.record_session(chat, Agent::Claude, &agent_id, &path, reason.as_deref())
+                .unwrap();
+        }
+        // What opening the chat again resumes.
+        assert_eq!(last(&db), "second");
+        // The reports are taken out, so stopping leaves nothing behind.
+        assert!(reported_sessions(&mut reports, "cli", Agent::Claude).is_empty());
+
+        reports.remove();
         fs::remove_dir_all(dir).unwrap();
     }
 
