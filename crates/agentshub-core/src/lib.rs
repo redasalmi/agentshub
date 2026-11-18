@@ -9,8 +9,6 @@ pub mod format;
 pub mod lifecycle;
 pub mod process;
 pub mod reports;
-#[cfg(target_os = "linux")]
-pub mod scope;
 pub mod sessions;
 pub mod status;
 pub mod store;

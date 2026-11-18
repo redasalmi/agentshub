@@ -9,11 +9,11 @@ mod window;
 mod workspace;
 
 pub use agentshub_app::{bootstrap, settings};
-#[cfg(target_os = "linux")]
-pub use agentshub_core::scope;
 pub use agentshub_core::{
     agent, lifecycle, process, reports, sessions, status, store, transcript, worktree,
 };
+#[cfg(target_os = "linux")]
+pub use agentshub_platform::scope;
 pub use agentshub_platform::{instance, sigterm};
 pub use agentshub_ui::history;
 pub use window::{Contents, open_window};

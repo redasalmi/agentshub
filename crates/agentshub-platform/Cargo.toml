@@ -9,6 +9,7 @@ publish = false
 gpui-kit = "0.8.0"
 libc = "0.2"
 smol = "2"
+uuid = { version = "1", features = ["v4"] }
 zbus = "5"
 
 [lints]
