@@ -20,13 +20,19 @@ use crate::settings::Settings;
 use crate::status::{Need, Status};
 use crate::store::{self, Change, Chat, Project};
 
+mod rail;
 mod status;
 mod text;
+mod widgets;
 
+use rail::{key_number, project_mark};
+pub use rail::{names_width, rail};
 pub use status::{badge, dot, live_dot};
 use status::{name_of, popping_dot};
 use text::summary;
 pub use text::{activity, age, home_relative, marks, path_line, subtitle};
+use widgets::section;
+pub use widgets::{group_heading, heading};
 
 /// How often the ages of the chats are brought up to date.
 const AGE_INTERVAL: Duration = Duration::from_secs(60);
@@ -1588,108 +1594,6 @@ fn drop_line(style: StyleRefinement, after: bool, color: Hsla) -> StyleRefinemen
     }
 }
 
-/// A heading of the running list, in the color of what its chats need.
-pub fn group_heading(label: &'static str, count: usize, tone: Tone, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
-    let color = if tone.needs_you() {
-        Tone::NeedsYou(None).text_color(cx)
-    } else {
-        tone.text_color(cx)
-    };
-    h_flex()
-        .pt_2()
-        .pb_1()
-        .gap_1p5()
-        .text_xs()
-        .font_medium()
-        .text_color(color)
-        .child(label)
-        .child(
-            div()
-                .font_family(theme.mono_font_family.clone())
-                .text_color(theme.muted_foreground)
-                .child(count.to_string()),
-        )
-}
-
-fn section(label: &'static str, cx: &App) -> impl IntoElement {
-    heading(label, cx).px_2().pt_3().pb_1()
-}
-
-/// A label over a group of rows: quieter than the rows, in the text face so
-/// the mono face is left to paths, keys and figures.
-pub fn heading(label: impl Into<SharedString>, cx: &App) -> Div {
-    div()
-        .text_xs()
-        .font_medium()
-        .text_color(cx.theme().muted_foreground)
-        .child(label.into())
-}
-
-/// Whether the rail names the projects in a window `window_width` wide, and
-/// how wide it is there. The settings keep the width the user wants, which a
-/// narrower window only shows narrower.
-pub fn rail(window_width: Pixels, cx: &App) -> (bool, Pixels) {
-    let settings = cx.global::<Settings>();
-    fit_rail(
-        settings.project_names,
-        px(settings.rail_width),
-        crate::workspace::rail_room(window_width),
-    )
-}
-
-/// The rail the user wants, `named` and `wanted` wide, fit in `room`: as
-/// narrow as it must be, and folded to the projects' marks when even its
-/// narrowest with their names doesn't fit.
-fn fit_rail(named: bool, wanted: Pixels, room: Pixels) -> (bool, Pixels) {
-    let room = room.min(MAX_RAIL_WIDTH);
-    if named && room >= MIN_NAMED_RAIL_WIDTH {
-        (true, wanted.clamp(MIN_NAMED_RAIL_WIDTH, room))
-    } else {
-        (false, RAIL_WIDTH)
-    }
-}
-
-/// How much the rail adds to the sidebar's width beyond its marks alone in a
-/// window `window_width` wide, which is all the width the user drags the
-/// sidebar's edge accounts for.
-pub fn names_width(window_width: Pixels, cx: &App) -> Pixels {
-    rail(window_width, cx).1 - RAIL_WIDTH
-}
-
-/// The number that opens the `index`th chat or project with its modifier.
-fn key_number(index: usize, cx: &App) -> Div {
-    let theme = cx.theme();
-    div()
-        .flex_none()
-        .px_1p5()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(appearance::palette(cx).border_strong)
-        .bg(theme.background)
-        .text_xs()
-        .font_family(theme.mono_font_family.clone())
-        .text_color(theme.foreground)
-        .child((index + 1).to_string())
-}
-
-/// A project's mark, drawn in its color.
-fn project_mark(mark: SharedString, tint: Tint, cx: &App) -> Div {
-    div()
-        .size(MARK_SIZE)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.))
-        .bg(tint.soft)
-        .text_color(tint.text)
-        .text_size(px(11.))
-        .font_medium()
-        .font_family(cx.theme().mono_font_family.clone())
-        .child(mark)
-}
-
 /// A chat being dragged, and what follows the pointer meanwhile.
 #[derive(Clone)]
 struct DraggedChat {
@@ -1812,8 +1716,9 @@ impl Sidebar {
 mod tests {
     use gpui_kit::px;
 
+    use super::rail::fit_rail;
     use super::text::{initials, summary};
-    use super::{RAIL_WIDTH, fit_rail, marks};
+    use super::{RAIL_WIDTH, marks};
     use crate::status::Status;
 
     #[test]
