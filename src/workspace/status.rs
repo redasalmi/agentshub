@@ -144,7 +144,11 @@ impl Workspace {
                     body.push('\n');
                     body.push_str(&details);
                 }
-                alerts::alert(id, hold, agent, alert, status, took, body, cx);
+                let mut summary = crate::sidebar::activity(agent, Some(Some(status)));
+                if let Some(took) = took {
+                    summary = format!("{summary} · {}", duration(took));
+                }
+                alerts::alert(id, hold, alert, summary, body, cx);
             })
             .ok();
         })

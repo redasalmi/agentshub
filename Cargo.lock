@@ -138,9 +138,12 @@ name = "agentshub-app"
 version = "0.15.0"
 dependencies = [
  "agentshub-core",
+ "agentshub-platform",
  "anyhow",
  "gpui-kit",
+ "rodio",
  "rusqlite",
+ "serde_json",
  "smol",
 ]
 
