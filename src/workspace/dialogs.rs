@@ -67,8 +67,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self
-            .sidebar
-            .read(cx)
+            .catalog
             .projects()
             .iter()
             .find(|project| project.id == project_id)

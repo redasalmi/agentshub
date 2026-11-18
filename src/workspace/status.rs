@@ -12,23 +12,24 @@ impl Workspace {
     /// The same, reloading the expanded sessions whose transcript read, in
     /// `changed`, found something.
     pub(super) fn refresh_after(&mut self, changed: &[i64], cx: &mut Context<Self>) {
-        if self.unsaved == 0 {
+        if self.catalog.unsaved() == 0 {
             let listed = self.store.projects();
-            self._listing = Some(cx.spawn(async move |this, cx| {
+            let listing = cx.spawn(async move |this, cx| {
                 let listed = listed.await;
                 this.update(cx, |this, cx| {
                     // A change shown since is listed once it's saved.
-                    if this.unsaved > 0 {
+                    if this.catalog.unsaved() > 0 {
                         return;
                     }
                     let shell = this.shell_cwd(cx);
                     match listed {
-                        Ok(projects) => this
-                            .sidebar
-                            .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx)),
+                        Ok(projects) => {
+                            this.catalog.listed(projects);
+                            this.sync_catalog(cx);
+                        }
                         Err(err) => eprintln!("can't list the projects: {err}"),
                     }
-                    if let Some(id) = this.select_listed.take() {
+                    if let Some(id) = this.catalog.take_selected() {
                         this.sidebar
                             .update(cx, |sidebar, cx| sidebar.select(id, cx));
                     }
@@ -41,7 +42,8 @@ impl Workspace {
                     }
                 })
                 .ok();
-            }));
+            });
+            self.catalog.listing(listing);
         }
         for chat in &self.chats {
             let current = chat.current_session();

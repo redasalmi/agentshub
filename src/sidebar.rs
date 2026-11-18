@@ -18,7 +18,7 @@ use crate::agent::Agent;
 use crate::appearance::{self, Tint};
 use crate::settings::Settings;
 use crate::status::{Need, Status};
-use crate::store::{self, Change, Chat, Project};
+use crate::store::{self, Chat, Project};
 
 mod list_view;
 mod rail;
@@ -424,13 +424,6 @@ impl Sidebar {
             }));
         }
         cx.notify();
-    }
-
-    /// Shows `change` made to the projects before it is saved.
-    pub fn change(&mut self, change: &Change, cx: &mut Context<Self>) {
-        let mut projects = self.projects.clone();
-        change.apply(&mut projects);
-        self.set_projects(projects, cx);
     }
 
     /// `chats` of one group of the list, pinned or not, with those leaving

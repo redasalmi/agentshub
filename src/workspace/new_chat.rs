@@ -281,7 +281,7 @@ impl Workspace {
         let id = added.as_ref().ok().copied().flatten();
         // A listing since it was saved shows it, so it may have been opened,
         // archived or deleted from there meanwhile.
-        let projects = self.sidebar.read(cx).projects();
+        let projects = self.catalog.projects();
         let saved = Saved {
             kept,
             closed_all: asked.closed_all,

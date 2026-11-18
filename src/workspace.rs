@@ -49,8 +49,11 @@ use crate::tray;
 use crate::worktree::{self, Worktree};
 
 mod actions;
+mod catalog;
 mod chat_view;
 mod chats;
+
+use catalog::Catalog;
 mod codex;
 mod commands;
 mod dialogs;
@@ -138,15 +141,8 @@ pub fn init(cx: &mut App) {
 pub struct Workspace {
     sidebar: Entity<Sidebar>,
     store: Store,
-    /// How many changes show that aren't saved yet. The projects are listed
-    /// again only once none are, as a listing from before one is saved would
-    /// take it back.
-    unsaved: usize,
-    /// Listing the projects again, which a newer listing replaces.
-    _listing: Option<Task<()>>,
-    /// A project to select once the projects are listed, as one just added
-    /// isn't before.
-    select_listed: Option<i64>,
+    /// The projects and chats, including the changes not saved yet.
+    catalog: Catalog,
     /// Open chats, including exited terminals and history whose CLI couldn't
     /// start. Running processes keep running while another chat is shown,
     /// until the user closes them.

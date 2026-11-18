@@ -309,14 +309,13 @@ impl Workspace {
     /// Shows `change` at once, and saves it. The projects are listed as saved
     /// once every change shown is, which takes back one that couldn't be.
     pub(super) fn change(&mut self, change: Change, cx: &mut Context<Self>) {
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.change(&change, cx));
-        self.unsaved += 1;
+        self.catalog.change(&change);
+        self.sync_catalog(cx);
         let saved = self.store.change(change);
         cx.spawn(async move |this, cx| {
             let saved = saved.await;
             this.update(cx, |this, cx| {
-                this.unsaved -= 1;
+                this.catalog.saved();
                 if let Err(err) = saved {
                     eprintln!("can't save a change: {err:#}");
                     this.say(

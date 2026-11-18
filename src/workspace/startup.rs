@@ -113,9 +113,7 @@ impl Workspace {
         let mut this = Self {
             sidebar,
             store,
-            unsaved: 0,
-            _listing: None,
-            select_listed: None,
+            catalog: Catalog::new(projects.clone()),
             chats: Vec::new(),
             active: None,
             lifecycle: Lifecycle::default(),

@@ -3,11 +3,10 @@
 use super::*;
 
 impl Workspace {
-    /// The shown chat as the sidebar lists it.
-    pub(super) fn active_entry<'a>(&self, cx: &'a App) -> Option<&'a store::Chat> {
+    /// The shown chat as the catalog lists it.
+    pub(super) fn active_entry<'a>(&'a self, _cx: &'a App) -> Option<&'a store::Chat> {
         let id = self.active?;
-        self.sidebar
-            .read(cx)
+        self.catalog
             .projects()
             .iter()
             .flat_map(|project| &project.chats)
@@ -15,8 +14,8 @@ impl Workspace {
     }
 
     /// Whether a chat, or its project, is archived.
-    pub(super) fn is_archived(&self, id: i64, cx: &App) -> bool {
-        self.sidebar.read(cx).projects().iter().any(|project| {
+    pub(super) fn is_archived(&self, id: i64, _cx: &App) -> bool {
+        self.catalog.projects().iter().any(|project| {
             project.chats.iter().any(|chat| {
                 chat.id == id && (chat.archived_at.is_some() || project.archived_at.is_some())
             })
@@ -24,8 +23,8 @@ impl Workspace {
     }
 
     /// Whether chat `id`'s project is being removed.
-    pub(super) fn is_removing(&self, id: i64, cx: &App) -> bool {
-        self.sidebar.read(cx).projects().iter().any(|project| {
+    pub(super) fn is_removing(&self, id: i64, _cx: &App) -> bool {
+        self.catalog.projects().iter().any(|project| {
             self.lifecycle.is_removing_project(project.id)
                 && project.chats.iter().any(|chat| chat.id == id)
         })

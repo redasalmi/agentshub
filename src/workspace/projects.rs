@@ -88,7 +88,7 @@ impl Workspace {
             // Selecting it looks up what can start in it, so it is listed
             // first.
             this.update(cx, |this, cx| {
-                this.select_listed = Some(id);
+                this.catalog.select_when_listed(id);
                 this.refresh(cx);
             })
             .ok();
@@ -315,8 +315,7 @@ impl Workspace {
     /// chats can't be opened, nor a chat added to it start.
     fn remove_project(&mut self, id: i64, cx: &mut Context<Self>) {
         let Some(path) = self
-            .sidebar
-            .read(cx)
+            .catalog
             .projects()
             .iter()
             .find(|project| project.id == id)
