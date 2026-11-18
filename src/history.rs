@@ -26,27 +26,31 @@ const INPUT_CHARS: usize = 200;
 /// button.
 const ITEMS_PAGE: usize = 100;
 
+mod model;
+
+use std::ops::{Deref, DerefMut};
+
+use model::HistoryModel;
+
 pub struct History {
-    store: Store,
-    chat_id: i64,
-    sessions: Vec<Earlier>,
+    model: HistoryModel,
     /// Whether the list shows. The chat's header has the button that opens
     /// it.
     open: bool,
-    /// The items of the sessions that are expanded, once they're loaded.
-    expanded: HashMap<i64, Option<Vec<Item>>>,
-    /// How many items of each expanded session show.
-    limits: HashMap<i64, usize>,
-    /// The sessions that may have more items before the ones loaded.
-    more: HashSet<i64>,
-    /// What failed to load, for the sessions that couldn't be shown.
-    errors: HashMap<i64, SharedString>,
-    /// The reasoning and tool outputs that are expanded, by item.
-    shown: HashSet<i64>,
-    /// The expanded sessions to reload once the sessions are listed, and the
-    /// listing under way, which a newer one replaces.
-    reload: HashSet<i64>,
-    _listing: Option<Task<()>>,
+}
+
+impl Deref for History {
+    type Target = HistoryModel;
+
+    fn deref(&self) -> &Self::Target {
+        &self.model
+    }
+}
+
+impl DerefMut for History {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.model
+    }
 }
 
 struct Earlier {
@@ -59,17 +63,8 @@ struct Earlier {
 impl History {
     pub fn new(store: Store, chat_id: i64, open: bool) -> Self {
         Self {
-            store,
-            chat_id,
-            sessions: Vec::new(),
+            model: HistoryModel::new(store, chat_id),
             open,
-            expanded: HashMap::new(),
-            limits: HashMap::new(),
-            more: HashSet::new(),
-            errors: HashMap::new(),
-            shown: HashSet::new(),
-            reload: HashSet::new(),
-            _listing: None,
         }
     }
 
@@ -79,7 +74,7 @@ impl History {
     pub fn refresh(&mut self, current: Option<i64>, changed: &[i64], cx: &mut Context<Self>) {
         self.reload.extend(changed);
         let sessions = self.store.sessions(self.chat_id);
-        self._listing = Some(cx.spawn(async move |this, cx| {
+        self.listing = Some(cx.spawn(async move |this, cx| {
             let sessions = sessions.await;
             this.update(cx, |this, cx| this.list(sessions, current, cx))
                 .ok();
@@ -109,13 +104,18 @@ impl History {
                 ended: ended(session).into(),
             })
             .collect();
-        self.expanded
-            .retain(|id, _| self.sessions.iter().any(|session| session.id == *id));
-        self.limits.retain(|id, _| self.expanded.contains_key(id));
-        self.more.retain(|id| self.expanded.contains_key(id));
-        self.errors.retain(|id, _| self.expanded.contains_key(id));
-        for id in std::mem::take(&mut self.reload) {
-            if self.expanded.contains_key(&id) {
+        {
+            let sessions = &self.model.sessions;
+            self.model
+                .expanded
+                .retain(|id, _| sessions.iter().any(|session| session.id == *id));
+        }
+        let expanded = &self.model.expanded;
+        self.model.limits.retain(|id, _| expanded.contains_key(id));
+        self.model.more.retain(|id| expanded.contains_key(id));
+        self.model.errors.retain(|id, _| expanded.contains_key(id));
+        for id in std::mem::take(&mut self.model.reload) {
+            if self.model.expanded.contains_key(&id) {
                 self.load(id, cx);
             }
         }
