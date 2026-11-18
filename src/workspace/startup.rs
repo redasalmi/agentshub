@@ -103,8 +103,20 @@ impl Workspace {
         // the shown chat, or the workspace, takes it.
         let focus_lost = cx.on_focus_lost(window, |this, window, cx| this.focus_chat(window, cx));
 
+        let settings_view = {
+            let this = cx.entity().downgrade();
+            cx.new(|_| {
+                SettingsView::new(Rc::new(move |intent, window, cx| {
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| this.settings_intent(intent, window, cx));
+                    }
+                }))
+            })
+        };
+
         let mut this = Self {
             sidebar,
+            settings_view,
             store,
             catalog: Catalog::new(projects.clone()),
             chats: Vec::new(),

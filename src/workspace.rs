@@ -50,6 +50,7 @@ use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::{self, TerminalView};
 use crate::tray;
 use crate::worktree::{self, Worktree};
+use agentshub_ui::settings::{SettingsIntent, SettingsView};
 
 mod actions;
 mod catalog;
@@ -71,7 +72,6 @@ mod projects;
 mod render;
 mod search;
 mod session;
-mod settings_view;
 mod shell;
 mod shutdown;
 mod startup;
@@ -136,6 +136,7 @@ pub fn init(cx: &mut App) {
 
 pub struct Workspace {
     sidebar: Entity<Sidebar>,
+    settings_view: Entity<SettingsView>,
     store: Store,
     /// The projects and chats, including the changes not saved yet.
     catalog: Catalog,
@@ -444,9 +445,6 @@ impl Chat {
         self.session.filter(|_| self.running())
     }
 }
-
-const SHORTCUTS_WORK_ANYWHERE: &str = "They work while an agent has the keyboard, so they use \
-                                        keys terminal programs leave alone.";
 
 #[cfg(test)]
 mod tests;

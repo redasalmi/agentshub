@@ -1,5 +1,7 @@
 //! The chat sheet: its header, history, terminal, shell and empty state.
 
+use agentshub_ui::settings::SHORTCUTS_WORK_ANYWHERE;
+
 use super::render::{focus_bar, key_hint, render_shortcuts, status_pill, stay_put};
 use super::*;
 

@@ -6,6 +6,7 @@ use crate::settings::ThemeFamily;
 use crate::sidebar::NUMBERED;
 
 pub use crate::sidebar::NewChat;
+pub use agentshub_ui::settings::{ShowShortcuts, ToggleSettings};
 
 actions!(
     workspace,
@@ -13,7 +14,6 @@ actions!(
         ToggleShell,
         OpenSearch,
         AddProject,
-        ToggleSettings,
         ToggleHistory,
         RenameChat,
         TogglePin,
@@ -29,7 +29,6 @@ actions!(
         ToggleProjectNames,
         ShowRunning,
         NextNeedingYou,
-        ShowShortcuts,
     ]
 );
 

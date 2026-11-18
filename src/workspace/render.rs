@@ -1,6 +1,5 @@
 //! The workspace's root view.
 
-use super::settings_view::render_settings;
 use super::*;
 
 impl Render for Workspace {
@@ -9,9 +8,12 @@ impl Render for Workspace {
         let names = sidebar::names_width(window_width, cx);
         let room =
             window_width - clamp_sidebar_width(self.sidebar_width, window_width, names) - names;
-        let settings = self
-            .settings_shown
-            .then(|| render_settings(room, window, cx).into_any_element());
+        let settings_view = self.settings_view.clone();
+        let settings = self.settings_shown.then(|| {
+            settings_view
+                .update(cx, |view, cx| view.render(room, window, cx))
+                .into_any_element()
+        });
         let theme = cx.theme();
         if let Some(reason) = self.broken.clone() {
             return render_broken(reason, cx);

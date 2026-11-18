@@ -113,4 +113,43 @@ impl Workspace {
         appearance::apply(window, cx);
         cx.notify();
     }
+
+    /// Applies what the settings view asked for.
+    pub(super) fn settings_intent(
+        &mut self,
+        intent: SettingsIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match intent {
+            SettingsIntent::Close => self.show_settings(false, window, cx),
+            SettingsIntent::SetTheme(theme) => self.set_theme(theme, window, cx),
+            SettingsIntent::SetAppearance(value) => self.set_appearance(value, window, cx),
+            SettingsIntent::SetMotion(value) => self.set_motion(value, window, cx),
+            SettingsIntent::Zoom(by) => self.zoom_terminals(by, window, cx),
+            SettingsIntent::SetCloseToTray(value) => {
+                let saved = Settings::set_close_to_tray(&self.store, value, cx);
+                self.save_setting(saved, cx);
+            }
+            SettingsIntent::SetWorktreeByDefault(value) => {
+                let saved = Settings::set_worktree_by_default(&self.store, value, cx);
+                self.save_setting(saved, cx);
+            }
+            SettingsIntent::SetNotificationPopups(value) => {
+                let saved = Settings::set_notification_popups(&self.store, value, cx);
+                self.save_setting(saved, cx);
+            }
+            SettingsIntent::SetNotificationSound(value) => {
+                let saved = Settings::set_notification_sound(&self.store, value, cx);
+                self.save_setting(saved, cx);
+            }
+            SettingsIntent::TestNotifications => alerts::test(cx),
+            SettingsIntent::ShowShortcuts => {
+                self.show_shortcuts(&ShowShortcuts, window, cx);
+            }
+            SettingsIntent::Export => self.export_database(window, cx),
+            SettingsIntent::Import => self.import_database(window, cx),
+        }
+        cx.notify();
+    }
 }

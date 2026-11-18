@@ -12,15 +12,65 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::alerts;
-use crate::appearance;
-use crate::palette;
-use crate::settings::{
+use agentshub_app::settings::{
     Appearance, DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE, Motion,
     Settings, ThemeFamily,
 };
 
-use super::{SHORTCUTS_WORK_ANYWHERE, ShowShortcuts, ToggleSettings, Workspace};
+use crate::palette;
+use crate::theme as appearance;
+
+actions!(settings, [ToggleSettings, ShowShortcuts]);
+
+/// They work while an agent has the keyboard, so they use the workspace's
+/// focus, which TerminalView leaves alone.
+pub const SHORTCUTS_WORK_ANYWHERE: &str = "They work while an agent has the keyboard, so they use \
+     the workspace's focus, which the terminal leaves alone.";
+
+/// What the settings ask the workspace to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SettingsIntent {
+    Close,
+    SetTheme(ThemeFamily),
+    SetAppearance(Appearance),
+    SetMotion(Motion),
+    Zoom(f32),
+    SetCloseToTray(bool),
+    SetWorktreeByDefault(bool),
+    SetNotificationPopups(bool),
+    SetNotificationSound(bool),
+    TestNotifications,
+    ShowShortcuts,
+    Export,
+    Import,
+}
+
+type On = Rc<dyn Fn(SettingsIntent, &mut Window, &mut App)>;
+
+/// The settings view; the workspace owns what its intents change.
+pub struct SettingsView {
+    on: On,
+}
+
+impl SettingsView {
+    pub fn new(on: On) -> Self {
+        Self { on }
+    }
+
+    pub fn render(
+        &mut self,
+        width: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        render_settings(width, window, cx)
+    }
+
+    fn send(&mut self, intent: SettingsIntent, window: &mut Window, cx: &mut Context<Self>) {
+        (self.on)(intent, window, cx);
+        cx.notify();
+    }
+}
 
 /// How wide the settings' groups grow.
 const SETTINGS_WIDTH: Pixels = px(640.);
@@ -33,11 +83,11 @@ const MIN_SETTING_TEXT_WIDTH: Pixels = px(200.);
 const SEGMENT_SLIDE: SpringConfig = SpringConfig::new(420., 32., 1.);
 
 /// The settings, on a sheet `width` wide.
-pub(super) fn render_settings(
+fn render_settings(
     width: Pixels,
     window: &mut Window,
-    cx: &mut Context<Workspace>,
-) -> impl IntoElement {
+    cx: &mut Context<SettingsView>,
+) -> AnyElement {
     let theme_focus = choice_focus("theme", ThemeFamily::ALL.len(), window, cx);
     let mode_focus = choice_focus("appearance", Appearance::ALL.len(), window, cx);
     let motion_focus = choice_focus("motion", Motion::ALL.len(), window, cx);
@@ -88,7 +138,7 @@ pub(super) fn render_settings(
                         .tooltip_with_action("Close the settings", &ToggleSettings, None)
                         .on_click(
                             cx.listener(|this, _, window, cx| {
-                                this.show_settings(false, window, cx)
+                                this.send(SettingsIntent::Close, window, cx)
                             }),
                         ),
                 ),
@@ -159,7 +209,7 @@ pub(super) fn render_settings(
                                         .child(each.label()),
                                 )
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.set_theme(each, window, cx)
+                                    this.send(SettingsIntent::SetTheme(each), window, cx)
                                 }))
                         },
                         ))
@@ -174,7 +224,7 @@ pub(super) fn render_settings(
                         Appearance::ALL.map(|each| (each, each.label())).to_vec(),
                         current,
                         mode_focus,
-                        |this, value, window, cx| this.set_appearance(value, window, cx),
+                        SettingsIntent::SetAppearance,
                         window,
                         cx,
                     ),
@@ -191,7 +241,7 @@ pub(super) fn render_settings(
                         Motion::ALL.map(|each| (each, each.label())).to_vec(),
                         motion,
                         motion_focus,
-                        |this, value, window, cx| this.set_motion(value, window, cx),
+                        SettingsIntent::SetMotion,
                         window,
                         cx,
                     ),
@@ -210,7 +260,7 @@ pub(super) fn render_settings(
                                 .tooltip("Smaller")
                                 .disabled(terminal_font_size <= MIN_TERMINAL_FONT_SIZE)
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.zoom_terminals(-1., window, cx)
+                                    this.send(SettingsIntent::Zoom(-1.), window, cx)
                                 })),
                         )
                         .child(
@@ -229,7 +279,7 @@ pub(super) fn render_settings(
                                     if event.click_count() == 2 {
                                         let reset = DEFAULT_TERMINAL_FONT_SIZE
                                             - cx.global::<Settings>().terminal_font_size;
-                                        this.zoom_terminals(reset, window, cx)
+                                        this.send(SettingsIntent::Zoom(reset), window, cx)
                                     }
                                 })),
                         )
@@ -241,7 +291,7 @@ pub(super) fn render_settings(
                                 .tooltip("Bigger")
                                 .disabled(terminal_font_size >= MAX_TERMINAL_FONT_SIZE)
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.zoom_terminals(1., window, cx)
+                                    this.send(SettingsIntent::Zoom(1.), window, cx)
                                 })),
                         )
                         .into_any_element(),
@@ -261,10 +311,8 @@ pub(super) fn render_settings(
                     ),
                     Switch::new("close-to-tray")
                         .checked(close_to_tray)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            let saved = Settings::set_close_to_tray(&this.store, *checked, cx);
-                            this.save_setting(saved, cx);
-                            cx.notify();
+                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                            this.send(SettingsIntent::SetCloseToTray(*checked), window, cx)
                         }))
                         .into_any_element(),
                     cx,
@@ -279,10 +327,8 @@ pub(super) fn render_settings(
                     ),
                     Switch::new("worktree-by-default")
                         .checked(worktree_by_default)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            let saved = Settings::set_worktree_by_default(&this.store, *checked, cx);
-                            this.save_setting(saved, cx);
-                            cx.notify();
+                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                            this.send(SettingsIntent::SetWorktreeByDefault(*checked), window, cx)
                         }))
                         .into_any_element(),
                     cx,
@@ -301,10 +347,8 @@ pub(super) fn render_settings(
                     ),
                     Switch::new("notification-popups")
                         .checked(notification_popups)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            let saved = Settings::set_notification_popups(&this.store, *checked, cx);
-                            this.save_setting(saved, cx);
-                            cx.notify();
+                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                            this.send(SettingsIntent::SetNotificationPopups(*checked), window, cx)
                         }))
                         .into_any_element(),
                     cx,
@@ -314,10 +358,8 @@ pub(super) fn render_settings(
                     None,
                     Switch::new("notification-sound")
                         .checked(notification_sound)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            let saved = Settings::set_notification_sound(&this.store, *checked, cx);
-                            this.save_setting(saved, cx);
-                            cx.notify();
+                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                            this.send(SettingsIntent::SetNotificationSound(*checked), window, cx)
                         }))
                         .into_any_element(),
                     cx,
@@ -329,7 +371,9 @@ pub(super) fn render_settings(
                         .small()
                         .label("Send a test")
                         .disabled(!notification_popups && !notification_sound)
-                        .on_click(|_, _, cx| alerts::test(cx))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.send(SettingsIntent::TestNotifications, window, cx)
+                        }))
                         .into_any_element(),
                     cx,
                 ),
@@ -348,7 +392,7 @@ pub(super) fn render_settings(
                         None => "Show".into(),
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.show_shortcuts(&ShowShortcuts, window, cx)
+                        this.send(SettingsIntent::ShowShortcuts, window, cx)
                     }))
                     .into_any_element(),
                 cx,
@@ -366,7 +410,7 @@ pub(super) fn render_settings(
                         .icon(IconName::HardDrive)
                         .label("Export a copy")
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.export_database(window, cx)
+                            this.send(SettingsIntent::Export, window, cx)
                         }))
                         .into_any_element(),
                     cx,
@@ -378,7 +422,7 @@ pub(super) fn render_settings(
                         .small()
                         .label("Import…")
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.import_database(window, cx)
+                            this.send(SettingsIntent::Import, window, cx)
                         }))
                         .into_any_element(),
                     cx,
@@ -394,6 +438,7 @@ pub(super) fn render_settings(
                 .text_color(theme.muted_foreground)
                 .child(concat!("Agents Hub ", env!("CARGO_PKG_VERSION"))),
         )
+        .into_any_element()
 }
 
 /// A titled group of settings, one row each, in a card.
@@ -460,13 +505,12 @@ fn segmented<T: Copy + PartialEq + 'static>(
     options: Vec<(T, &'static str)>,
     current: T,
     focus: Vec<FocusHandle>,
-    pick: impl Fn(&mut Workspace, T, &mut Window, &mut Context<Workspace>) + 'static,
+    pick: fn(T) -> SettingsIntent,
     window: &Window,
-    cx: &Context<Workspace>,
+    cx: &Context<SettingsView>,
 ) -> AnyElement {
     let theme = cx.theme();
     let palette = appearance::palette(cx);
-    let pick = Rc::new(pick);
     let count = options.len() as f32;
     let at = options
         .iter()
@@ -497,7 +541,6 @@ fn segmented<T: Copy + PartialEq + 'static>(
                 .children(options.into_iter().zip(focus).enumerate().map(
                     |(index, ((value, label), focus))| {
                         let picked = value == current;
-                        let pick = pick.clone();
                         choice(div().id((id, index as u64 + 1)), &focus, picked, window, cx)
                             .relative()
                             .min_w(px(76.))
@@ -517,11 +560,9 @@ fn segmented<T: Copy + PartialEq + 'static>(
                                 }
                             })
                             .child(label)
-                            .on_click(
-                                cx.listener(move |this, _, window, cx| {
-                                    pick(this, value, window, cx)
-                                }),
-                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.send(pick(value), window, cx)
+                            }))
                     },
                 )),
         )
