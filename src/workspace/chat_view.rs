@@ -3,7 +3,7 @@
 use agentshub_ui::chat::{ChatIntent, ChatSheet};
 use agentshub_ui::settings::SHORTCUTS_WORK_ANYWHERE;
 
-use super::render::{key_hint, render_shortcuts, stay_put};
+use super::render::{render_shortcuts, stay_put};
 use super::*;
 
 impl Workspace {
@@ -277,38 +277,16 @@ impl Workspace {
         width: Pixels,
         window: &Window,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
+    ) -> AnyElement {
         let sidebar = self.sidebar.read(cx);
         let summary = sidebar.summary();
         let needing = sidebar.next_needing_you(None).is_some();
-        let bound = |action: &dyn Action, label: &'static str| {
-            palette::shortcut(action, window).map(|keys| key_hint(keys, label, cx))
-        };
-
-        h_flex()
-            .flex_none()
-            .h_8()
-            .px_4()
-            .gap_4()
-            .overflow_hidden()
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(theme.muted)
-            .rounded_b(theme.radius_lg - px(1.))
-            .text_xs()
-            .font_family(theme.mono_font_family.clone())
-            .text_color(theme.muted_foreground)
-            // What the agents do comes first and is cut last; the hints
-            // drop out whole rather than being cut mid-word.
-            .child(div().flex_1().min_w_0().truncate().child(summary))
-            .when(needing, |this| {
-                this.children(bound(&NextNeedingYou, "next that needs you"))
-            })
-            .when(width >= MIN_FOOTER_SEARCH_WIDTH, |this| {
-                this.children(bound(&OpenSearch, "search"))
-            })
-            .children(bound(&ShowShortcuts, "shortcuts"))
+        agentshub_ui::chat::Footer {
+            summary: &summary,
+            needing,
+            width,
+        }
+        .render(window, cx)
     }
 
     pub(super) fn show_shortcuts(

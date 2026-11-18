@@ -20,6 +20,7 @@ use agentshub_core::agent::Agent;
 use agentshub_core::format::{Turn, capitalized, duration};
 
 use crate::history::History;
+use crate::settings::ShowShortcuts;
 use crate::sidebar::{self, Tone};
 use crate::terminal_view::TerminalView;
 use crate::theme as appearance;
@@ -27,6 +28,8 @@ use crate::theme as appearance;
 actions!(
     chat,
     [
+        OpenSearch,
+        NextNeedingYou,
         ToggleHistory,
         ToggleShell,
         RenameChat,
@@ -566,3 +569,67 @@ impl Render for ResizeShell {
 }
 
 const MIN_TITLE_WIDTH: Pixels = px(200.);
+
+/// The least room beside the sidebar in which the footer hints at the search.
+const MIN_FOOTER_SEARCH_WIDTH: Pixels = px(560.);
+
+/// The footer: what the agents do, and the shortcuts that help now.
+pub struct Footer<'a> {
+    pub summary: &'a str,
+    pub needing: bool,
+    pub width: Pixels,
+}
+
+impl Footer<'_> {
+    pub fn render(&self, window: &Window, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let bound = |action: &dyn Action, label: &'static str| {
+            crate::palette::shortcut(action, window).map(|keys| key_hint(keys, label, cx))
+        };
+        h_flex()
+            .flex_none()
+            .h_8()
+            .px_4()
+            .gap_4()
+            .overflow_hidden()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.muted)
+            .rounded_b(theme.radius_lg - px(1.))
+            .text_xs()
+            .font_family(theme.mono_font_family.clone())
+            .text_color(theme.muted_foreground)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(self.summary.to_string()),
+            )
+            .when(self.needing, |this| {
+                this.children(bound(&NextNeedingYou, "next that needs you"))
+            })
+            .when(self.width >= MIN_FOOTER_SEARCH_WIDTH, |this| {
+                this.children(bound(&OpenSearch, "search"))
+            })
+            .children(bound(&ShowShortcuts, "shortcuts"))
+            .into_any_element()
+    }
+}
+
+/// A shortcut's keys, and what they do.
+fn key_hint(keys: SharedString, label: &'static str, cx: &App) -> impl IntoElement {
+    let palette = appearance::palette(cx);
+    h_flex()
+        .flex_none()
+        .gap_1p5()
+        .child(
+            div()
+                .px_1p5()
+                .rounded(px(4.))
+                .bg(palette.strong)
+                .text_color(palette.secondary_foreground)
+                .child(keys),
+        )
+        .child(label)
+}

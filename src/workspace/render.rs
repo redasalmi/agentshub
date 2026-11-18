@@ -244,23 +244,6 @@ pub(super) fn stay_put(element: Div) -> Div {
         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
 }
 
-/// A shortcut's keys, and what they do.
-pub(super) fn key_hint(keys: SharedString, label: &'static str, cx: &App) -> impl IntoElement {
-    let palette = appearance::palette(cx);
-    h_flex()
-        .flex_none()
-        .gap_1p5()
-        .child(
-            div()
-                .px_1p5()
-                .rounded(px(4.))
-                .bg(palette.strong)
-                .text_color(palette.secondary_foreground)
-                .child(keys),
-        )
-        .child(label)
-}
-
 pub(super) fn render_broken(reason: SharedString, cx: &Context<Workspace>) -> AnyElement {
     let theme = cx.theme();
     h_flex()

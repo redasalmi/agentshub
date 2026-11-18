@@ -7,13 +7,14 @@ use crate::sidebar::NUMBERED;
 
 pub use crate::sidebar::NewChat;
 pub use agentshub_ui::chat::ToggleShell;
-pub use agentshub_ui::chat::{ArchiveChat, DeleteChat, RenameChat, ToggleHistory, TogglePin};
+pub use agentshub_ui::chat::{
+    ArchiveChat, DeleteChat, NextNeedingYou, OpenSearch, RenameChat, ToggleHistory, TogglePin,
+};
 pub use agentshub_ui::settings::{ShowShortcuts, ToggleSettings};
 
 actions!(
     workspace,
     [
-        OpenSearch,
         AddProject,
         ArchiveProject,
         ShowArchived,
@@ -24,7 +25,6 @@ actions!(
         ImportDatabase,
         ToggleProjectNames,
         ShowRunning,
-        NextNeedingYou,
     ]
 );
 

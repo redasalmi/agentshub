@@ -89,9 +89,6 @@ use crate::lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
 /// The least room beside the sidebar in which the search shows its shortcut
 /// as well as what it searches.
 const MIN_SEARCH_KEYS_WIDTH: Pixels = px(600.);
-/// The least room beside the sidebar in which the footer hints at the search
-/// as well as the shortcuts.
-const MIN_FOOTER_SEARCH_WIDTH: Pixels = px(560.);
 /// How many of the chats last worked in show while no chat is open.
 const RECENT_CHATS: usize = 5;
 /// The window's own title bar, which holds the search and the running chats.
