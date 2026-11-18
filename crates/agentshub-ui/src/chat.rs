@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::base::{InteractiveElementExt as _, ResizeHandleRenderer, ResizeHandleState};
+use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::DropdownMenu as _;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::resizable::{HandleEdge, resize_handle, resize_handle_appearance};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
@@ -30,6 +32,7 @@ actions!(
     [
         OpenSearch,
         NextNeedingYou,
+        ShowRunning,
         ToggleHistory,
         ToggleShell,
         RenameChat,
@@ -633,3 +636,363 @@ fn key_hint(keys: SharedString, label: &'static str, cx: &App) -> impl IntoEleme
         )
         .child(label)
 }
+
+/// What the empty state asks the workspace to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EmptyIntent {
+    StartAgent(i64, Agent),
+    NewChat,
+    AddProject,
+    OpenChat(i64),
+}
+
+type EmptyOn = Rc<dyn Fn(EmptyIntent, &mut Window, &mut App)>;
+
+/// A chat last worked in, as the empty state lists it.
+pub struct Recent {
+    pub id: i64,
+    pub title: String,
+    pub about: String,
+    pub tone: Tone,
+}
+
+/// What shows while no chat is open.
+pub struct EmptyState {
+    pub selected: Option<SharedString>,
+    pub agents: Option<(i64, Vec<Agent>)>,
+    pub recent: Vec<Recent>,
+    pub on: EmptyOn,
+}
+
+impl EmptyState {
+    pub fn render(&self, window: &Window, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let palette = appearance::palette(cx);
+        let on = self.on.clone();
+        div()
+            .id("empty")
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                h_flex()
+                    .min_h_full()
+                    .items_center()
+                    .justify_center()
+                    .p_8()
+                    .child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(520.))
+                        .gap_6()
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .child(div().font_family(appearance::DISPLAY).text_3xl().child(
+                                    match &self.selected {
+                                        Some(_) => "Start an agent",
+                                        None => "Add a project to begin",
+                                    },
+                                ))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .line_height(rems(1.45))
+                                        .text_color(theme.muted_foreground)
+                                        .child(match &self.selected {
+                                            Some(name) => format!(
+                                                "In {name}. Agents keep running while you look at \
+                                                     another chat."
+                                            ),
+                                            None => "A project is a folder you work in. Add one, \
+                                                     then start Claude Code, Codex or Pi there."
+                                                .to_string(),
+                                        }),
+                                ),
+                        )
+                        .child(match (&self.selected, &self.agents) {
+                            (Some(_), Some((project, agents))) if !agents.is_empty() => {
+                                let start = on.clone();
+                                h_flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .children(agents.iter().copied().enumerate().map(
+                                        |(index, agent)| {
+                                            let start = start.clone();
+                                            let project = *project;
+                                            Button::new(("empty-agent", index as u64))
+                                                .map(|button| {
+                                                    if index == 0 {
+                                                        button.primary()
+                                                    } else {
+                                                        button.outline()
+                                                    }
+                                                })
+                                                .icon(IconName::Plus)
+                                                .label(agent.display_name())
+                                                .child(
+                                                    div()
+                                                        .px_1p5()
+                                                        .rounded(px(4.))
+                                                        .bg(palette.strong)
+                                                        .text_xs()
+                                                        .font_family(theme.mono_font_family.clone())
+                                                        .text_color(palette.secondary_foreground)
+                                                        .child((index + 1).to_string()),
+                                                )
+                                                .tooltip(format!(
+                                                    "Start {} here, or press {}",
+                                                    agent.display_name(),
+                                                    index + 1
+                                                ))
+                                                .on_click(move |_, window, cx| {
+                                                    (start)(
+                                                        EmptyIntent::StartAgent(project, agent),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })
+                                        },
+                                    ))
+                                    .child({
+                                        let start = on.clone();
+                                        Button::new("empty-new-chat")
+                                            .ghost()
+                                            .label("More options…")
+                                            .on_click(move |_, window, cx| {
+                                                (start)(EmptyIntent::NewChat, window, cx);
+                                            })
+                                    })
+                                    .into_any_element()
+                            }
+                            (Some(_), _) => {
+                                let start = on.clone();
+                                h_flex()
+                                    .child(
+                                        Button::new("empty-new-chat")
+                                            .primary()
+                                            .icon(IconName::Plus)
+                                            .label("New chat")
+                                            .on_click(move |_, window, cx| {
+                                                (start)(EmptyIntent::NewChat, window, cx);
+                                            }),
+                                    )
+                                    .into_any_element()
+                            }
+                            (None, _) => {
+                                let start = on.clone();
+                                h_flex()
+                                    .child(
+                                        Button::new("empty-add-project")
+                                            .primary()
+                                            .icon(IconName::FolderOpen)
+                                            .label("Add project")
+                                            .on_click(move |_, window, cx| {
+                                                (start)(EmptyIntent::AddProject, window, cx);
+                                            }),
+                                    )
+                                    .into_any_element()
+                            }
+                        })
+                        .when(!self.recent.is_empty(), |this| {
+                            this.child(
+                                v_flex()
+                                    .gap_1()
+                                    .pt_5()
+                                    .border_t_1()
+                                    .border_color(theme.border)
+                                    .child(
+                                        h_flex()
+                                            .justify_between()
+                                            .pb_1()
+                                            .child(sidebar::heading("Recent", cx))
+                                            .children(
+                                                crate::palette::shortcut(&OpenSearch, window).map(
+                                                    |keys| {
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(format!(
+                                                                "{keys} to search them all"
+                                                            ))
+                                                    },
+                                                ),
+                                            ),
+                                    )
+                                    .children(self.recent.iter().map(|recent| {
+                                        let on = on.clone();
+                                        let id = recent.id;
+                                        h_flex()
+                                            .id(("recent", id as u64))
+                                            .px_2()
+                                            .py(px(7.))
+                                            .mx(px(-8.))
+                                            .gap(px(10.))
+                                            .rounded(theme.radius)
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(theme.accent))
+                                            .child(sidebar::dot(recent.tone, cx))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_sm()
+                                                    .truncate()
+                                                    .child(recent.title.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .max_w(px(240.))
+                                                    .truncate()
+                                                    .text_xs()
+                                                    .font_family(theme.mono_font_family.clone())
+                                                    .text_color(recent.tone.text_color(cx))
+                                                    .child(recent.about.clone()),
+                                            )
+                                            .on_click(move |_, window, cx| {
+                                                (on)(EmptyIntent::OpenChat(id), window, cx);
+                                            })
+                                    })),
+                            )
+                        }),
+                ),
+            )
+            .into_any_element()
+    }
+}
+
+/// What the toolbar asks the workspace to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ToolbarIntent {
+    OpenPalette,
+    RunningMenu(bool),
+    CloseWindow,
+}
+
+type ToolbarOn = Rc<dyn Fn(ToolbarIntent, &mut Window, &mut App)>;
+
+/// The search, the running chats and the window's controls.
+pub struct Toolbar {
+    pub width: Pixels,
+    pub running: Vec<Tone>,
+    pub menu: Option<Entity<PopupMenu>>,
+    pub on: ToolbarOn,
+}
+
+impl Toolbar {
+    pub fn render(&self, window: &Window, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let palette = appearance::palette(cx);
+        let needing = self.running.iter().filter(|tone| tone.needs_you()).count();
+        let working = self.running.contains(&Tone::Working);
+        let count = match (needing, self.running.len()) {
+            (0, 0) => None,
+            (0, open) => Some(sidebar::badge(open, false, working, cx)),
+            (needing, _) => Some(sidebar::badge(needing, true, false, cx)),
+        };
+        let menu = self.menu.clone();
+        let on = self.on.clone();
+        let search_on = on.clone();
+
+        let search = Button::new("search")
+            .outline()
+            .flex_1()
+            .min_w_0()
+            .h_8()
+            .bg(theme.background)
+            .icon(IconName::Search)
+            .accessibility_label("Search chats, messages, projects and commands")
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child("Search chats, messages, projects and commands"),
+                    )
+                    .children(
+                        crate::palette::shortcut(&OpenSearch, window)
+                            .filter(|_| self.width >= MIN_SEARCH_KEYS_WIDTH)
+                            .map(|keys| {
+                                div()
+                                    .flex_none()
+                                    .px_1p5()
+                                    .rounded(px(4.))
+                                    .bg(palette.strong)
+                                    .text_xs()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_color(palette.secondary_foreground)
+                                    .child(keys)
+                            }),
+                    ),
+            )
+            .on_click(move |_, window, cx| {
+                (search_on)(ToolbarIntent::OpenPalette, window, cx);
+            });
+
+        let running = Button::new("running")
+            .ghost()
+            .h_8()
+            .icon(ExtraIcon::Activity)
+            .label("Running")
+            .children(count)
+            .dropdown_caret(true)
+            .tooltip_with_action("The running chats of every project", &ShowRunning, None);
+
+        let close_on = on.clone();
+        let menu_on = on;
+        TitleBar::new()
+            .h(TITLE_BAR_HEIGHT)
+            .pl_2()
+            .bg(transparent_black())
+            .border_b_0()
+            .on_close_window(move |_, window, cx| {
+                (close_on)(ToolbarIntent::CloseWindow, window, cx);
+            })
+            .child(
+                h_flex()
+                    .absolute()
+                    .inset_0()
+                    .gap_4()
+                    .pr_2()
+                    .justify_between()
+                    .child(stay_put(h_flex().flex_1().min_w_0().max_w(px(480.))).child(search))
+                    .child(
+                        stay_put(div()).child(
+                            Popover::new("running-menu")
+                                .anchor(Anchor::TopRight)
+                                .appearance(false)
+                                .overlay_closable(false)
+                                .open(menu.is_some())
+                                .when_some(menu.as_ref(), |this, menu| {
+                                    this.track_focus(&menu.focus_handle(cx))
+                                })
+                                .on_open_change(move |open, window, cx| {
+                                    (menu_on)(ToolbarIntent::RunningMenu(*open), window, cx);
+                                })
+                                .trigger(running)
+                                .content(move |_, _, _| match &menu {
+                                    Some(menu) => menu.clone().into_any_element(),
+                                    None => div().into_any_element(),
+                                }),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+/// Keeps a press on the title bar's controls from moving the window.
+fn stay_put(element: Div) -> Div {
+    element
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+}
+
+const MIN_SEARCH_KEYS_WIDTH: Pixels = px(600.);
+const TITLE_BAR_HEIGHT: Pixels = px(48.);

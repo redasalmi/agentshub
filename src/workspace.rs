@@ -6,16 +6,13 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::base::InteractiveElementExt as _;
-use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::popover::Popover;
 use gpui_kit::component::resizable::{HandleEdge, resize_handle};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, StyledExt as _, Theme, ThemeStyled as _, WindowExt as _, h_flex,
@@ -47,7 +44,6 @@ use crate::status::Status;
 use crate::store::{self, Change, Store};
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::{self, TerminalView};
-use crate::tray;
 use crate::worktree::{self, Worktree};
 use agentshub_ui::settings::{SettingsIntent, SettingsView};
 
@@ -86,13 +82,8 @@ pub(crate) use session::reported_sessions;
 
 use crate::lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
 
-/// The least room beside the sidebar in which the search shows its shortcut
-/// as well as what it searches.
-const MIN_SEARCH_KEYS_WIDTH: Pixels = px(600.);
 /// How many of the chats last worked in show while no chat is open.
 const RECENT_CHATS: usize = 5;
-/// The window's own title bar, which holds the search and the running chats.
-const TITLE_BAR_HEIGHT: Pixels = px(48.);
 
 /// How often the time the shown chat's prompt has taken so far is brought up
 /// to date.

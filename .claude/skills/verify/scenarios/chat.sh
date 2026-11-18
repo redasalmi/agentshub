@@ -19,3 +19,11 @@ shot shell-hidden
 click 1240 84
 shot menu
 key Escape
+
+click 1030 25
+shot running-menu
+key Escape
+
+key ctrl+shift+k
+shot search
+key Escape

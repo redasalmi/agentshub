@@ -3,7 +3,7 @@
 use agentshub_ui::chat::{ChatIntent, ChatSheet};
 use agentshub_ui::settings::SHORTCUTS_WORK_ANYWHERE;
 
-use super::render::{render_shortcuts, stay_put};
+use super::render::render_shortcuts;
 use super::*;
 
 impl Workspace {
@@ -144,134 +144,61 @@ impl Workspace {
         width: Pixels,
         window: &Window,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let palette = appearance::palette(cx);
-        let sidebar = self.sidebar.read(cx);
-        let running: Vec<_> = sidebar
+    ) -> AnyElement {
+        let running = self
+            .sidebar
+            .read(cx)
             .running_chats()
             .into_iter()
             .map(|(_, _, tone)| tone)
             .collect();
-        let needing = running.iter().filter(|tone| tone.needs_you()).count();
-        let working = running.contains(&Tone::Working);
-        let count = match (needing, running.len()) {
-            (0, 0) => None,
-            (0, open) => Some(sidebar::badge(open, false, working, cx)),
-            (needing, _) => Some(sidebar::badge(needing, true, false, cx)),
+        let on = {
+            let this = cx.weak_entity();
+            Rc::new(
+                move |intent: agentshub_ui::chat::ToolbarIntent,
+                      window: &mut Window,
+                      cx: &mut App| {
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| this.toolbar_intent(intent, window, cx));
+                    }
+                },
+            )
         };
-        let menu = self.running_menu.clone();
-        let workspace = cx.weak_entity();
-
-        let search = Button::new("search")
-            .outline()
-            .flex_1()
-            .min_w_0()
-            .h_8()
-            .bg(theme.background)
-            .icon(IconName::Search)
-            .accessibility_label("Search chats, messages, projects and commands")
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .text_color(theme.muted_foreground)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child("Search chats, messages, projects and commands"),
-                    )
-                    // Too narrow for both, the search keeps its name.
-                    .children(
-                        palette::shortcut(&OpenSearch, window)
-                            .filter(|_| width >= MIN_SEARCH_KEYS_WIDTH)
-                            .map(|keys| {
-                                div()
-                                    .flex_none()
-                                    .px_1p5()
-                                    .rounded(px(4.))
-                                    .bg(palette.strong)
-                                    .text_xs()
-                                    .font_family(theme.mono_font_family.clone())
-                                    .text_color(palette.secondary_foreground)
-                                    .child(keys)
-                            }),
-                    ),
-            )
-            .on_click(cx.listener(|this, _, window, cx| this.open_palette(false, window, cx)));
-
-        let running = Button::new("running")
-            .ghost()
-            .h_8()
-            .icon(ExtraIcon::Activity)
-            .label("Running")
-            .children(count)
-            .dropdown_caret(true)
-            .tooltip_with_action("The running chats of every project", &ShowRunning, None);
-
-        TitleBar::new()
-            .h(TITLE_BAR_HEIGHT)
-            .pl_2()
-            .bg(transparent_black())
-            .border_b_0()
-            .on_close_window(|_, window, cx| {
-                tray::remember_bounds(window.window_bounds(), cx);
-                window.remove_window();
-            })
-            // Over the title bar's row rather than in it: the row never gets
-            // narrower than what's in it, which would push the window's
-            // controls out of a narrow window.
-            .child(
-                h_flex()
-                    .absolute()
-                    .inset_0()
-                    .gap_4()
-                    .pr_2()
-                    .justify_between()
-                    .child(stay_put(h_flex().flex_1().min_w_0().max_w(px(480.))).child(search))
-                    .child(
-                        stay_put(div()).child(
-                            Popover::new("running-menu")
-                                .anchor(Anchor::TopRight)
-                                .appearance(false)
-                                // The menu closes itself on a click outside it.
-                                .overlay_closable(false)
-                                .open(menu.is_some())
-                                .when_some(menu.as_ref(), |this, menu| {
-                                    this.track_focus(&menu.focus_handle(cx))
-                                })
-                                .on_open_change(move |open, window, cx| {
-                                    workspace
-                                        .update(cx, |this, cx| {
-                                            if *open {
-                                                // Opened from the button, the popover
-                                                // took the focus before the menu was there.
-                                                this.open_running_menu(window, cx);
-                                                if let Some(menu) = &this.running_menu {
-                                                    menu.focus_handle(cx).focus(window, cx);
-                                                }
-                                            } else {
-                                                this.running_menu = None;
-                                                cx.notify();
-                                            }
-                                        })
-                                        .ok();
-                                })
-                                .trigger(running)
-                                .content(move |_, _, _| match &menu {
-                                    Some(menu) => menu.clone().into_any_element(),
-                                    None => div().into_any_element(),
-                                }),
-                        ),
-                    ),
-            )
+        agentshub_ui::chat::Toolbar {
+            width,
+            running,
+            menu: self.running_menu.clone(),
+            on,
+        }
+        .render(window, cx)
     }
 
-    /// What the agents are doing, and the shortcuts that help with it now,
-    /// over a sheet `width` wide. The rest are a shortcut away.
+    fn toolbar_intent(
+        &mut self,
+        intent: agentshub_ui::chat::ToolbarIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match intent {
+            agentshub_ui::chat::ToolbarIntent::OpenPalette => self.open_palette(false, window, cx),
+            agentshub_ui::chat::ToolbarIntent::RunningMenu(open) => {
+                if open {
+                    self.open_running_menu(window, cx);
+                    if let Some(menu) = &self.running_menu {
+                        menu.focus_handle(cx).focus(window, cx);
+                    }
+                } else {
+                    self.running_menu = None;
+                    cx.notify();
+                }
+            }
+            agentshub_ui::chat::ToolbarIntent::CloseWindow => {
+                crate::tray::remember_bounds(window.window_bounds(), cx);
+                window.remove_window();
+            }
+        }
+    }
+
     pub(super) fn render_footer(
         &self,
         width: Pixels,
@@ -352,204 +279,76 @@ impl Workspace {
 
     /// What shows while no chat is open: the agents to start, with their
     /// number keys, and the chats last worked in, to go back to.
-    pub(super) fn render_empty(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let palette = appearance::palette(cx);
-        let sidebar = self.sidebar.read(cx);
-        let selected = sidebar.selected().map(|project| project.name.clone());
+    pub(super) fn render_empty(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let selected = self
+            .sidebar
+            .read(cx)
+            .selected()
+            .map(|project| project.name.clone().into());
         let agents = self.empty_agents(cx);
-        let mut recent: Vec<_> = sidebar
-            .projects()
-            .iter()
-            .filter(|project| project.archived_at.is_none())
-            .flat_map(|project| {
-                project
-                    .chats
-                    .iter()
-                    .filter(|chat| chat.archived_at.is_none())
-                    .map(move |chat| (project, chat))
-            })
-            .collect();
-        recent.sort_by_key(|(_, chat)| std::cmp::Reverse(chat.updated_at));
-        let recent: Vec<_> = recent
-            .into_iter()
-            .take(RECENT_CHATS)
-            .map(|(project, chat)| {
-                let tone = Tone::of(sidebar.running(chat.id));
-                let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
-                (
-                    chat.id,
-                    title,
-                    sidebar::subtitle(chat, tone, Some(&project.name)),
-                    tone,
-                )
-            })
-            .collect();
+        let recent: Vec<_> = {
+            let sidebar = self.sidebar.read(cx);
+            let mut recent: Vec<_> = sidebar
+                .projects()
+                .iter()
+                .filter(|project| project.archived_at.is_none())
+                .flat_map(|project| {
+                    project
+                        .chats
+                        .iter()
+                        .filter(|chat| chat.archived_at.is_none())
+                        .map(move |chat| (project, chat))
+                })
+                .collect();
+            recent.sort_by_key(|(_, chat)| std::cmp::Reverse(chat.updated_at));
+            recent
+                .into_iter()
+                .take(RECENT_CHATS)
+                .map(|(project, chat)| {
+                    let tone = Tone::of(sidebar.running(chat.id));
+                    agentshub_ui::chat::Recent {
+                        id: chat.id,
+                        title: chat.title.clone().unwrap_or_else(|| "New chat".into()),
+                        about: sidebar::subtitle(chat, tone, Some(&project.name)),
+                        tone,
+                    }
+                })
+                .collect()
+        };
+        let on = {
+            let this = cx.weak_entity();
+            Rc::new(
+                move |intent: agentshub_ui::chat::EmptyIntent,
+                      window: &mut Window,
+                      cx: &mut App| {
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| this.empty_intent(intent, window, cx));
+                    }
+                },
+            )
+        };
+        agentshub_ui::chat::EmptyState {
+            selected,
+            agents,
+            recent,
+            on,
+        }
+        .render(window, cx)
+    }
 
-        // Centered while it fits, and scrolled from the top when it doesn't.
-        div().id("empty").size_full().overflow_y_scroll().child(
-            h_flex()
-                .min_h_full()
-                .items_center()
-                .justify_center()
-                .p_8()
-                .child(
-                    v_flex()
-                        .w_full()
-                        .max_w(px(520.))
-                        .gap_6()
-                        .child(
-                            v_flex()
-                                .gap_2()
-                                .child(div().font_family(appearance::DISPLAY).text_3xl().child(
-                                    match &selected {
-                                        Some(_) => "Start an agent",
-                                        None => "Add a project to begin",
-                                    },
-                                ))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .line_height(rems(1.45))
-                                        .text_color(theme.muted_foreground)
-                                        .child(match &selected {
-                                            Some(name) => format!(
-                                                "In {name}. Agents keep running while you look at \
-                                             another chat."
-                                            ),
-                                            None => "A project is a folder you work in. Add one, \
-                                                 then start Claude Code, Codex or Pi there."
-                                                .to_string(),
-                                        }),
-                                ),
-                        )
-                        .child(match (&selected, agents) {
-                            (Some(_), Some((project, agents))) if !agents.is_empty() => h_flex()
-                                .flex_wrap()
-                                .gap_2()
-                                .children(agents.into_iter().enumerate().map(|(index, agent)| {
-                                    Button::new(("empty-agent", index as u64))
-                                        .map(|button| {
-                                            if index == 0 {
-                                                button.primary()
-                                            } else {
-                                                button.outline()
-                                            }
-                                        })
-                                        .icon(IconName::Plus)
-                                        .label(agent.display_name())
-                                        .child(
-                                            div()
-                                                .px_1p5()
-                                                .rounded(px(4.))
-                                                .bg(palette.strong)
-                                                .text_xs()
-                                                .font_family(theme.mono_font_family.clone())
-                                                .text_color(palette.secondary_foreground)
-                                                .child((index + 1).to_string()),
-                                        )
-                                        .tooltip(format!(
-                                            "Start {} here, or press {}",
-                                            agent.display_name(),
-                                            index + 1
-                                        ))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.start_agent(project, agent, window, cx)
-                                        }))
-                                }))
-                                .child(
-                                    Button::new("empty-new-chat")
-                                        .ghost()
-                                        .label("More options…")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.new_chat_here(&NewChat, window, cx)
-                                        })),
-                                )
-                                .into_any_element(),
-                            (Some(_), _) => h_flex()
-                                .child(
-                                    Button::new("empty-new-chat")
-                                        .primary()
-                                        .icon(IconName::Plus)
-                                        .label("New chat")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.new_chat_here(&NewChat, window, cx)
-                                        })),
-                                )
-                                .into_any_element(),
-                            (None, _) => h_flex()
-                                .child(
-                                    Button::new("empty-add-project")
-                                        .primary()
-                                        .icon(IconName::FolderOpen)
-                                        .label("Add project")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.add_project(window, cx)
-                                        })),
-                                )
-                                .into_any_element(),
-                        })
-                        .when(!recent.is_empty(), |this| {
-                            this.child(
-                                v_flex()
-                                    .gap_1()
-                                    .pt_5()
-                                    .border_t_1()
-                                    .border_color(theme.border)
-                                    .child(
-                                        h_flex()
-                                            .justify_between()
-                                            .pb_1()
-                                            .child(sidebar::heading("Recent", cx))
-                                            .children(palette::shortcut(&OpenSearch, window).map(
-                                                |keys| {
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground)
-                                                        .child(format!("{keys} to search them all"))
-                                                },
-                                            )),
-                                    )
-                                    .children(recent.into_iter().map(
-                                        |(id, title, about, tone)| {
-                                            h_flex()
-                                                .id(("recent", id as u64))
-                                                .px_2()
-                                                .py(px(7.))
-                                                .mx(px(-8.))
-                                                .gap(px(10.))
-                                                .rounded(theme.radius)
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(theme.accent))
-                                                .child(sidebar::dot(tone, cx))
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .text_sm()
-                                                        .truncate()
-                                                        .child(title),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .max_w(px(240.))
-                                                        .truncate()
-                                                        .text_xs()
-                                                        .font_family(theme.mono_font_family.clone())
-                                                        .text_color(tone.text_color(cx))
-                                                        .child(about),
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.open_chat(id, window, cx)
-                                                    },
-                                                ))
-                                        },
-                                    )),
-                            )
-                        }),
-                ),
-        )
+    fn empty_intent(
+        &mut self,
+        intent: agentshub_ui::chat::EmptyIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match intent {
+            agentshub_ui::chat::EmptyIntent::StartAgent(project, agent) => {
+                self.start_agent(project, agent, window, cx)
+            }
+            agentshub_ui::chat::EmptyIntent::NewChat => self.new_chat_here(&NewChat, window, cx),
+            agentshub_ui::chat::EmptyIntent::AddProject => self.add_project(window, cx),
+            agentshub_ui::chat::EmptyIntent::OpenChat(id) => self.open_chat(id, window, cx),
+        }
     }
 }

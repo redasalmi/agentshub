@@ -237,13 +237,6 @@ pub(super) fn render_shortcuts(window: &Window, cx: &App) -> impl IntoElement {
     }))
 }
 
-/// Keeps a press on the title bar's controls from moving the window.
-pub(super) fn stay_put(element: Div) -> Div {
-    element
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-}
-
 pub(super) fn render_broken(reason: SharedString, cx: &Context<Workspace>) -> AnyElement {
     let theme = cx.theme();
     h_flex()
