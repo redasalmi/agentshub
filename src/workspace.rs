@@ -73,6 +73,7 @@ mod shell;
 mod shutdown;
 mod startup;
 mod status;
+mod terminal_registry;
 mod terminals;
 
 pub use actions::*;

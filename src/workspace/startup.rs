@@ -94,14 +94,7 @@ impl Workspace {
 
         let theme = cx.observe_global::<Theme>(|this, cx| {
             let colors = appearance::terminal_colors(cx);
-            for chat in &this.chats {
-                if let Some(terminal) = &chat.pane.terminal {
-                    terminal.terminal.read(cx).set_colors(colors);
-                }
-            }
-            for shell in this.shells.values() {
-                shell.terminal.read(cx).set_colors(colors);
-            }
+            this.terminals().set_colors(cx, colors);
         });
 
         // Nothing has the keyboard once what had it is gone, such as the
