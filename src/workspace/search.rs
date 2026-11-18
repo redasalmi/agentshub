@@ -9,15 +9,16 @@ use gpui_kit::*;
 
 use crate::palette::{self, Entry, Lead, Pick};
 use crate::settings::{DEFAULT_TERMINAL_FONT_SIZE, Settings, ThemeFamily};
-use crate::sidebar::{self, Filter, Tone, home_relative};
+use crate::sidebar::Filter;
 use crate::store::Change;
 use crate::terminal_view;
 
+use super::palette_model::PaletteLists;
 use super::{
     AddProject, ArchiveChat, ArchiveProject, CloseAllChats, CloseIdleChats, DeleteChat,
     ExportDatabase, ImportDatabase, NextNeedingYou, PALETTE_START, RenameChat, ShowArchived,
     ShowRunning, ShowShortcuts, ToggleHistory, TogglePin, ToggleProjectNames, ToggleSettings,
-    ToggleShell, ToggleTheme, UseTheme, Workspace, start_entries,
+    ToggleShell, ToggleTheme, UseTheme, Workspace,
 };
 
 impl Workspace {
@@ -33,93 +34,17 @@ impl Workspace {
         // The agents to start are the ones last found until they have been
         // looked up again.
         self.palette_start = None;
-        let installed = self.installed.clone();
         self.look_up_installed(cx);
+        let PaletteLists {
+            chats,
+            projects,
+            archived,
+            places,
+            start_heading,
+            start,
+            selected,
+        } = self.palette_lists(cx);
         let sidebar = self.sidebar.read(cx);
-        let mut chats = Vec::new();
-        let mut archived = Vec::new();
-        let mut places = HashMap::new();
-        for project in sidebar.projects() {
-            for chat in &project.chats {
-                // An archived project's chats are archived along with it.
-                if let Some(at) = chat.archived_at.or(project.archived_at) {
-                    let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
-                    places.insert(
-                        chat.id,
-                        SharedString::from(format!("archived · {title} · {}", project.name)),
-                    );
-                    archived.push((
-                        at,
-                        Entry::new(title, Lead::Tone(Tone::Saved), Pick::OpenChat(chat.id))
-                            .meta(format!(
-                                "{} · archived {} · {}",
-                                chat.agent.label(),
-                                sidebar::age(at),
-                                project.name
-                            ))
-                            .keywords([chat.agent.display_name(), "archived"]),
-                    ));
-                    continue;
-                }
-                let tone = Tone::of(sidebar.running(chat.id));
-                let doing = match tone {
-                    Tone::Saved => sidebar::age(chat.updated_at),
-                    tone => tone.label().to_string(),
-                };
-                let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
-                places.insert(
-                    chat.id,
-                    SharedString::from(format!("{title} · {}", project.name)),
-                );
-                chats.push((
-                    tone.needs_you(),
-                    Entry::new(title, Lead::Tone(tone), Pick::OpenChat(chat.id))
-                        .meta(format!(
-                            "{} · {doing} · {}",
-                            chat.agent.label(),
-                            project.name
-                        ))
-                        .keywords([chat.agent.display_name()]),
-                ));
-            }
-        }
-        // The chats that need the user come first.
-        chats.sort_by_key(|(needs_you, _)| !needs_you);
-        let chats = chats.into_iter().map(|(_, entry)| entry).collect();
-
-        let selected = sidebar.selected();
-        let start_heading = match selected {
-            Some(project) => format!("Start an agent in {}", project.name),
-            None => "Start an agent".into(),
-        };
-        let selected_id = selected.map(|project| project.id);
-        let start = selected_id
-            .zip(installed)
-            .filter(|(project, (id, _))| project == id)
-            .map(|(project, (_, agents))| start_entries(project, &agents))
-            .unwrap_or_default();
-
-        for project in sidebar.projects() {
-            if let Some(at) = project.archived_at {
-                archived.push((
-                    at,
-                    Entry::new(
-                        project.name.clone(),
-                        Lead::Icon(ExtraIcon::Archive),
-                        Pick::SelectProject(project.id),
-                    )
-                    .meta(format!(
-                        "archived {} · {}",
-                        sidebar::age(at),
-                        home_relative(&project.path)
-                    ))
-                    .keywords(["project", "archived"]),
-                ));
-            }
-        }
-        // The last archived first.
-        archived.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-        let archived: Vec<_> = archived.into_iter().map(|(_, entry)| entry).collect();
 
         let this = cx.entity().downgrade();
         let on_pick = move |pick, window: &mut Window, cx: &mut App| {
@@ -136,21 +61,6 @@ impl Workspace {
             );
             return;
         }
-
-        let projects = sidebar
-            .projects()
-            .iter()
-            .filter(|project| project.archived_at.is_none())
-            .map(|project| {
-                Entry::new(
-                    project.name.clone(),
-                    Lead::Icon(IconName::FolderOpen.into()),
-                    Pick::SelectProject(project.id),
-                )
-                .meta(home_relative(&project.path))
-                .keywords(["project"])
-            })
-            .collect();
 
         let run = |label: &str, icon: IconName, action: Box<dyn Action>| {
             Entry::new(
@@ -372,7 +282,7 @@ impl Workspace {
             window,
             cx,
         );
-        self.palette_start = selected_id.map(|id| (id, sections));
+        self.palette_start = selected.map(|id| (id, sections));
     }
 
     /// Finds what was said in the chats, off the UI thread. `places` says

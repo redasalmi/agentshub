@@ -62,6 +62,7 @@ mod format;
 mod layout;
 mod new_chat;
 mod open_chat;
+mod palette_model;
 mod preferences;
 mod projects;
 mod render;
