@@ -20,6 +20,14 @@ use crate::settings::Settings;
 use crate::status::{Need, Status};
 use crate::store::{self, Change, Chat, Project};
 
+mod status;
+mod text;
+
+pub use status::{badge, dot, live_dot};
+use status::{name_of, popping_dot};
+use text::summary;
+pub use text::{activity, age, home_relative, marks, path_line, subtitle};
+
 /// How often the ages of the chats are brought up to date.
 const AGE_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -237,29 +245,6 @@ impl Tone {
     }
 }
 
-/// A chat's status glyph. Each status has a shape of its own as well as a
-/// color, so they tell apart at a glance and without telling colors apart:
-/// a mark in a filled circle for the ones that need the user, a ring with a
-/// bright head for an agent at work, a plain ring for one at rest, and a
-/// small dot for a chat that doesn't run.
-pub fn dot(tone: Tone, cx: &App) -> Div {
-    status_glyph(tone, false, None, cx)
-}
-
-/// A chat's status glyph whose circle swells and settles back when its agent
-/// has just come to need the user, `since` then.
-fn popping_dot(tone: Tone, since: Option<Instant>, cx: &App) -> Div {
-    // Named after when it popped, so a later pop starts again.
-    status_glyph(tone, false, since.map(name_of), cx)
-}
-
-/// An animation's name that changes with the moment it starts at.
-fn name_of(at: Instant) -> u64 {
-    let mut hasher = std::hash::DefaultHasher::new();
-    std::hash::Hash::hash(&at, &mut hasher);
-    std::hash::Hasher::finish(&hasher)
-}
-
 /// `row` growing into the list from nothing, or, when it `leaves`, folding
 /// out of it to nothing.
 fn fold(row: impl IntoElement + 'static, name: (&'static str, u64), leaves: bool) -> AnyElement {
@@ -306,159 +291,6 @@ struct Leaving {
     chat: Chat,
     after: Option<i64>,
     since: Instant,
-}
-
-/// A status glyph that spins while its agent works, where it says what a
-/// chat is doing now. Only the header's status pill should use this: a tick
-/// re-renders the view that holds it, and rebuilding the sidebar for a glyph
-/// costs more than the whole animation is worth.
-pub fn live_dot(tone: Tone, cx: &App) -> Div {
-    status_glyph(tone, true, None, cx)
-}
-
-/// `pop` names the swell a glyph that needs the user gives when it has just
-/// come to, if it has.
-fn status_glyph(tone: Tone, animate: bool, pop: Option<u64>, cx: &App) -> Div {
-    let theme = cx.theme();
-    let palette = appearance::palette(cx);
-    let glyph = div()
-        .size(GLYPH_SIZE)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center();
-    // A glyph that needs the user: its circle, swelling if it pops. It
-    // outgrows the glyph's room rather than moving what's beside it.
-    let swell = |circle: Div| match pop {
-        Some(key) => circle
-            .with_animation(("pop", key), Animation::new(POP), |circle, delta| {
-                // One hump up and back, so nothing flashes.
-                let grow = (delta * std::f32::consts::PI).sin() * POP_GROWTH;
-                circle.size(GLYPH_SIZE * (1. + grow)).flex_none()
-            })
-            .into_any_element(),
-        None => circle.into_any_element(),
-    };
-    let filled = |background: Hsla, foreground: Hsla, icon: IconName| {
-        swell(
-            div()
-                .size(GLYPH_SIZE)
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(background)
-                .child(Icon::new(icon).size(px(10.)).text_color(foreground)),
-        )
-    };
-    match tone {
-        Tone::Saved => glyph.child(div().size(px(5.)).rounded_full().bg(palette.border_strong)),
-        Tone::Idle => glyph.child(
-            div()
-                .size(px(10.))
-                .rounded_full()
-                .border_2()
-                .border_color(theme.muted_foreground),
-        ),
-        Tone::Running => glyph.child(
-            div()
-                .size(px(10.))
-                .rounded_full()
-                .border_2()
-                .border_color(theme.muted_foreground)
-                .bg(theme.muted_foreground.opacity(0.35)),
-        ),
-        Tone::Working => {
-            let icon = Icon::default()
-                .data(WORKING_GLYPH)
-                .size(GLYPH_SIZE)
-                .text_color(palette.info.base);
-            if animate && cx.reduce_motion() {
-                // Reduced motion stills the animation, which would leave a
-                // working agent looking stuck. The pill redraws every second
-                // while a turn is under way, so the head steps round slowly.
-                let step = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |since| since.as_secs() % REDUCED_SPIN_STEPS);
-                glyph.child(icon.transform(Transformation::rotate(radians(
-                    std::f32::consts::TAU * step as f32 / REDUCED_SPIN_STEPS as f32,
-                ))))
-            } else if animate {
-                glyph.child(
-                    icon.with_animation(
-                        "working",
-                        Animation::new(SPIN_PERIOD)
-                            .repeat_synced()
-                            .with_max_fps(SPIN_FPS),
-                        |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-                    ),
-                )
-            } else {
-                glyph.child(icon)
-            }
-        }
-        Tone::NeedsYou(_) => glyph.child(swell(
-            div()
-                .size(GLYPH_SIZE)
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(theme.warning)
-                .text_color(theme.warning_foreground)
-                .text_size(px(11.))
-                .font_semibold()
-                .line_height(px(11.))
-                .child("!"),
-        )),
-        Tone::Done => glyph.child(filled(
-            theme.success,
-            theme.success_foreground,
-            IconName::Check,
-        )),
-        Tone::Error => glyph.child(filled(
-            theme.danger,
-            theme.danger_foreground,
-            IconName::Close,
-        )),
-    }
-}
-
-/// A count in the rail: filled when it counts chats that need the user, else
-/// a quiet outline, in the working color while one of them works.
-pub fn badge(count: usize, urgent: bool, working: bool, cx: &App) -> Div {
-    let theme = cx.theme();
-    let palette = appearance::palette(cx);
-    let badge = div()
-        .flex_none()
-        .min_w(px(18.))
-        .h(px(18.))
-        .px_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .border_1()
-        .text_size(px(10.))
-        .font_medium()
-        .child(count.to_string());
-    if urgent {
-        badge
-            .bg(theme.warning)
-            .border_color(theme.warning)
-            .text_color(theme.warning_foreground)
-            .font_semibold()
-    } else if working {
-        badge
-            .bg(theme.sidebar)
-            .border_color(palette.info.base)
-            .text_color(palette.info.text)
-    } else {
-        badge
-            .bg(theme.sidebar)
-            .border_color(palette.border_strong)
-            .text_color(palette.secondary_foreground)
-    }
 }
 
 pub struct Sidebar {
@@ -1794,17 +1626,6 @@ pub fn heading(label: impl Into<SharedString>, cx: &App) -> Div {
         .child(label.into())
 }
 
-/// What a chat's agent is doing while it runs, the agent or else the
-/// chat's `project`, and how long ago it last changed. What the agent does
-/// comes first, so a narrow list cuts the rest.
-pub fn subtitle(chat: &Chat, tone: Tone, project: Option<&str>) -> String {
-    let source = project.unwrap_or(chat.agent.label());
-    match tone {
-        Tone::Saved => format!("{source} · {}", age(chat.updated_at)),
-        tone => format!("{} · {source} · {}", tone.label(), age(chat.updated_at)),
-    }
-}
-
 /// Whether the rail names the projects in a window `window_width` wide, and
 /// how wide it is there. The settings keep the width the user wants, which a
 /// narrower window only shows narrower.
@@ -1867,91 +1688,6 @@ fn project_mark(mark: SharedString, tint: Tint, cx: &App) -> Div {
         .font_medium()
         .font_family(cx.theme().mono_font_family.clone())
         .child(mark)
-}
-
-/// The marks of projects named `names`, in the rail's order: each one's
-/// initials, unless an earlier project has them. It then gets the first pair
-/// of its letters starting with its first that no earlier one has, or else
-/// such a three.
-pub fn marks<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut taken = HashSet::new();
-    names
-        .into_iter()
-        .map(|name| {
-            let mark = candidates(name)
-                .into_iter()
-                .find(|mark| !taken.contains(mark))
-                .unwrap_or_else(|| initials(name));
-            taken.insert(mark.clone());
-            mark
-        })
-        .collect()
-}
-
-/// The marks project `name` could have, the likeliest first.
-fn candidates(name: &str) -> Vec<String> {
-    let letters: Vec<char> = name
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
-    let mut candidates = vec![initials(name)];
-    if let [first, second, rest @ ..] = letters.as_slice() {
-        let pairs = std::iter::once(second).chain(rest);
-        candidates.extend(pairs.map(|other| [*first, *other].iter().collect::<String>()));
-        candidates.extend(
-            rest.iter()
-                .map(|other| [*first, *second, *other].iter().collect()),
-        );
-    }
-    candidates
-}
-
-/// The two letters a project's mark shows unless another project has them:
-/// the first of its first two words, or its first two letters.
-fn initials(name: &str) -> String {
-    let words: Vec<&str> = name
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
-    let letters: String = match words.as_slice() {
-        [] => "?".into(),
-        [word] => word.chars().take(2).collect(),
-        [first, second, ..] => first
-            .chars()
-            .take(1)
-            .chain(second.chars().take(1))
-            .collect(),
-    };
-    letters.to_lowercase()
-}
-
-/// `path` on one line, cut from its start when it doesn't fit, since its end
-/// says the most, and whole in a tooltip.
-pub fn path_line(path: &Path, cx: &App) -> Stateful<Div> {
-    let theme = cx.theme();
-    let shown = home_relative(path);
-    let whole = SharedString::from(path.display().to_string());
-    div()
-        .id(SharedString::from(format!("path:{whole}")))
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis_start()
-        .text_xs()
-        .font_family(theme.mono_font_family.clone())
-        .text_color(theme.muted_foreground)
-        .tooltip(move |window, cx| Tooltip::new(whole.clone()).build(window, cx))
-        .child(shown)
-}
-
-/// `path`, starting with `~` when it is in the home folder.
-pub fn home_relative(path: &Path) -> String {
-    match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_owned)) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    }
 }
 
 /// A chat being dragged, and what follows the pointer meanwhile.
@@ -2065,73 +1801,6 @@ impl Render for Sidebar {
     }
 }
 
-/// What a chat's agent is doing, or just its name while it doesn't run.
-/// `Some(None)` is an agent that runs but hasn't said what it's doing.
-pub fn activity(agent: Agent, running: Option<Option<Status>>) -> String {
-    let name = agent.display_name();
-    match running {
-        None => name.to_string(),
-        Some(None) => format!("{name} is running"),
-        Some(Some(Status::Idle)) => format!("{name} is idle"),
-        Some(Some(Status::Working)) => format!("{name} is working"),
-        Some(Some(Status::Blocked(Some(Need::Permission)))) => {
-            format!("{name} needs your permission")
-        }
-        Some(Some(Status::Blocked(Some(Need::Question)))) => format!("{name} has a question"),
-        Some(Some(Status::Blocked(Some(Need::Auth)))) => format!("{name} needs you to sign in"),
-        Some(Some(Status::Blocked(None))) => format!("{name} is waiting for you"),
-        Some(Some(Status::Done)) => format!("{name} is done"),
-        Some(Some(Status::Error)) => format!("{name} stopped on an error"),
-    }
-}
-
-/// How long ago something happened, given in seconds since the Unix epoch,
-/// in its largest whole unit.
-pub fn age(at: i64) -> String {
-    let minutes = (store::now() - at).max(0) / 60;
-    match minutes {
-        0 => "now".to_string(),
-        1..60 => format!("{minutes}m"),
-        60..1440 => format!("{}h", minutes / 60),
-        1440..10080 => format!("{}d", minutes / 1440),
-        10080..525600 => format!("{}w", minutes / 10080),
-        _ => format!("{}y", minutes / 525600),
-    }
-}
-
-/// How many agents need the user, work, sit idle, or haven't said.
-pub fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String {
-    let (mut working, mut need_you, mut idle, mut unknown) = (0, 0, 0, 0);
-    for status in running {
-        match status {
-            Some(Status::Working) => working += 1,
-            Some(Status::Blocked(_) | Status::Done | Status::Error) => need_you += 1,
-            Some(Status::Idle) => idle += 1,
-            None => unknown += 1,
-        }
-    }
-    let mut parts = Vec::new();
-    match need_you {
-        0 => {}
-        1 => parts.push("1 needs you".to_string()),
-        n => parts.push(format!("{n} need you")),
-    }
-    if working > 0 {
-        parts.push(format!("{working} working"));
-    }
-    if idle > 0 {
-        parts.push(format!("{idle} idle"));
-    }
-    if unknown > 0 {
-        parts.push(format!("{unknown} running"));
-    }
-    if parts.is_empty() {
-        "No agents running".to_string()
-    } else {
-        parts.join(" · ")
-    }
-}
-
 impl Sidebar {
     /// How many agents need the user, work, sit idle, or haven't said.
     pub fn summary(&self) -> String {
@@ -2143,7 +1812,8 @@ impl Sidebar {
 mod tests {
     use gpui_kit::px;
 
-    use super::{RAIL_WIDTH, fit_rail, initials, marks, summary};
+    use super::text::{initials, summary};
+    use super::{RAIL_WIDTH, fit_rail, marks};
     use crate::status::Status;
 
     #[test]
