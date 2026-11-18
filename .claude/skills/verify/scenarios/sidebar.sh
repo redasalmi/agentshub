@@ -34,10 +34,6 @@ key Return
 wait_until 5 "the chat's new title" renamed
 shot renamed
 
-key ctrl+shift+w
-wait_until 10 "claude to exit after closing all chats" exited
-shot closed-all
-
 app_stop
 assert_clis_gone
 

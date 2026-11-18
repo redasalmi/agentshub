@@ -1,8 +1,6 @@
 mod alerts;
 mod appearance;
-mod bootstrap;
 mod palette;
-mod settings;
 mod sidebar;
 mod terminal;
 mod terminal_view;
@@ -10,6 +8,7 @@ mod tray;
 mod window;
 mod workspace;
 
+pub use agentshub_app::{bootstrap, settings};
 #[cfg(target_os = "linux")]
 pub use agentshub_core::scope;
 pub use agentshub_core::{

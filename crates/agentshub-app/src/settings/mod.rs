@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use gpui_kit::*;
 use rusqlite::types::{FromSql, Value};
 
-use crate::store::Store;
+use agentshub_core::store::Store;
 
 mod apply;
 
@@ -247,7 +247,7 @@ mod tests {
         APPEARANCE, Appearance, CLOSE_TO_TRAY, MOTION, Motion, SHELL_SHARE, SIDEBAR_WIDTH,
         Settings, ThemeFamily,
     };
-    use crate::store::Db;
+    use agentshub_core::store::Db;
 
     #[test]
     fn loads_what_was_saved() {

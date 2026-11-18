@@ -6,6 +6,7 @@ rust-version = "1.91"
 
 [workspace]
 members = [
+    "crates/agentshub-app",
     "crates/agentshub-core",
     "crates/agentshub-platform",
     "crates/agentshub-ui",
@@ -14,6 +15,7 @@ resolver = "3"
 
 [dependencies]
 agentshub-core = { path = "crates/agentshub-core" }
+agentshub-app = { path = "crates/agentshub-app" }
 agentshub-platform = { path = "crates/agentshub-platform" }
 agentshub-ui = { path = "crates/agentshub-ui" }
 anyhow = "1"

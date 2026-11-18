@@ -5,7 +5,7 @@ use std::fs;
 use anyhow::Context as _;
 
 use crate::settings::Settings;
-use crate::store::{Db, Imported, Store, open_locked};
+use agentshub_core::store::{Db, Imported, Project, Store, open_locked};
 
 /// The database as startup opened it.
 pub struct Opened {
@@ -14,7 +14,7 @@ pub struct Opened {
     pub lock: Option<fs::File>,
     pub imported: Option<Imported>,
     pub settings: Settings,
-    pub projects: Vec<crate::store::Project>,
+    pub projects: Vec<Project>,
     /// Why the database can't be used, in which case an empty one in memory
     /// stands in for it.
     pub broken: Option<String>,
