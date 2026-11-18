@@ -1,0 +1,116 @@
+//! The settings screen and the preferences that change the app's look.
+
+use super::*;
+
+impl Workspace {
+    /// Shows the settings in place of the chat, or the chat again. The focus
+    /// leaves the covered terminals, so keys can't reach a CLI out of sight.
+    pub fn show_settings(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_shown = shown;
+        // A chat still opening mustn't take the view from the settings.
+        self.lifecycle.show_settings(shown);
+        if shown {
+            self.focus_handle.focus(window, cx);
+        } else {
+            self.focus_chat(window, cx);
+        }
+        self.sync_terminals(cx);
+        self.withdraw_seen(window.is_window_active(), cx);
+        cx.notify();
+    }
+
+    /// Saves the theme's mode and puts the theme in it.
+    pub(super) fn set_appearance(
+        &mut self,
+        value: Appearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = Settings::set_appearance(&self.store, value, cx);
+        self.save_setting(saved, cx);
+        appearance::apply(window, cx);
+        cx.notify();
+    }
+
+    /// Saves the family of themes and puts the theme in it.
+    /// Names the projects in the sidebar's rail, or shows only their marks.
+    pub(super) fn show_project_names(
+        &mut self,
+        show: bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = Settings::set_project_names(&self.store, show, cx);
+        self.save_setting(saved, cx);
+        self.sidebar.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    pub(super) fn toggle_project_names(
+        &mut self,
+        _: &ToggleProjectNames,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let show = !cx.global::<Settings>().project_names;
+        self.show_project_names(show, window, cx);
+    }
+
+    /// Shows the sidebar's chat numbers while Alt alone is held, and its
+    /// project numbers while Ctrl alone is.
+    pub(super) fn modifiers_changed(&mut self, modifiers: Modifiers, cx: &mut Context<Self>) {
+        let held = if modifiers == Modifiers::alt() {
+            Some(Held::Chats)
+        } else if modifiers == Modifiers::control() {
+            Some(Held::Projects)
+        } else {
+            None
+        };
+        self.release_modifiers(cx);
+        if let Some(held) = held {
+            self.reveal_numbers = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(REVEAL_NUMBERS_AFTER).await;
+                this.update(cx, |this, cx| {
+                    this.sidebar
+                        .update(cx, |sidebar, cx| sidebar.set_held(Some(held), cx))
+                })
+                .ok();
+            }));
+        }
+    }
+
+    /// Hides the sidebar's numbers, as when the window loses the keyboard
+    /// while a modifier is down and never hears it let go.
+    pub fn release_modifiers(&mut self, cx: &mut Context<Self>) {
+        self.reveal_numbers = None;
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_held(None, cx));
+    }
+
+    /// Makes the terminals' text `by` points bigger, or smaller when negative.
+    pub(super) fn zoom_terminals(&mut self, by: f32, _: &mut Window, cx: &mut Context<Self>) {
+        let size = cx.global::<Settings>().terminal_font_size + by;
+        let saved = Settings::set_terminal_font_size(&self.store, size, cx);
+        self.save_setting(saved, cx);
+        cx.notify();
+    }
+
+    pub(super) fn set_motion(&mut self, value: Motion, _: &mut Window, cx: &mut Context<Self>) {
+        let saved = Settings::set_motion(&self.store, value, cx);
+        self.save_setting(saved, cx);
+        appearance::apply_motion(cx);
+        cx.notify();
+    }
+
+    pub(super) fn set_theme(
+        &mut self,
+        value: ThemeFamily,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = Settings::set_theme(&self.store, value, cx);
+        self.save_setting(saved, cx);
+        appearance::apply(window, cx);
+        cx.notify();
+    }
+}
