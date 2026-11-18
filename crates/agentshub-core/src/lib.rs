@@ -5,6 +5,7 @@
 //! in this crate so the UI can't reach into them by accident.
 
 pub mod agent;
+pub mod format;
 pub mod lifecycle;
 pub mod process;
 pub mod reports;

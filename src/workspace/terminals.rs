@@ -85,7 +85,7 @@ impl Workspace {
         let store = self.store.clone();
         let history = cx.new(|cx| {
             // Without a terminal, the history is all there is to show.
-            let mut history = History::new(store, id, terminal.is_none());
+            let mut history = History::new(Rc::new(store), id, terminal.is_none());
             history.refresh(current, &[], cx);
             history
         });

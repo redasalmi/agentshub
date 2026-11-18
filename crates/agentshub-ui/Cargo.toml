@@ -1,0 +1,16 @@
+[package]
+name = "agentshub-ui"
+version = "0.15.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[dependencies]
+agentshub-core = { path = "../agentshub-core" }
+anyhow = "1"
+gpui-kit = "0.8.0"
+serde_json = "1"
+smol = "2"
+
+[lints]
+workspace = true

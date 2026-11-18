@@ -1,7 +1,6 @@
 mod alerts;
 mod appearance;
 mod bootstrap;
-mod history;
 mod palette;
 mod settings;
 mod sidebar;
@@ -17,6 +16,7 @@ pub use agentshub_core::{
     agent, lifecycle, process, reports, sessions, status, store, transcript, worktree,
 };
 pub use agentshub_platform::{instance, sigterm};
+pub use agentshub_ui::history;
 pub use window::{Contents, open_window};
 
 use std::borrow::Cow;

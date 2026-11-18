@@ -18,7 +18,7 @@ use crate::agent::Agent;
 use crate::appearance::{self, Tint};
 use crate::settings::Settings;
 use crate::status::{Need, Status};
-use crate::store::{self, Chat, Project};
+use crate::store::{Chat, Project};
 
 mod list_view;
 mod rail;
@@ -27,12 +27,14 @@ mod status;
 mod text;
 mod widgets;
 
+pub use agentshub_core::format::age;
 use rail::{key_number, project_mark};
 pub use rail::{names_width, rail};
+
 pub use status::{badge, dot, live_dot};
 use status::{name_of, popping_dot};
 use text::summary;
-pub use text::{activity, age, home_relative, marks, path_line, subtitle};
+pub use text::{activity, home_relative, marks, path_line, subtitle};
 use widgets::section;
 pub use widgets::{group_heading, heading};
 

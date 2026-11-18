@@ -583,6 +583,40 @@ impl Store {
     }
 }
 
+/// What the history view needs from the database, without knowing the store.
+pub trait HistorySource: Send + Sync + 'static {
+    fn sessions(&self, chat_id: i64, done: Box<dyn FnOnce(anyhow::Result<Vec<Session>>) + Send>);
+    fn read_transcript(&self, session_id: i64, done: Box<dyn FnOnce(anyhow::Result<bool>) + Send>);
+    fn items(
+        &self,
+        session_id: i64,
+        limit: usize,
+        done: Box<dyn FnOnce(anyhow::Result<Vec<Item>>) + Send>,
+    );
+}
+
+impl HistorySource for Store {
+    fn sessions(&self, chat_id: i64, done: Box<dyn FnOnce(anyhow::Result<Vec<Session>>) + Send>) {
+        let store = self.clone();
+        smol::spawn(async move { done(store.sessions(chat_id).await) }).detach();
+    }
+
+    fn read_transcript(&self, session_id: i64, done: Box<dyn FnOnce(anyhow::Result<bool>) + Send>) {
+        let store = self.clone();
+        smol::spawn(async move { done(store.read_transcript(session_id).await) }).detach();
+    }
+
+    fn items(
+        &self,
+        session_id: i64,
+        limit: usize,
+        done: Box<dyn FnOnce(anyhow::Result<Vec<Item>>) + Send>,
+    ) {
+        let store = self.clone();
+        smol::spawn(async move { done(store.items(session_id, limit).await) }).detach();
+    }
+}
+
 impl Order {
     fn finish(&self) {
         *lock(&self.done) += 1;
