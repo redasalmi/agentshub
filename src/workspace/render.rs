@@ -151,12 +151,11 @@ impl Render for Workspace {
                                             this.child(self.render_chat(chat, window, cx))
                                         }
                                         (None, None) => this.child(
-                                            self.render_over_shell(
+                                            self.render_empty_over_shell(
                                                 div()
                                                     .size_full()
                                                     .overflow_hidden()
                                                     .child(self.render_empty(window, cx)),
-                                                px(0.),
                                                 window,
                                                 cx,
                                             ),
@@ -238,18 +237,6 @@ pub(super) fn render_shortcuts(window: &Window, cx: &App) -> impl IntoElement {
     }))
 }
 
-/// The bar on the edge of the terminal that has the keyboard, while two show.
-pub(super) fn focus_bar(cx: &App) -> impl IntoElement {
-    div()
-        .absolute()
-        .left_0()
-        .top_3()
-        .bottom_3()
-        .w(px(3.))
-        .rounded_r(px(2.))
-        .bg(appearance::palette(cx).accent)
-}
-
 /// Keeps a press on the title bar's controls from moving the window.
 pub(super) fn stay_put(element: Div) -> Div {
     element
@@ -272,50 +259,6 @@ pub(super) fn key_hint(keys: SharedString, label: &'static str, cx: &App) -> imp
                 .child(keys),
         )
         .child(label)
-}
-
-pub(super) fn status_pill(
-    tone: Tone,
-    turn: Option<Turn>,
-    spin: bool,
-    cx: &App,
-) -> impl IntoElement {
-    let theme = cx.theme();
-    let palette = appearance::palette(cx);
-    let label = capitalized(tone.label());
-    let (label, time) = match turn {
-        Some(Turn::Since(start)) => (format!("{label} ·"), Some(duration(start.elapsed()))),
-        Some(Turn::Took(took)) => (format!("{label} · took"), Some(duration(took))),
-        None => (label, None),
-    };
-    let (background, foreground) = tone
-        .tint(cx)
-        .map(|tint| (tint.soft, tint.text))
-        .unwrap_or((palette.strong, palette.secondary_foreground));
-    h_flex()
-        .flex_none()
-        .h(px(26.))
-        .px_2p5()
-        .gap_2()
-        .rounded_full()
-        .bg(background)
-        .text_color(foreground)
-        .text_xs()
-        .font_medium()
-        .child(if spin {
-            sidebar::live_dot(tone, cx)
-        } else {
-            sidebar::dot(tone, cx)
-        })
-        .child(h_flex().gap_1().child(label).when_some(time, |this, time| {
-            // Figures of the same width, so the pill doesn't jitter as
-            // they count up.
-            this.child(
-                div()
-                    .font_family(theme.mono_font_family.clone())
-                    .child(time),
-            )
-        }))
 }
 
 pub(super) fn render_broken(reason: SharedString, cx: &Context<Workspace>) -> AnyElement {

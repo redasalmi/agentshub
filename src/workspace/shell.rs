@@ -34,11 +34,6 @@ impl Workspace {
         shell.shown.then_some((cwd, shell))
     }
 
-    /// Whether the shell is on screen.
-    pub(super) fn shell_visible(&self, cx: &App) -> bool {
-        !self.settings_shown && self.shown_shell(cx).is_some()
-    }
-
     /// The shell is the selected project's, so it changes with the selection,
     /// and takes the focus from the one before.
     pub(super) fn project_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {

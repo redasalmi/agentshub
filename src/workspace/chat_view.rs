@@ -1,8 +1,9 @@
-//! The chat sheet: its header, history, terminal, shell and empty state.
+//! The chat sheet's remaining chrome: toolbar, footer and empty state.
 
+use agentshub_ui::chat::{ChatIntent, ChatSheet};
 use agentshub_ui::settings::SHORTCUTS_WORK_ANYWHERE;
 
-use super::render::{focus_bar, key_hint, render_shortcuts, status_pill, stay_put};
+use super::render::{key_hint, render_shortcuts, stay_put};
 use super::*;
 
 impl Workspace {
@@ -11,374 +12,129 @@ impl Workspace {
         chat: &Chat,
         window: &Window,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let id = chat.id;
-        let viewport = window.viewport_size().height;
-        let shell_height = shell_height(cx.global::<Settings>().shell_share, viewport);
-        let shell = self.shown_shell(cx);
-        // Without a terminal, the history takes the sheet but for its header
-        // and footer, and the shell.
-        let history_max = if chat.pane.terminal.is_none() {
-            viewport
-                - px(140.)
-                - if shell.is_some() {
-                    shell_height
-                } else {
-                    px(0.)
-                }
-        } else {
-            viewport * HISTORY_SHARE
-        };
-
-        // A spinner only earns its frames while the window is on screen. The
-        // sidebar's glyphs stay still: each tick would rebuild the whole list.
-        let spin = window.is_visible() && !self.hidden;
-        // A window too short for even the least heights clips the chat
-        // rather than drawing it under the footer.
-        v_flex()
-            .size_full()
-            .overflow_hidden()
-            .track_focus(&self.chat_focus)
-            .child(self.render_chat_header(chat, spin, cx))
-            .when_some(chat.notice.clone(), |this, notice| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .px_6()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .bg(theme.muted)
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(notice),
+    ) -> AnyElement {
+        let (title, pinned) = self
+            .active_entry(cx)
+            .map(|entry| {
+                (
+                    entry.title.clone().unwrap_or_else(|| "New chat".into()),
+                    entry.pinned,
                 )
             })
-            .when_some(chat.message.clone(), |this, message| {
-                let tint = appearance::palette(cx).danger;
-                this.child(
-                    h_flex()
-                        .flex_none()
-                        .px_6()
-                        .py_2()
-                        .gap_3()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .bg(tint.soft)
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_sm()
-                                .text_color(tint.text)
-                                .child(message),
-                        )
-                        .child(
-                            Button::new("restart-agent")
-                                .small()
-                                .label("Restart agent")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.restart(id, window, cx);
-                                })),
-                        ),
-                )
-            })
-            .child(
-                self.render_over_shell(
-                    // The earlier sessions ask for a share of the window, but
-                    // shrink to fit what the header, notices, shell and footer
-                    // leave the CLI, which keeps its least height.
-                    v_flex()
-                        .size_full()
-                        .children(
-                            chat.pane
-                                .history
-                                .read(cx)
-                                .height(history_max)
-                                .map(|height| {
-                                    chat.pane.history.clone().cached(
-                                        StyleRefinement::default()
-                                            .w_full()
-                                            .h(height)
-                                            .flex_shrink(1.)
-                                            .min_h_0(),
-                                    )
-                                }),
-                        )
-                        .children(chat.pane.terminal.as_ref().map(|terminal| {
-                            // With the shell beside it, which of the two has
-                            // the keyboard.
-                            let focused = shell.is_some()
-                                && terminal.view.focus_handle(cx).is_focused(window);
-                            div()
-                                .relative()
-                                .flex_1()
-                                .min_h(MIN_TERMINAL_HEIGHT)
-                                .pl_5()
-                                .pr_2()
-                                .pt_3()
-                                .when(focused, |this| this.child(focus_bar(cx)))
-                                .child(terminal.view.clone())
-                        })),
-                    if chat.pane.terminal.is_some() {
-                        MIN_TERMINAL_HEIGHT
-                    } else {
-                        px(0.)
-                    },
-                    window,
-                    cx,
-                ),
+            .unwrap_or_else(|| ("New chat".into(), false));
+        let history = chat.pane.history.read(cx);
+        let (earlier, history_open) = (history.count(), history.is_open());
+        let shell = self
+            .shown_shell(cx)
+            .map(|(cwd, shell)| agentshub_ui::chat::Shell {
+                cwd,
+                view: shell.view.clone(),
+            });
+        let on = {
+            let this = cx.weak_entity();
+            let id = chat.id;
+            Rc::new(
+                move |intent: ChatIntent, window: &mut Window, cx: &mut App| {
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| this.chat_intent(id, intent, window, cx));
+                    }
+                },
             )
+        };
+        let save = {
+            let this = cx.weak_entity();
+            Rc::new(move |cx: &mut App| {
+                if let Some(this) = this.upgrade() {
+                    this.update(cx, |this, cx| this.save_shell_share(cx));
+                }
+            })
+        };
+        ChatSheet {
+            id: chat.id,
+            title: title.into(),
+            pinned,
+            agent: chat.agent,
+            cwd: chat.cwd.clone(),
+            tone: Tone::of(self.sidebar.read(cx).running(chat.id)),
+            turn: chat.turn,
+            running: chat.running(),
+            notice: chat.notice.clone(),
+            message: chat.message.clone(),
+            history: chat.pane.history.clone(),
+            terminal: chat
+                .pane
+                .terminal
+                .as_ref()
+                .map(|terminal| terminal.view.clone()),
+            shell,
+            shell_share: cx.global::<Settings>().shell_share,
+            hidden: self.hidden,
+            active: self.active.is_some(),
+            earlier,
+            history_open,
+            focus: self.chat_focus.clone(),
+            on,
+            save,
+        }
+        .render(window, cx)
     }
 
-    /// `above` filling what the shell leaves of the room, with the shell, when
-    /// it shows, at the room's bottom. The shell keeps the height the user
-    /// dragged it to, and what's above gives up its room to it but for
-    /// `above_min`; only in a room too short for both does the shell shrink.
-    pub(super) fn render_over_shell(
+    pub(super) fn render_empty_over_shell(
         &self,
         above: impl IntoElement,
-        above_min: Pixels,
         window: &Window,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            // Clips the shell as it slides in from the bottom.
-            .overflow_hidden()
-            // Follows the pointer anywhere in the window while the shell's
-            // top edge is dragged. The shell grows up from the room's bottom,
-            // which stays put however tall it is.
-            .on_drag_move(cx.listener(
-                move |this, event: &DragMoveEvent<ResizeShell>, window, cx| {
-                    let room = event.bounds.size.height - above_min;
-                    let height = (event.bounds.bottom() - event.event.position.y).min(room);
-                    let share = shell_share(height, window.viewport_size().height);
-                    this.resize_shell(share, cx);
+    ) -> AnyElement {
+        let shell = self
+            .shown_shell(cx)
+            .map(|(cwd, shell)| agentshub_ui::chat::Shell {
+                cwd,
+                view: shell.view.clone(),
+            });
+        let on = {
+            let this = cx.weak_entity();
+            Rc::new(
+                move |intent: ChatIntent, window: &mut Window, cx: &mut App| {
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| this.chat_intent(0, intent, window, cx));
+                    }
                 },
-            ))
-            .child(div().flex_1().min_h(above_min).child(above))
-            .children(self.render_shell(window, cx))
-    }
-
-    /// The shell, under the chat or what shows without one, when it shows.
-    fn render_shell(&self, window: &Window, cx: &Context<Self>) -> Option<impl IntoElement> {
-        let theme = cx.theme();
-        let (cwd, shell) = self.shown_shell(cx)?;
-        let viewport = window.viewport_size().height;
-        let workspace = cx.weak_entity();
-        let height = shell_height(cx.global::<Settings>().shell_share, viewport);
-        let focused = shell.view.focus_handle(cx).is_focused(window);
-        // Named after its folder, so each project's shell slides in when it
-        // first shows.
-        let mut hasher = std::hash::DefaultHasher::new();
-        std::hash::Hash::hash(&cwd, &mut hasher);
-        let key = std::hash::Hasher::finish(&hasher);
-        Some(
-            v_flex()
-                .relative()
-                .flex_shrink(1.)
-                .h(height)
-                .min_h(MIN_SHELL_HEIGHT)
-                .child(
-                    h_flex()
-                        .flex_none()
-                        .h_8()
-                        .pl_5()
-                        .pr_2()
-                        .gap_2()
-                        .bg(theme.muted)
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .font_medium()
-                                .text_color(theme.muted_foreground)
-                                .child("Shell"),
-                        )
-                        .child(div().flex_1().min_w_0().child(sidebar::path_line(&cwd, cx)))
-                        .child(
-                            Button::new("close-shell")
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Close)
-                                .tooltip_with_action("Hide the shell", &ToggleShell, None)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_shell(&ToggleShell, window, cx)
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .pl_5()
-                        .pr_2()
-                        .when(focused && self.active.is_some(), |this| {
-                            this.child(focus_bar(cx))
-                        })
-                        .child(shell.view.clone()),
-                )
-                // Last, so it lies over the header it edges. It resizes the
-                // shell when dragged, saving its height once the drag ends,
-                // and restores its default height when double clicked.
-                .child(
-                    resize_handle("shell-edge", Axis::Vertical)
-                        .inside(HandleEdge::Leading)
-                        .with_appearance(shell_edge_appearance(
-                            appearance::palette(cx).border_strong,
-                        ))
-                        .on_drag(ResizeShell, move |drag, _, _, cx| {
-                            cx.stop_propagation();
-                            let workspace = workspace.clone();
-                            cx.new(|cx| {
-                                cx.on_release(move |_, cx| {
-                                    workspace
-                                        .update(cx, |this, cx| this.save_shell_share(cx))
-                                        .ok();
-                                })
-                                .detach();
-                                drag.clone()
-                            })
-                        })
-                        .on_double_click(cx.listener(|this, _, _, cx| {
-                            this.resize_shell(DEFAULT_SHELL_SHARE, cx);
-                            this.save_shell_share(cx);
-                        })),
-                )
-                // Up from the sheet's bottom edge, which clips it, into the
-                // room it takes at once, so its terminal sizes only once.
-                .with_animation(
-                    ("shell-in", key),
-                    Animation::new(SHELL_IN).with_easing(ease_out_quint()),
-                    move |shell, shown| shell.top(height * (1. - shown)),
-                ),
+            )
+        };
+        let save = {
+            let this = cx.weak_entity();
+            Rc::new(move |cx: &mut App| {
+                if let Some(this) = this.upgrade() {
+                    this.update(cx, |this, cx| this.save_shell_share(cx));
+                }
+            })
+        };
+        agentshub_ui::chat::over_shell(
+            above,
+            px(0.),
+            shell,
+            cx.global::<Settings>().shell_share,
+            true,
+            on,
+            save,
+            window,
+            cx,
         )
     }
 
-    /// The chat's title and folder, what its agent is doing, and what can be
-    /// done with it.
-    fn render_chat_header(&self, chat: &Chat, spin: bool, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let entry = self.active_entry(cx);
-        let title = entry
-            .and_then(|entry| entry.title.clone())
-            .unwrap_or_else(|| "New chat".into());
-        let pinned = entry.is_some_and(|entry| entry.pinned);
-        let tone = Tone::of(self.sidebar.read(cx).running(chat.id));
-        let history = chat.pane.history.read(cx);
-        let (earlier, open) = (history.count(), history.is_open());
-        let focus = self.focus_handle.clone();
-
-        // A sheet too narrow for the title, the status and the actions on one
-        // line wraps them, rather than pushing the actions out of reach.
-        h_flex()
-            .flex_none()
-            .flex_wrap()
-            .gap_x_4()
-            .gap_y_2()
-            .pl_6()
-            .pr_3()
-            .py_3()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(MIN_TITLE_WIDTH)
-                    .child(
-                        div()
-                            .font_family(appearance::DISPLAY)
-                            .text_xl()
-                            .truncate()
-                            .child(title),
-                    )
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .text_xs()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_color(theme.muted_foreground)
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .child(format!("{} · ", chat.agent.label())),
-                            )
-                            .child(sidebar::path_line(&chat.cwd, cx)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .ml_auto()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap_x_4()
-                    .gap_y_2()
-                    .when(chat.running(), |this| {
-                        this.child(status_pill(tone, chat.turn, spin, cx))
-                    })
-                    .child(
-                        h_flex()
-                            .flex_none()
-                            .gap_1()
-                            .when(earlier > 0, |this| {
-                                this.child(
-                                    Button::new("history")
-                                        .ghost()
-                                        .small()
-                                        .icon(ExtraIcon::Clock)
-                                        .label(format!("{earlier} earlier"))
-                                        .selected(open)
-                                        .tooltip_with_action(
-                                            "Show or hide the earlier sessions",
-                                            &ToggleHistory,
-                                            None,
-                                        )
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.toggle_history(&ToggleHistory, window, cx)
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new("shell")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::SquareTerminal)
-                                    .label("Shell")
-                                    .selected(self.shell_visible(cx))
-                                    .tooltip_with_action(
-                                        "Show or hide the project's shell",
-                                        &ToggleShell,
-                                        None,
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_shell(&ToggleShell, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("chat-menu")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Ellipsis)
-                                    .tooltip("More")
-                                    .dropdown_menu(move |menu, _, _| {
-                                        menu.action_context(focus.clone())
-                                            .menu("Rename", Box::new(RenameChat))
-                                            .menu(
-                                                if pinned { "Unpin" } else { "Pin to the top" },
-                                                Box::new(TogglePin),
-                                            )
-                                            .separator()
-                                            .menu("Archive", Box::new(ArchiveChat))
-                                            .menu("Delete", Box::new(DeleteChat))
-                                    }),
-                            ),
-                    ),
-            )
+    fn chat_intent(
+        &mut self,
+        id: i64,
+        intent: ChatIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match intent {
+            ChatIntent::Restart => self.restart(id, window, cx),
+            ChatIntent::ToggleHistory => self.toggle_history(&ToggleHistory, window, cx),
+            ChatIntent::ToggleShell => self.toggle_shell(&ToggleShell, window, cx),
+            ChatIntent::ResizeShell(share) => self.resize_shell(share, cx),
+        }
     }
 
     /// The search, which opens the search modal, and the menu of the running

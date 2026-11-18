@@ -8,19 +8,18 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::base::InteractiveElementExt as _;
-use gpui_kit::base::{ResizeHandleRenderer, ResizeHandleState};
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::resizable::{HandleEdge, resize_handle, resize_handle_appearance};
+use gpui_kit::component::resizable::{HandleEdge, resize_handle};
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Selectable as _, Sizable as _, StyledExt as _, Theme,
-    ThemeStyled as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, IconName, StyledExt as _, Theme, ThemeStyled as _, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -37,8 +36,8 @@ use crate::reports::{self, Reports};
 use crate::scope;
 use crate::sessions;
 use crate::settings::{
-    Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SHELL_SHARE, DEFAULT_SIDEBAR_WIDTH,
-    DEFAULT_TERMINAL_FONT_SIZE, Motion, Settings, ThemeFamily,
+    Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, DEFAULT_TERMINAL_FONT_SIZE, Motion,
+    Settings, ThemeFamily,
 };
 use crate::sidebar::{
     self, Held, MAX_SIDEBAR_WIDTH, MIN_MAIN_WIDTH, MIN_SIDEBAR_WIDTH, Sidebar, SidebarEvent, Tone,
@@ -80,41 +79,23 @@ mod terminal_registry;
 mod terminals;
 
 pub use actions::*;
-pub(crate) use format::{Turn, capitalized, duration, plural};
+pub(crate) use format::{Turn, duration, plural};
 pub(crate) use session::import_chat;
 #[cfg(test)]
 pub(crate) use session::reported_sessions;
 
 use crate::lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
 
-/// The least room a chat's title keeps beside its status and actions; with
-/// less, they move below it.
-const MIN_TITLE_WIDTH: Pixels = px(200.);
 /// The least room beside the sidebar in which the search shows its shortcut
 /// as well as what it searches.
 const MIN_SEARCH_KEYS_WIDTH: Pixels = px(600.);
 /// The least room beside the sidebar in which the footer hints at the search
 /// as well as the shortcuts.
 const MIN_FOOTER_SEARCH_WIDTH: Pixels = px(560.);
-/// How long the shell takes to slide in.
-const SHELL_IN: Duration = Duration::from_millis(220);
 /// How many of the chats last worked in show while no chat is open.
 const RECENT_CHATS: usize = 5;
 /// The window's own title bar, which holds the search and the running chats.
 const TITLE_BAR_HEIGHT: Pixels = px(48.);
-
-/// The most of the window's height that a chat's earlier sessions take.
-const HISTORY_SHARE: f32 = 0.45;
-
-/// The most of the window's height the shell can be dragged to take.
-const MAX_SHELL_SHARE: f32 = 0.75;
-
-/// The least height a chat's CLI keeps when the earlier sessions and the
-/// shell crowd it. They give up their height to it, in proportion to it.
-const MIN_TERMINAL_HEIGHT: Pixels = px(160.);
-
-/// The least height the shell keeps: its header and a few lines.
-const MIN_SHELL_HEIGHT: Pixels = px(96.);
 
 /// How often the time the shown chat's prompt has taken so far is brought up
 /// to date.
@@ -245,17 +226,6 @@ impl Render for ResizeRail {
     }
 }
 
-/// What dragging the shell's top edge carries, and draws: nothing, as for the
-/// sidebar's.
-#[derive(Clone)]
-struct ResizeShell;
-
-impl Render for ResizeShell {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        Empty
-    }
-}
-
 /// When the user asked for a new chat, which what finishes later, git's
 /// answers and the checkout of the chat's worktree, is checked against.
 #[derive(Clone, Copy, PartialEq)]
@@ -282,45 +252,6 @@ fn start_entries(project_id: i64, agents: &[Agent]) -> Vec<Entry> {
             .keywords(["new chat", "start"])
         })
         .collect()
-}
-
-/// The shell's height in a window `viewport` tall, taking `share` of it but
-/// kept within the shell's limits.
-fn shell_height(share: f32, viewport: Pixels) -> Pixels {
-    (viewport * share.min(MAX_SHELL_SHARE)).max(MIN_SHELL_HEIGHT)
-}
-
-/// The share of a window `viewport` tall that a shell dragged `height` tall
-/// takes, kept within the shell's limits.
-fn shell_share(height: Pixels, viewport: Pixels) -> f32 {
-    if viewport <= px(0.) {
-        return DEFAULT_SHELL_SHARE;
-    }
-    let max = (viewport * MAX_SHELL_SHARE).max(MIN_SHELL_HEIGHT);
-    height.clamp(MIN_SHELL_HEIGHT, max) / viewport
-}
-
-/// The shell's top edge: a stronger line than the app's other borders, so a
-/// shell open under the chat reads as apart from it. Engaged, it wears the
-/// app's usual handle.
-fn shell_edge_appearance(strong: Hsla) -> ResizeHandleRenderer {
-    let usual = resize_handle_appearance();
-    Rc::new(move |handle, window, cx| {
-        // Always drawn, so its indicator's transitions keep sampling.
-        let usual = usual(handle, window, cx)?;
-        Some(
-            div()
-                .flex_none()
-                .relative()
-                .w_full()
-                .h(px(1.))
-                .child(usual)
-                .when(handle.state() == ResizeHandleState::Idle, |this| {
-                    this.child(div().absolute().inset_0().bg(strong))
-                })
-                .into_any_element(),
-        )
-    })
 }
 
 /// `width` kept within the sidebar's limits, and narrow enough to leave the
