@@ -10,7 +10,7 @@ Non-goals: orchestration, fleet management, PR/CI/diff panes. Use each CLI's nat
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-Show the output. UI changes also get a screenshot from a dev build run in isolation next to the installed one: its own session bus (`dbus-run-session --`), `XDG_RUNTIME_DIR` and `XDG_DATA_HOME`.
+Show the output. UI, chat, PTY, session and resume changes also get a run of the `verify` skill against a dev build, and a look at its screenshots.
 
 `cargo run --profile dev-fast` rebuilds faster but runs slower.
 

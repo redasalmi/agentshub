@@ -1,0 +1,100 @@
+---
+name: verify
+description: Run the agentshub dev build in a hidden KWin session with fake agent CLIs, drive it with xdotool, and check the result through screenshots, the fake CLIs' log and the app's database. Use before saying a UI, chat, PTY, session or resume change is done, or when asked to run, screenshot or smoke-test the app.
+---
+
+# Verify a change in the running app
+
+Everything runs in a throwaway session: a headless KWin with Xwayland on its
+own D-Bus session bus, with its own `HOME`, `XDG_*` dirs and database, and fake
+`claude`, `codex` and `pi` first on `PATH`. The installed copy, the real
+CLIs, the desktop and the developer's input aren't touched.
+
+## Run
+
+```sh
+cargo build
+.claude/skills/verify/scripts/run.sh .claude/skills/verify/scenarios/smoke.sh
+```
+
+It prints `PASS` or `FAIL: <why>` and the artifacts folder, by default
+`target/verify/<time>-<scenario>/`:
+
+- `NN-<name>.png`: screenshots, in order. On failure, the last one is `fail`.
+  **Look at them.** A passing script doesn't prove the screen looks right.
+- `run.log`: the scenario's steps. `fake-cli.log`: each CLI start (pid,
+  session, resume id, cwd, args), each line typed to it, each exit.
+- `app.log`: the app's stderr. `kwin.log`: the compositor's and bus's output.
+
+Options: `AGENTSHUB_BIN` (another binary), `AHV_TIMEOUT` (seconds, default
+300), `AHV_KEEP=1` (keep the temp dir, including the database), and a second
+argument for the output folder, which must be new or empty.
+
+After the run, `run.sh` fails if anything it started is still running and
+kills it. It only looks at what the run started: the apps by the PIDs
+`app_start` recorded, while each is still the binary under test, the fake
+CLIs by the run's own temp dir, and the bus, KWin and Xwayland by that temp
+dir in their environment. It never matches by process name or binary path,
+which would also match the installed copy or another run.
+
+## Scenarios
+
+`scenarios/smoke.sh`: seed a project, start a Claude chat from the dialog, type
+a line, check the session in the database, quit, check the CLI exited,
+relaunch and check the chat resumed the same session.
+
+`scenarios/config-folder.sh`: for Claude, Codex and pi, start a chat, save
+another config folder in the settings, start a second chat, relaunch and check
+each chat resumed in its own folder, with the CLI's variable unset for the
+default one.
+
+To cover a change, add a scenario next to it or a step to an existing one. A
+scenario is bash sourced with `set -e` after `scripts/lib.sh`:
+
+| Helper | Does |
+| --- | --- |
+| `seed_project DIR` | Creates a git repo and adds it as a project (app stopped) |
+| `app_start` / `app_stop` | Launches on Xwayland and waits for the window / SIGTERMs by PID |
+| `key ctrl+shift+n` | xdotool key names; pauses after |
+| `type_text "..."` | Types into the focused window |
+| `click X Y` | Moves, pauses 0.3s, clicks (the screen is 1280x800) |
+| `shot NAME` | Screenshot of the virtual screen |
+| `sql "SELECT ..."` | Read-only query of the test database |
+| `wait_until SECS "what" CMD...` | Polls; fails with "what" on timeout |
+| `cli_started AGENT`, `cli_count AGENT`, `field NAME "$line"` | Read the fake CLI log |
+| `cli_got_input AGENT TEXT` | Whether the CLI got that line |
+| `assert_clis_gone` | Every fake CLI that started has exited |
+| `assert_eq ACTUAL EXPECTED "what"` / `fail "why"` | Fail with a screenshot |
+
+Wait on a condition, never a bare sleep. Give `wait_until` a command or a
+function that checks again each time: `test "$(sql ...)" = 1` runs the query
+once, before the wait starts. Take keys from
+`docs/keyboard-shortcuts.md` and expected results from `features.md`; prefer
+shortcuts to clicks, since coordinates move with the layout.
+
+The fake CLI (`scripts/fake-cli`) reports its session the way the real one
+does (Claude through the `--settings` SessionStart hook, pi through
+`--extension`, Codex not at all), honours `--resume`, `resume` and
+`--session`, and echoes each line back, writing it to its transcript.
+It keeps transcripts in its config folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`PI_CODING_AGENT_DIR` or the default), laid out as each CLI does: Claude's
+under `projects/`, Codex's rollout under `sessions/`, held open, with its
+`session_meta` line, and pi's under `sessions/` with its header. It logs the
+folder as `config=` and whether the variable was set as `configvar=`, and
+exits, logging `missing`, when the session to resume isn't in that folder.
+
+## What it can't cover
+
+- systemd scopes: the private bus has no `org.freedesktop.systemd1`, so CLIs
+  run without a scope (the fallback). `app.log` says so; that's expected.
+- Portals (file picker, reduced motion), the tray and desktop notifications:
+  there is no portal, tray host or notification server in the session.
+- Real CLI behaviour: the fakes only follow the parts the app relies on.
+
+If KWin can't start here, say so and ask before driving the real desktop.
+
+## Failing
+
+Read `run.log`, the `fail` screenshot and `app.log` before changing anything.
+A scenario that fails three times in a row after fixes: stop and ask. Don't add
+sleeps or retries to make a flaky step pass; find what it should wait on.

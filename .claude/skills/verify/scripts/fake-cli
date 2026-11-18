@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Stands in for claude, codex and pi (by the name it's called as). Like the
+# real ones, it keeps its sessions in its config folder, laid out as each
+# keeps them, so the app finds them the same way, and only resumes one it
+# finds there. It reports its session the way the real CLI does, echoes what
+# is typed and logs every event to $AHV_OUT/fake-cli.log.
+agent=$(basename "$0")
+log=/dev/null
+[ -n "${AHV_OUT:-}" ] && log="$AHV_OUT/fake-cli.log"
+
+resume="" resume_file="" settings="" extension="" prev=""
+for arg in "$@"; do
+	case $prev in
+	--resume) resume=$arg ;;
+	--settings) settings=$arg ;;
+	--extension) extension=$arg ;;
+	--session) resume_file=$arg ;;
+	resume) [ "$agent" = codex ] && resume=$arg ;;
+	esac
+	prev=$arg
+done
+# Pi resumes a file, whose header has its id.
+if [ -n "$resume_file" ]; then
+	resume=$(head -1 "$resume_file" 2>/dev/null | jq -r '.id // empty' 2>/dev/null)
+	[ -n "$resume" ] || resume=$(basename "$resume_file" .jsonl)
+fi
+
+case $agent in
+claude) var=CLAUDE_CONFIG_DIR default=$HOME/.claude ;;
+codex) var=CODEX_HOME default=$HOME/.codex ;;
+*) var=PI_CODING_AGENT_DIR default=$HOME/.pi/agent ;;
+esac
+if [ -n "${!var:-}" ]; then config=${!var} configvar=set; else config=$default configvar=unset; fi
+
+now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
+
+if [ -n "$resume" ]; then
+	session=$resume
+	reason=resume
+	case $agent in
+	claude) transcript="$config/projects/$(pwd | tr / -)/$session.jsonl" ;;
+	codex) transcript=$(find "$config/sessions" -name "rollout-*-$session.jsonl" 2>/dev/null | head -1) ;;
+	*) transcript=$resume_file ;;
+	esac
+	if [ -z "$transcript" ] || [ ! -f "$transcript" ] || [ "${transcript#"$config"/}" = "$transcript" ]; then
+		echo "missing $agent session=$resume config=$config" >>"$log"
+		printf 'No session %s in %s\r\n' "$resume" "$config"
+		exit 1
+	fi
+else
+	session=$(cat /proc/sys/kernel/random/uuid)
+	reason=startup
+	stamp=$(date -u +%Y-%m-%dT%H-%M-%S)
+	case $agent in
+	claude) transcript="$config/projects/$(pwd | tr / -)/$session.jsonl" ;;
+	codex) transcript="$config/sessions/$(date -u +%Y/%m/%d)/rollout-$stamp-$session.jsonl" ;;
+	*) transcript="$config/sessions/--$(pwd | sed 's|^/||; s|/|-|g')--/${stamp}_$session.jsonl" ;;
+	esac
+	mkdir -p "$(dirname "$transcript")"
+	case $agent in
+	claude) touch "$transcript" ;;
+	codex)
+		jq -nc --arg id "$session" --arg cwd "$PWD" --arg at "$(now)" \
+			'{timestamp: $at, type: "session_meta", payload: {id: $id, cwd: $cwd, source: "cli"}}' >"$transcript"
+		;;
+	*)
+		jq -nc --arg id "$session" --arg cwd "$PWD" --arg at "$(now)" \
+			'{type: "session", version: 3, id: $id, timestamp: $at, cwd: $cwd}' >"$transcript"
+		;;
+	esac
+fi
+# Codex keeps its rollout open, which is how the app finds its session.
+[ "$agent" = codex ] && exec 3>>"$transcript"
+
+# Claude reports through the SessionStart hook its --settings adds, pi
+# through the extension; Codex doesn't report.
+if [ -n "${AGENTSHUB_REPORT:-}" ]; then
+	if [ "$agent" = claude ] && [ -n "$settings" ]; then
+		jq -nc --arg id "$session" --arg path "$transcript" --arg src "$reason" \
+			'{session_id: $id, transcript_path: $path, source: $src}' >>"$AGENTSHUB_REPORT"
+	elif [ "$agent" = pi ] && [ -n "$extension" ]; then
+		jq -nc --arg path "$transcript" --arg why "$reason" \
+			'{transcript_path: $path, reason: $why}' >>"$AGENTSHUB_REPORT"
+	fi
+fi
+
+echo "start $agent pid=$$ session=$session resume=${resume:--} cwd=$PWD config=$config configvar=$configvar args=$*" >>"$log"
+trap 'echo "exit $agent pid=$$" >>"$log"' EXIT
+
+last=$(tail -1 "$transcript" 2>/dev/null | jq -r '.uuid // .id // empty' 2>/dev/null)
+# entry ROLE TEXT: a message, as each CLI writes it.
+entry() {
+	local id
+	id=$(cat /proc/sys/kernel/random/uuid)
+	case $agent in
+	claude)
+		jq -nc --arg id "$id" --arg parent "$last" --arg role "$1" --arg text "$2" \
+			'{type: $role, uuid: $id, parentUuid: (if $parent == "" then null else $parent end),
+			  timestamp: (now | todate), message: {role: $role, content: $text}}' >>"$transcript"
+		;;
+	codex)
+		local part=input_text
+		[ "$1" = assistant ] && part=output_text
+		jq -nc --arg role "$1" --arg text "$2" --arg part "$part" --arg at "$(now)" \
+			'{timestamp: $at, type: "response_item",
+			  payload: {type: "message", role: $role, content: [{type: $part, text: $text}]}}' >&3
+		;;
+	*)
+		jq -nc --arg id "$id" --arg parent "$last" --arg role "$1" --arg text "$2" --arg at "$(now)" \
+			'{type: "message", id: $id, parentId: (if $parent == "" then null else $parent end),
+			  timestamp: $at, message: {role: $role, content: [{type: "text", text: $text}]}}' >>"$transcript"
+		;;
+	esac
+	last=$id
+}
+
+printf '\e[1mfake %s\e[0m  session %s (%s)\r\n' "$agent" "$session" "$reason"
+printf 'cwd %s\r\n> ' "$PWD"
+while IFS= read -r line; do
+	echo "input $agent $line" >>"$log"
+	entry user "$line"
+	entry assistant "you said: $line"
+	printf 'you said: %s\r\n> ' "$line"
+done

@@ -57,4 +57,13 @@ Before sending a change:
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-[REVIEW.md](REVIEW.md) lists what a change must not break and how to try a dev build without touching your installed copy.
+A change to the UI, chats, terminals or sessions also gets a run in the app. The verify script runs a scenario against the dev build in a hidden KWin session with fake `claude`, `codex` and `pi`, so your desktop, your installed copy and your real CLIs are left alone:
+
+```sh
+cargo build
+.claude/skills/verify/scripts/run.sh .claude/skills/verify/scenarios/smoke.sh
+```
+
+It needs `kwin_wayland`, Xwayland, `dbus-run-session`, `xdotool`, `spectacle`, `sqlite3` and `jq`, and prints `PASS` or `FAIL` with a folder of screenshots and logs under `target/verify/`. The [verify skill](.claude/skills/verify/SKILL.md) explains the scenarios and how to write one.
+
+[REVIEW.md](REVIEW.md) lists what a change must not break.
