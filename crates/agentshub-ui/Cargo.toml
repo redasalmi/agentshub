@@ -6,9 +6,11 @@ rust-version = "1.91"
 publish = false
 
 [dependencies]
+agentshub-app = { path = "../agentshub-app" }
 agentshub-core = { path = "../agentshub-core" }
 anyhow = "1"
 gpui-kit = "0.8.0"
+libghostty-vt = "0.2.2"
 serde_json = "1"
 smol = "2"
 

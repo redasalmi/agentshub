@@ -1,6 +1,7 @@
 //! Applying the app's motion setting.
 
-use super::*;
+use agentshub_app::settings::{Motion, Settings};
+use gpui_kit::*;
 
 /// Animates as the motion setting says, or as the desktop does while it
 /// says to follow the system.

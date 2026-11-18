@@ -54,14 +54,7 @@ pub struct GridSize {
     pub cell_height: f32,
 }
 
-/// The colors that output without colors of its own is drawn in.
-#[derive(Clone, Copy)]
-pub struct Colors {
-    pub background: RgbColor,
-    pub foreground: RgbColor,
-    /// The 16 ANSI colors, which CLIs pick from by index.
-    pub ansi: [RgbColor; 16],
-}
+pub use agentshub_ui::theme::Colors;
 
 pub(super) fn set_colors(terminal: &mut VtTerminal<'_, '_>, colors: Colors) -> Result<()> {
     let mut palette = terminal.default_color_palette()?;

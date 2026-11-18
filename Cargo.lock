@@ -178,9 +178,11 @@ dependencies = [
 name = "agentshub-ui"
 version = "0.15.0"
 dependencies = [
+ "agentshub-app",
  "agentshub-core",
  "anyhow",
  "gpui-kit",
+ "libghostty-vt",
  "serde_json",
  "smol",
 ]

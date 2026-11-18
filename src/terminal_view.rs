@@ -54,15 +54,6 @@ pub fn color(rgb: RgbColor) -> Hsla {
     .into()
 }
 
-pub fn rgb_color(color: Hsla) -> RgbColor {
-    let rgba = color.to_rgb();
-    RgbColor {
-        r: (rgba.r * 255.).round() as u8,
-        g: (rgba.g * 255.).round() as u8,
-        b: (rgba.b * 255.).round() as u8,
-    }
-}
-
 pub struct TerminalView {
     terminal: Entity<Terminal>,
     focus_handle: FocusHandle,
