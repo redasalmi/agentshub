@@ -14,10 +14,10 @@ members = [
 resolver = "3"
 
 [dependencies]
-agentshub-app = { path = "crates/agentshub-app" }
-agentshub-core = { path = "crates/agentshub-core" }
-agentshub-platform = { path = "crates/agentshub-platform" }
-agentshub-ui = { path = "crates/agentshub-ui" }
+agentshub-app = { path = "crates/agentshub-app", version = "0.16.0" }
+agentshub-core = { path = "crates/agentshub-core", version = "0.16.0" }
+agentshub-platform = { path = "crates/agentshub-platform", version = "0.16.0" }
+agentshub-ui = { path = "crates/agentshub-ui", version = "0.16.0" }
 gpui-kit = "0.8.0"
 
 [lints]
