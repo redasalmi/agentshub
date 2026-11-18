@@ -19,10 +19,10 @@ bin ──▶ app ──▶ core
   the platform notification transport and takes a callback for what a click
   should open. It may use GPUI entities and window handles for dialogs, but
   never builds element trees.
-- **ui** — rendering only. It owns the theme, sidebar, search palette and
-  history view; the chat, settings and terminal views still live in the
-  binary. Views read app state and emit intents. No `Store`, `rusqlite`,
-  `std::fs` or `std::process`.
+- **ui** — rendering only. It owns the theme, sidebar, search palette, settings
+  and history view; the chat and terminal views still live in the binary.
+  Views read app state and emit intents. No `Store`, `rusqlite`, `std::fs` or
+  `std::process`.
 - **platform** — Linux adapters: tray, D-Bus notifications, systemd scope,
   desktop motion, single instance and SIGTERM. It calls back into the app or
   binary for window and workspace actions instead of naming them.
@@ -54,10 +54,10 @@ bin ──▶ app ──▶ core
 
 ## Remaining migration
 
-`workspace`, `chat_view`, `settings_view`, `terminal`, `terminal_view` and
-`window` are still in the binary. Moving the views needs the snapshot and
-intent boundary that rule 2 describes: views read a snapshot and emit intents,
-and the workspace applies them. The terminal also needs its systemd scope
+`workspace`, `chat_view`, `terminal`, `terminal_view` and `window` are still
+in the binary. Moving the chat needs the snapshot and intent boundary that
+rule 2 describes: it reads the open chat, its terminal and shell, and asks
+the workspace to change them. The terminal also needs its systemd scope
 injected before it can move out of the binary.
 
 ## Verification
