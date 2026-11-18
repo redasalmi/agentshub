@@ -16,7 +16,7 @@ use crate::terminal_view::rgb_color;
 
 mod motion;
 
-pub use motion::{apply_motion, watch_desktop_motion};
+pub use motion::apply_motion;
 
 const LINEAR: &str = include_str!("../assets/themes/linear.json");
 const PRIMER: &str = include_str!("../assets/themes/primer.json");

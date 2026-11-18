@@ -14,7 +14,7 @@ pub use agentshub_core::{
 };
 #[cfg(target_os = "linux")]
 pub use agentshub_platform::scope;
-pub use agentshub_platform::{instance, sigterm};
+pub use agentshub_platform::{instance, motion, sigterm};
 pub use agentshub_ui::history;
 pub use window::{Contents, open_window};
 
@@ -77,7 +77,7 @@ fn main() {
             cx.update(|cx| {
                 let workspace = open_window(Contents::New(Box::new(opened)), None, cx);
                 alerts::init(&workspace, cx);
-                appearance::watch_desktop_motion(cx);
+                motion::watch_desktop_motion(cx, appearance::apply_motion);
                 tray::init(workspace, cx);
                 instance::serve(instance, cx, tray::show);
             });
