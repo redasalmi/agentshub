@@ -39,6 +39,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: scripts/check-arch.sh
 
   deny:
     runs-on: ubuntu-latest
