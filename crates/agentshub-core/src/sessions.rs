@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use serde_json::Value;
 
 use crate::agent::Agent;
-use crate::terminal::Pid;
+use crate::process::Pid;
 use crate::transcript::{self, clean_title};
 
 const CODEX_INDEX: &str = "session_index.jsonl";

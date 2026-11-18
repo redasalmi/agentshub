@@ -52,8 +52,8 @@ bin ──▶ app ──▶ core
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 scripts/check-arch.sh
 ```
 

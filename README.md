@@ -54,7 +54,7 @@ cargo build --release
 Before sending a change:
 
 ```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
 A change to the UI, chats, terminals or sessions also gets a run in the app. The verify script runs a scenario against the dev build in a hidden KWin session with fake `claude`, `codex` and `pi`, so your desktop, your installed copy and your real CLIs are left alone:

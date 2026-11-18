@@ -1,23 +1,21 @@
-mod agent;
 mod alerts;
 mod appearance;
+mod bootstrap;
 mod history;
 mod instance;
 mod palette;
-mod reports;
-#[cfg(target_os = "linux")]
-mod scope;
-mod sessions;
 mod settings;
 mod sidebar;
-mod status;
-mod store;
 mod terminal;
 mod terminal_view;
-mod transcript;
 mod tray;
 mod workspace;
-mod worktree;
+
+#[cfg(target_os = "linux")]
+pub use agentshub_core::scope;
+pub use agentshub_core::{
+    agent, lifecycle, process, reports, sessions, status, store, transcript, worktree,
+};
 
 use std::borrow::Cow;
 use std::fs::File;
@@ -79,7 +77,7 @@ fn main() {
         quit_on_sigterm(cx);
         // The window shows what is in the database, so it waits for it.
         cx.spawn(async move |cx| {
-            let opened = store::open().await;
+            let opened = bootstrap::open().await;
             cx.update(|cx| {
                 let workspace = open_window(Contents::New(Box::new(opened)), None, cx);
                 alerts::init(&workspace, cx);
@@ -154,7 +152,7 @@ pub enum Contents {
     /// The workspace of the window that was closed to the tray.
     Workspace(Entity<Workspace>),
     /// A new workspace, on the database startup opened.
-    New(Box<store::Opened>),
+    New(Box<bootstrap::Opened>),
 }
 
 /// Opens the window on `contents`, with the `bounds` it was closed with, if

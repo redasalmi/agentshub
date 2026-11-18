@@ -7,7 +7,7 @@ Non-goals: orchestration, fleet management, PR/CI/diff panes. Use each CLI's nat
 ## Verify before saying done
 
 ```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
 Show the output. UI, chat, PTY, session and resume changes also get a run of the `verify` skill against a dev build, and a look at its screenshots.

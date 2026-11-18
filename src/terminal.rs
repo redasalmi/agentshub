@@ -9,7 +9,7 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, PoisonError, TryLockError, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,10 @@ use libghostty_vt::{
     },
 };
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+
+#[cfg(test)]
+use crate::process::KILL_GRACE;
+use crate::process::{Pid, kill_session};
 use smol::future::FutureExt as _;
 
 #[cfg(target_os = "linux")]
@@ -53,14 +57,6 @@ const UPDATE_QUEUE: usize = 8;
 /// How often the child's own exit is checked for. Short enough that an exited
 /// CLI is marked dead before anyone notices the delay.
 const EXIT_POLL: Duration = Duration::from_millis(25);
-
-/// How long the CLI's processes get to handle SIGHUP before they're killed.
-#[cfg(unix)]
-const KILL_GRACE: Duration = Duration::from_millis(200);
-
-/// How often the CLI is checked for having exited during its grace period.
-#[cfg(unix)]
-const KILL_POLL: Duration = Duration::from_millis(5);
 
 /// How long the app waits on quit for its CLIs to be killed, a little more
 /// than their grace period. Whatever is left gets the hangup of its PTY
@@ -339,102 +335,6 @@ pub fn wait_reaped(reaped: impl IntoIterator<Item = smol::channel::Receiver<()>>
     });
 }
 
-/// Hangs up the CLI's session, then kills whatever is left of it once the
-/// CLI has exited or its grace period is over, so processes it started, like
-/// the native binary behind an npm launcher, a shell's jobs or anything that
-/// ignores SIGHUP, don't outlive it. The CLI leads its own session, so the
-/// session id is its pid. The CLI isn't reaped before the last signal, which
-/// keeps that id from being reused by another session in the meantime.
-#[cfg(unix)]
-fn kill_session(pid: u32) {
-    for group in session_groups(pid) {
-        // SAFETY: killpg takes no pointers.
-        unsafe { libc::killpg(group, libc::SIGHUP) };
-    }
-    let deadline = Instant::now() + KILL_GRACE;
-    while !has_exited(pid) && Instant::now() < deadline {
-        thread::sleep(KILL_POLL);
-    }
-    for group in session_groups(pid) {
-        // SAFETY: killpg takes no pointers.
-        unsafe { libc::killpg(group, libc::SIGKILL) };
-    }
-}
-
-/// The process groups in a session: the leader's, and on Linux, the ones
-/// shells give their jobs.
-#[cfg(unix)]
-fn session_groups(session: u32) -> Vec<libc::pid_t> {
-    let mut groups = vec![session as libc::pid_t];
-    #[cfg(target_os = "linux")]
-    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
-            continue;
-        };
-        // The command name can hold spaces and parentheses, so the fields
-        // are counted from after its last `)`: state, ppid, pgrp, session.
-        let Some((_, fields)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        let mut fields = fields.split_whitespace().skip(2);
-        if let (Some(Ok(group)), Some(Ok(id))) = (
-            fields.next().map(str::parse),
-            fields.next().map(str::parse::<u32>),
-        ) && id == session
-        {
-            groups.push(group);
-        }
-    }
-    groups.sort_unstable();
-    groups.dedup();
-    groups
-}
-
-/// Whether the child has exited, leaving it to be reaped.
-#[cfg(unix)]
-fn has_exited(pid: u32) -> bool {
-    // SAFETY: siginfo_t is plain data, for which all zeroes is a valid value.
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    // SAFETY: `info` is a valid siginfo_t that outlives the call.
-    let result = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            pid as libc::id_t,
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    // A child that is still running leaves `info` zeroed.
-    // SAFETY: waitid with WEXITED fills in `info` for a child, which sets
-    // si_pid, or leaves it zeroed.
-    result != 0 || unsafe { info.si_pid() } != 0
-}
-
-/// A CLI's pid, which can be used on any thread.
-#[derive(Clone)]
-pub struct Pid(Arc<Mutex<Option<u32>>>);
-
-impl Pid {
-    /// Calls `f` with the pid, unless it has been reaped. The pid can't be
-    /// reaped, and so can't belong to another process, until `f` returns.
-    pub fn with<T>(&self, f: impl FnOnce(u32) -> Option<T>) -> Option<T> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .and_then(f)
-    }
-
-    /// Whether the pid may not be reaped yet, without waiting for whoever
-    /// holds it, which can be a lookup through the process's files.
-    pub fn may_be_running(&self) -> bool {
-        match self.0.try_lock() {
-            Ok(pid) => pid.is_some(),
-            Err(TryLockError::Poisoned(err)) => err.into_inner().is_some(),
-            Err(TryLockError::WouldBlock) => true,
-        }
-    }
-}
-
 pub struct Terminal {
     tx: mpsc::Sender<Msg>,
     frame: Option<Arc<Frame>>,
@@ -558,7 +458,7 @@ impl Terminal {
             frame: None,
             size: None,
             exited: false,
-            pid: Pid(pty.pid),
+            pid: Pid::from_shared(pty.pid),
             stop: pty.stop,
             reaped: pty.reaped,
             input: Cell::new(Input::Untouched),
@@ -1969,7 +1869,7 @@ mod tests {
 
     #[test]
     fn says_a_pid_in_use_may_be_running_without_waiting() {
-        let pid = Pid(Arc::new(Mutex::new(Some(1))));
+        let pid = Pid::from_shared(Arc::new(Mutex::new(Some(1))));
         let (held_tx, held) = mpsc::channel();
         let (release_tx, release) = mpsc::channel::<()>();
         let holder = thread::spawn({
@@ -1985,7 +1885,7 @@ mod tests {
         assert!(pid.may_be_running());
         release_tx.send(()).unwrap();
         holder.join().unwrap();
-        *pid.0.lock().unwrap() = None;
+        pid.reaped();
         assert!(!pid.may_be_running());
     }
 

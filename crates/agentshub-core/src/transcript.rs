@@ -10,15 +10,23 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use crate::agent::Agent;
 use crate::sessions;
-#[cfg(test)]
 use crate::store::Db;
-use crate::store::Transcript;
+
+/// What a read of a session's transcript starts from.
+pub struct Transcript {
+    pub agent: Agent,
+    pub agent_id: String,
+    pub path: PathBuf,
+    pub offset: u64,
+    /// The version of the parser that read it up to `offset`.
+    pub parser: i64,
+}
 
 const TITLE_CHARS: usize = 80;
 
@@ -121,7 +129,6 @@ pub struct Read {
 /// Reads the lines added to a session's transcript since the last read, and
 /// says whether the history shows anything new. The store reads them one
 /// session at a time (see `Store::read_transcript`).
-#[cfg(test)]
 pub fn read(db: &Db, session_id: i64) -> anyhow::Result<bool> {
     let Some(transcript) = db.transcript(session_id)? else {
         return Ok(false);

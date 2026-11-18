@@ -113,6 +113,7 @@ dependencies = [
 name = "agentshub"
 version = "0.15.0"
 dependencies = [
+ "agentshub-core",
  "anyhow",
  "gpui-kit",
  "jiff",
@@ -130,6 +131,21 @@ dependencies = [
  "uuid",
  "wayland-client",
  "wayland-protocols",
+ "zbus 5.19.0",
+]
+
+[[package]]
+name = "agentshub-core"
+version = "0.15.0"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "libc",
+ "notify",
+ "rusqlite",
+ "serde_json",
+ "smol",
+ "uuid",
  "zbus 5.19.0",
 ]
 

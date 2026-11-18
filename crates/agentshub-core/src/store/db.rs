@@ -16,7 +16,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension as _, Result, params};
 use serde_json::{Value, json};
 
 use crate::agent::Agent;
-use crate::transcript::{self, Kind};
+use crate::transcript::{self, Kind, Transcript};
 use crate::worktree::Worktree;
 
 /// Each migration takes the database from the version before it, as counted
@@ -287,16 +287,6 @@ pub struct Session {
     /// Why the chat left it for another session: `clear`, `new`, `resume`,
     /// `fork`.
     pub ended: Option<String>,
-}
-
-/// What a read of a session's transcript starts from.
-pub struct Transcript {
-    pub agent: Agent,
-    pub agent_id: String,
-    pub path: PathBuf,
-    pub offset: u64,
-    /// The version of the parser that read it up to `offset`.
-    pub parser: i64,
 }
 
 /// What recording a reported session changed.

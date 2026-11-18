@@ -4,7 +4,12 @@ version = "0.15.0"
 edition = "2024"
 rust-version = "1.91"
 
+[workspace]
+members = ["crates/agentshub-core"]
+resolver = "3"
+
 [dependencies]
+agentshub-core = { path = "crates/agentshub-core" }
 anyhow = "1"
 gpui-kit = "0.8.0"
 jiff = "0.2.38"
@@ -24,7 +29,10 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 zbus = "5"
 
-[lints.clippy]
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
 string_slice = "warn"
 unwrap_used = "warn"
 get_unwrap = "warn"

@@ -23,14 +23,14 @@ scan() {
 }
 
 # core must build and test without the UI framework.
-scan crates/agentshub-core/src 'gpui_kit|gpui::|Window|Entity<|Context<'
+scan crates/agentshub-core/src 'gpui_kit|gpui::|\bWindow\b|\bEntity<|\bContext<'
 # ui renders; it does not persist or run processes.
 scan crates/agentshub-ui/src 'crate::store|rusqlite|std::fs|std::process|Store'
 # platform is an adapter layer.
 scan crates/agentshub-platform/src 'crate::ui|crate::app'
 
 # The single-crate layout (before the workspace split) is checked too.
-scan src/core 'gpui_kit|gpui::|Window|Entity<|Context<'
+scan src/core 'gpui_kit|gpui::|\bWindow\b|\bEntity<|\bContext<'
 scan src/ui 'crate::store|rusqlite|std::fs|std::process|Store'
 
 exit "$status"

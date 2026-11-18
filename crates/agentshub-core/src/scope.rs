@@ -301,7 +301,6 @@ pub fn stop_leftovers() {
 
 /// Whether systemd can put a process in a scope from its pidfd, which takes
 /// systemd 255 or later.
-#[cfg(test)]
 pub fn available() -> bool {
     let Ok(mut child) = std::process::Command::new("sleep").arg("10").spawn() else {
         return false;

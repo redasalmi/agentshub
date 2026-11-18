@@ -29,6 +29,7 @@ use notify::RecursiveMode;
 use crate::agent::Agent;
 use crate::alerts::{self, Alert};
 use crate::appearance;
+use crate::bootstrap::Opened;
 use crate::history::History;
 use crate::palette::{self, Entry, Lead, Pick};
 use crate::reports::{self, Reports};
@@ -41,7 +42,7 @@ use crate::settings::{
 };
 use crate::sidebar::{self, Held, Sidebar, SidebarEvent, Tone, home_relative};
 use crate::status::Status;
-use crate::store::{self, Change, Opened, Store};
+use crate::store::{self, Change, Store};
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::{self, TerminalView};
 use crate::tray;
@@ -56,7 +57,6 @@ mod dialogs;
 mod feedback;
 mod format;
 mod layout;
-mod lifecycle;
 mod new_chat;
 mod open_chat;
 mod preferences;
@@ -77,7 +77,7 @@ pub(crate) use session::import_chat;
 #[cfg(test)]
 pub(crate) use session::reported_sessions;
 
-use lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
+use crate::lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
 
 /// The narrowest the sidebar can be dragged.
 const MIN_SIDEBAR_WIDTH: Pixels = px(300.);
@@ -227,7 +227,7 @@ pub struct Workspace {
 fn take_and_remove(
     job: &Mutex<Option<(Worktree, PathBuf)>>,
 ) -> Option<anyhow::Result<worktree::Removal>> {
-    lifecycle::take_and_remove(job, worktree::remove)
+    crate::lifecycle::take_and_remove(job, worktree::remove)
 }
 
 /// What dragging the sidebar's edge carries, and draws: nothing, since the
@@ -434,15 +434,8 @@ impl Chat {
     }
 }
 
-
-
-
-
-
 const SHORTCUTS_WORK_ANYWHERE: &str = "They work while an agent has the keyboard, so they use \
                                         keys terminal programs leave alone.";
-
-
 
 #[cfg(test)]
 mod tests;

@@ -5,7 +5,6 @@
 //! connection of its own, and each sees every write asked for before it.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -17,17 +16,12 @@ use anyhow::Context as _;
 use smol::channel::{self, Sender};
 
 pub use self::db::{
-    Chat, Hit, Imported, Item, PendingImport, Project, Session, Transcript, now, path,
+    Chat, Db, Hit, Imported, Item, PendingImport, Project, Session, now, open_locked, path,
     prepare_import,
 };
-// Only tests reach the database other than through the store.
-#[cfg(not(test))]
-use self::db::Db;
-#[cfg(test)]
-pub use self::db::Db;
 use crate::agent::Agent;
-use crate::settings::Settings;
 use crate::transcript;
+pub use crate::transcript::Transcript;
 use crate::worktree::Worktree;
 
 mod db;
@@ -39,59 +33,6 @@ pub struct Recorded {
     /// and what says, once it is read, whether its history shows anything
     /// new.
     pub left: Option<(i64, channel::Receiver<anyhow::Result<bool>>)>,
-}
-
-/// The database as startup opened it.
-pub struct Opened {
-    pub store: Store,
-    /// Keeps a second Agents Hub off the database while it is held.
-    pub lock: Option<fs::File>,
-    pub imported: Option<Imported>,
-    pub settings: Settings,
-    pub projects: Vec<Project>,
-    /// Why the database can't be used, in which case an empty one in memory
-    /// stands in for it.
-    pub broken: Option<String>,
-}
-
-/// Opens the database where it lives, with the settings saved in it. Taking
-/// the lock, finishing an import and migrating, which first backs the
-/// database up, can each take a while, so they run on a thread of their own.
-pub async fn open() -> Opened {
-    let (store, lock, imported, broken) = smol::unblock(|| {
-        let opened = db::open_locked().and_then(|(db, lock, imported)| {
-            let store = Store::new(db).context("Couldn't read the database")?;
-            Ok((store, lock, imported))
-        });
-        match opened {
-            Ok((store, lock, imported)) => (store, Some(lock), imported, None),
-            Err(err) => {
-                eprintln!("{err:#}");
-                let db = Db::open_in_memory().expect("SQLite opens in memory");
-                let store = Store::new(db).expect("the database's threads start");
-                (store, None, None, Some(format!("{err:#}")))
-            }
-        }
-    })
-    .await;
-    let settings = store
-        .settings()
-        .await
-        .inspect_err(|err| eprintln!("can't read the settings: {err:#}"))
-        .unwrap_or_default();
-    let projects = store
-        .projects()
-        .await
-        .inspect_err(|err| eprintln!("can't list the projects: {err:#}"))
-        .unwrap_or_default();
-    Opened {
-        store,
-        lock,
-        imported,
-        settings,
-        projects,
-        broken,
-    }
 }
 
 /// A change the user makes to the projects or chats, which shows before it
@@ -290,9 +231,12 @@ impl Store {
         })
     }
 
-    /// The saved settings. One that can't be read has its default.
-    pub fn settings(&self) -> impl Future<Output = anyhow::Result<Settings>> + use<> {
-        self.read(|db| Ok(Settings::load(&db.settings()?)))
+    /// The saved settings, as the database holds them. The binary turns them
+    /// into `Settings`, so the store doesn't depend on the UI's model.
+    pub fn settings(
+        &self,
+    ) -> impl Future<Output = anyhow::Result<HashMap<String, rusqlite::types::Value>>> + use<> {
+        self.read(|db| Ok(db.settings()?))
     }
 
     /// The projects, in the order the user put them in, with their chats.
