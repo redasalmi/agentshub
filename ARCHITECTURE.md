@@ -6,25 +6,26 @@ enforced by the Cargo workspace (see `Cargo.toml`) and by
 
 ```
 bin ──▶ app ──▶ core
- │       ▲
+ │       ├────▶ platform
  ├─────▶ ui ─────┘
- │
  └─────▶ platform
 ```
 
 - **core** — domain and backend. No `gpui_kit`, `Window`, `Entity`, `Context`
   or `App`. It owns the database, migrations, transcripts, sessions, reports,
   worktrees, CLI process control and the chat lifecycle state machine.
-- **app** — use cases and async orchestration. It owns the catalog, settings,
-  persistence of settings and startup. It may use GPUI entities and window
-  handles for dialogs, but never builds element trees.
+- **app** — use cases and async orchestration. It owns the catalog, alert
+  policy and sound, settings, persistence of settings and startup. It uses
+  the platform notification transport and takes a callback for what a click
+  should open. It may use GPUI entities and window handles for dialogs, but
+  never builds element trees.
 - **ui** — rendering only. It owns the theme, sidebar, search palette and
   history view; the chat, settings and terminal views still live in the
   binary. Views read app state and emit intents. No `Store`, `rusqlite`,
   `std::fs` or `std::process`.
 - **platform** — Linux adapters: tray, D-Bus notifications, systemd scope,
-  desktop motion, single instance and SIGTERM. It calls back into the binary
-  for window and workspace actions instead of naming them.
+  desktop motion, single instance and SIGTERM. It calls back into the app or
+  binary for window and workspace actions instead of naming them.
 - **bin** — composition root: starts the app, opens the window, wires the
   layers, and still hosts the workspace controller and the remaining views
   while they move to `app` and `ui`.
@@ -53,11 +54,11 @@ bin ──▶ app ──▶ core
 
 ## Remaining migration
 
-`workspace`, `chat_view`, `settings_view`, `terminal`, `terminal_view`,
-`alerts` and `window` are still in the binary. Moving the views needs the
-snapshot and intent boundary that rule 2 describes: views read a snapshot and
-emit intents, and the workspace applies them. The terminal also needs its
-systemd scope injected before it can move out of the binary.
+`workspace`, `chat_view`, `settings_view`, `terminal`, `terminal_view` and
+`window` are still in the binary. Moving the views needs the snapshot and
+intent boundary that rule 2 describes: views read a snapshot and emit intents,
+and the workspace applies them. The terminal also needs its systemd scope
+injected before it can move out of the binary.
 
 ## Verification
 
