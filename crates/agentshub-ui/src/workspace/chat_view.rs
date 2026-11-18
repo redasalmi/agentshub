@@ -1,7 +1,7 @@
 //! The chat sheet's remaining chrome: toolbar, footer and empty state.
 
-use agentshub_ui::chat::{ChatIntent, ChatSheet};
-use agentshub_ui::settings::SHORTCUTS_WORK_ANYWHERE;
+use crate::chat::{ChatIntent, ChatSheet};
+use crate::settings::SHORTCUTS_WORK_ANYWHERE;
 
 use super::render::render_shortcuts;
 use super::*;
@@ -24,12 +24,10 @@ impl Workspace {
             .unwrap_or_else(|| ("New chat".into(), false));
         let history = chat.pane.history.read(cx);
         let (earlier, history_open) = (history.count(), history.is_open());
-        let shell = self
-            .shown_shell(cx)
-            .map(|(cwd, shell)| agentshub_ui::chat::Shell {
-                cwd,
-                view: shell.view.clone(),
-            });
+        let shell = self.shown_shell(cx).map(|(cwd, shell)| crate::chat::Shell {
+            cwd,
+            view: shell.view.clone(),
+        });
         let on = {
             let this = cx.weak_entity();
             let id = chat.id;
@@ -85,12 +83,10 @@ impl Workspace {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let shell = self
-            .shown_shell(cx)
-            .map(|(cwd, shell)| agentshub_ui::chat::Shell {
-                cwd,
-                view: shell.view.clone(),
-            });
+        let shell = self.shown_shell(cx).map(|(cwd, shell)| crate::chat::Shell {
+            cwd,
+            view: shell.view.clone(),
+        });
         let on = {
             let this = cx.weak_entity();
             Rc::new(
@@ -109,7 +105,7 @@ impl Workspace {
                 }
             })
         };
-        agentshub_ui::chat::over_shell(
+        crate::chat::over_shell(
             above,
             px(0.),
             shell,
@@ -155,16 +151,14 @@ impl Workspace {
         let on = {
             let this = cx.weak_entity();
             Rc::new(
-                move |intent: agentshub_ui::chat::ToolbarIntent,
-                      window: &mut Window,
-                      cx: &mut App| {
+                move |intent: crate::chat::ToolbarIntent, window: &mut Window, cx: &mut App| {
                     if let Some(this) = this.upgrade() {
                         this.update(cx, |this, cx| this.toolbar_intent(intent, window, cx));
                     }
                 },
             )
         };
-        agentshub_ui::chat::Toolbar {
+        crate::chat::Toolbar {
             width,
             running,
             menu: self.running_menu.clone(),
@@ -175,13 +169,13 @@ impl Workspace {
 
     fn toolbar_intent(
         &mut self,
-        intent: agentshub_ui::chat::ToolbarIntent,
+        intent: crate::chat::ToolbarIntent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match intent {
-            agentshub_ui::chat::ToolbarIntent::OpenPalette => self.open_palette(false, window, cx),
-            agentshub_ui::chat::ToolbarIntent::RunningMenu(open) => {
+            crate::chat::ToolbarIntent::OpenPalette => self.open_palette(false, window, cx),
+            crate::chat::ToolbarIntent::RunningMenu(open) => {
                 if open {
                     self.open_running_menu(window, cx);
                     if let Some(menu) = &self.running_menu {
@@ -192,7 +186,7 @@ impl Workspace {
                     cx.notify();
                 }
             }
-            agentshub_ui::chat::ToolbarIntent::CloseWindow => {
+            crate::chat::ToolbarIntent::CloseWindow => {
                 crate::tray::remember_bounds(window.window_bounds(), cx);
                 window.remove_window();
             }
@@ -208,7 +202,7 @@ impl Workspace {
         let sidebar = self.sidebar.read(cx);
         let summary = sidebar.summary();
         let needing = sidebar.next_needing_you(None).is_some();
-        agentshub_ui::chat::Footer {
+        crate::chat::Footer {
             summary: &summary,
             needing,
             width,
@@ -306,7 +300,7 @@ impl Workspace {
                 .take(RECENT_CHATS)
                 .map(|(project, chat)| {
                     let tone = Tone::of(sidebar.running(chat.id));
-                    agentshub_ui::chat::Recent {
+                    crate::chat::Recent {
                         id: chat.id,
                         title: chat.title.clone().unwrap_or_else(|| "New chat".into()),
                         about: sidebar::subtitle(chat, tone, Some(&project.name)),
@@ -318,16 +312,14 @@ impl Workspace {
         let on = {
             let this = cx.weak_entity();
             Rc::new(
-                move |intent: agentshub_ui::chat::EmptyIntent,
-                      window: &mut Window,
-                      cx: &mut App| {
+                move |intent: crate::chat::EmptyIntent, window: &mut Window, cx: &mut App| {
                     if let Some(this) = this.upgrade() {
                         this.update(cx, |this, cx| this.empty_intent(intent, window, cx));
                     }
                 },
             )
         };
-        agentshub_ui::chat::EmptyState {
+        crate::chat::EmptyState {
             selected,
             agents,
             recent,
@@ -338,17 +330,17 @@ impl Workspace {
 
     fn empty_intent(
         &mut self,
-        intent: agentshub_ui::chat::EmptyIntent,
+        intent: crate::chat::EmptyIntent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match intent {
-            agentshub_ui::chat::EmptyIntent::StartAgent(project, agent) => {
+            crate::chat::EmptyIntent::StartAgent(project, agent) => {
                 self.start_agent(project, agent, window, cx)
             }
-            agentshub_ui::chat::EmptyIntent::NewChat => self.new_chat_here(&NewChat, window, cx),
-            agentshub_ui::chat::EmptyIntent::AddProject => self.add_project(window, cx),
-            agentshub_ui::chat::EmptyIntent::OpenChat(id) => self.open_chat(id, window, cx),
+            crate::chat::EmptyIntent::NewChat => self.new_chat_here(&NewChat, window, cx),
+            crate::chat::EmptyIntent::AddProject => self.add_project(window, cx),
+            crate::chat::EmptyIntent::OpenChat(id) => self.open_chat(id, window, cx),
         }
     }
 }

@@ -117,20 +117,7 @@ dependencies = [
  "agentshub-core",
  "agentshub-platform",
  "agentshub-ui",
- "anyhow",
  "gpui-kit",
- "jiff",
- "libc",
- "libghostty-vt",
- "notify",
- "portable-pty",
- "rodio",
- "rusqlite",
- "serde_json",
- "smol",
- "unicode-segmentation",
- "uuid",
- "zbus 5.19.0",
 ]
 
 [[package]]
@@ -183,14 +170,22 @@ version = "0.15.0"
 dependencies = [
  "agentshub-app",
  "agentshub-core",
+ "agentshub-platform",
  "anyhow",
  "gpui-kit",
  "jiff",
+ "ksni",
  "libghostty-vt",
+ "notify",
  "portable-pty",
+ "raw-window-handle",
  "serde_json",
  "smol",
  "unicode-segmentation",
+ "uuid",
+ "wayland-client",
+ "wayland-protocols",
+ "zbus 5.19.0",
 ]
 
 [[package]]

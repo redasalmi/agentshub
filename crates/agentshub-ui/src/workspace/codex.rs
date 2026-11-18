@@ -6,8 +6,8 @@ use std::time::Duration;
 use gpui_kit::*;
 use notify::{RecursiveMode, Watcher as _};
 
-use crate::agent::Agent;
-use crate::sessions;
+use agentshub_core::agent::Agent;
+use agentshub_core::sessions;
 
 use super::Workspace;
 

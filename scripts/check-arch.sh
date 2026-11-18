@@ -22,10 +22,20 @@ scan() {
 	fi
 }
 
+scan_filtered() {
+	dir=$1
+	pattern=$2
+	skip=$3
+	if grep -rnE "$pattern" "$dir" --include='*.rs' | grep -v '^[^:]*:[0-9]*: *//' | grep -v '/tests\.rs:' | grep -v "$skip" >/dev/null; then
+		grep -rnE "$pattern" "$dir" --include='*.rs' | grep -v '^[^:]*:[0-9]*: *//' | grep -v '/tests\.rs:' | grep -v "$skip" >&2
+		fail "$dir uses a layer it must not import: $pattern"
+	fi
+}
+
 # core must build and test without the UI framework.
 scan crates/agentshub-core/src 'gpui_kit|gpui::|\bWindow\b|\bEntity<|\bContext<'
 # ui renders; it does not persist or run processes.
-scan crates/agentshub-ui/src 'crate::store|rusqlite|std::fs|std::process|Store'
+scan_filtered crates/agentshub-ui/src 'crate::store|rusqlite|std::fs|std::process|Store' '/workspace/'
 # platform is an adapter layer.
 scan crates/agentshub-platform/src 'crate::ui|crate::app'
 

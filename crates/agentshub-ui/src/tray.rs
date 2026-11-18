@@ -4,8 +4,8 @@ use gpui_kit::*;
 
 use agentshub_platform::tray as platform;
 
-use crate::settings::Settings;
 use crate::workspace::Workspace;
+use agentshub_app::settings::Settings;
 
 pub use agentshub_platform::tray::remember_bounds;
 
@@ -18,7 +18,11 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
         platform::Hooks {
             show: Box::new(move |_token, cx| {
                 let bounds = platform::bounds(cx);
-                crate::open_window(crate::Contents::Workspace(open.clone()), bounds, cx);
+                crate::window::open_window(
+                    crate::window::Contents::Workspace(open.clone()),
+                    bounds,
+                    cx,
+                );
             }),
             show_settings: Box::new(move |cx| {
                 let Some(window) = cx.windows().first().copied() else {

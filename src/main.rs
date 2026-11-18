@@ -1,12 +1,4 @@
 mod alerts;
-mod appearance;
-mod palette;
-mod sidebar;
-mod terminal;
-mod terminal_view;
-mod tray;
-mod window;
-mod workspace;
 
 pub use agentshub_app::{bootstrap, settings};
 pub use agentshub_core::{
@@ -15,7 +7,7 @@ pub use agentshub_core::{
 #[cfg(target_os = "linux")]
 pub use agentshub_platform::scope;
 pub use agentshub_platform::{instance, motion, sigterm};
-pub use agentshub_ui::history;
+pub use agentshub_ui::{appearance, history, tray, window, workspace};
 pub use window::{Contents, open_window};
 
 use std::borrow::Cow;
@@ -74,7 +66,7 @@ fn main() {
     });
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
-        terminal_view::init(cx);
+        agentshub_ui::terminal_view::init(cx);
         workspace::init(cx);
         // The tray decides whether closing the window quits.
         cx.set_quit_mode(QuitMode::Explicit);

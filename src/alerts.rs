@@ -4,8 +4,6 @@ use std::rc::Rc;
 
 use gpui_kit::*;
 
-pub use agentshub_app::alerts::*;
-
 use crate::workspace::Workspace;
 
 pub fn init(workspace: &Entity<Workspace>, cx: &mut App) {

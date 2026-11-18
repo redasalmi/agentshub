@@ -2,16 +2,16 @@
 
 use gpui_kit::*;
 
-use crate::settings::ThemeFamily;
 use crate::sidebar::NUMBERED;
+use agentshub_app::settings::ThemeFamily;
 
-pub use crate::sidebar::NewChat;
-pub use agentshub_ui::chat::ToggleShell;
-pub use agentshub_ui::chat::{
+pub use crate::chat::ToggleShell;
+pub use crate::chat::{
     ArchiveChat, DeleteChat, NextNeedingYou, OpenSearch, RenameChat, ShowRunning, ToggleHistory,
     TogglePin,
 };
-pub use agentshub_ui::settings::{ShowShortcuts, ToggleSettings};
+pub use crate::settings::{ShowShortcuts, ToggleSettings};
+pub use crate::sidebar::NewChat;
 
 actions!(
     workspace,

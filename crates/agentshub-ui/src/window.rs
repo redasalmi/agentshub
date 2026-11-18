@@ -3,9 +3,9 @@
 use gpui_kit::*;
 
 use crate::appearance;
-use crate::bootstrap;
 use crate::tray;
 use crate::workspace::Workspace;
+use agentshub_app::bootstrap;
 
 /// What a window opens on.
 pub enum Contents {

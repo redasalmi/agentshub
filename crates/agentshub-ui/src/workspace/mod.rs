@@ -22,30 +22,30 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use notify::RecursiveMode;
 
-use crate::agent::Agent;
-use crate::alerts::{self, Alert};
 use crate::appearance;
-use crate::bootstrap::Opened;
 use crate::history::History;
 use crate::palette::{self, Entry, Lead, Pick};
-use crate::reports::{self, Reports};
-#[cfg(target_os = "linux")]
-use crate::scope;
-use crate::sessions;
-use crate::settings::{
-    Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, DEFAULT_TERMINAL_FONT_SIZE, Motion,
-    Settings, ThemeFamily,
-};
+use crate::settings::{SettingsIntent, SettingsView};
 use crate::sidebar::{
     self, Held, MAX_SIDEBAR_WIDTH, MIN_MAIN_WIDTH, MIN_SIDEBAR_WIDTH, Sidebar, SidebarEvent, Tone,
     home_relative, rail_room,
 };
-use crate::status::Status;
-use crate::store::{self, Change, Store};
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::{self, TerminalView};
-use crate::worktree::{self, Worktree};
-use agentshub_ui::settings::{SettingsIntent, SettingsView};
+use agentshub_app::alerts::{self, Alert};
+use agentshub_app::bootstrap::Opened;
+use agentshub_app::settings::{
+    Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, DEFAULT_TERMINAL_FONT_SIZE, Motion,
+    Settings, ThemeFamily,
+};
+use agentshub_core::agent::Agent;
+use agentshub_core::reports::{self, Reports};
+use agentshub_core::sessions;
+use agentshub_core::status::Status;
+use agentshub_core::store::{self, Change, Store};
+use agentshub_core::worktree::{self, Worktree};
+#[cfg(target_os = "linux")]
+use agentshub_platform::scope;
 
 mod actions;
 mod catalog;
@@ -80,7 +80,7 @@ pub(crate) use session::import_chat;
 #[cfg(test)]
 pub(crate) use session::reported_sessions;
 
-use crate::lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
+use agentshub_core::lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
 
 /// How many of the chats last worked in show while no chat is open.
 const RECENT_CHATS: usize = 5;
@@ -189,7 +189,7 @@ pub struct Workspace {
 fn take_and_remove(
     job: &Mutex<Option<(Worktree, PathBuf)>>,
 ) -> Option<anyhow::Result<worktree::Removal>> {
-    crate::lifecycle::take_and_remove(job, worktree::remove)
+    agentshub_core::lifecycle::take_and_remove(job, worktree::remove)
 }
 
 /// What dragging the sidebar's edge carries, and draws: nothing, since the

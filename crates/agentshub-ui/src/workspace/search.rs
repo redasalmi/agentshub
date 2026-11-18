@@ -8,10 +8,10 @@ use gpui_kit::component::{ActiveTheme as _, IconName};
 use gpui_kit::*;
 
 use crate::palette::{self, Entry, Lead, Pick};
-use crate::settings::{DEFAULT_TERMINAL_FONT_SIZE, Settings, ThemeFamily};
 use crate::sidebar::Filter;
-use crate::store::Change;
 use crate::terminal_view;
+use agentshub_app::settings::{DEFAULT_TERMINAL_FONT_SIZE, Settings, ThemeFamily};
+use agentshub_core::store::Change;
 
 use super::palette_model::PaletteLists;
 use super::{

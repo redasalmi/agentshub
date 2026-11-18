@@ -1,11 +1,11 @@
 //! Tests for the workspace's shared helpers and shutdown import.
 
 use super::{Turn, duration, import_chat, reported_sessions, take_and_remove};
-use crate::lifecycle::Lifecycle;
-use crate::store::{Db, Store};
-use crate::worktree::{Removal, Worktree};
-use crate::{agent::Agent, reports::Reports, transcript};
-use agentshub_ui::chat::{MAX_SHELL_SHARE, MIN_SHELL_HEIGHT, shell_height, shell_share};
+use crate::chat::{MAX_SHELL_SHARE, MIN_SHELL_HEIGHT, shell_height, shell_share};
+use agentshub_core::lifecycle::Lifecycle;
+use agentshub_core::store::{Db, Store};
+use agentshub_core::worktree::{Removal, Worktree};
+use agentshub_core::{agent::Agent, reports::Reports, transcript};
 use gpui_kit::px;
 use serde_json::json;
 use std::fs;
