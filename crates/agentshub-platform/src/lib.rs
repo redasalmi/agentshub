@@ -1,4 +1,5 @@
-//! Linux adapters for the app: the session bus and clean quitting.
+//! Linux adapters for the app: the tray, systemd scopes, the desktop's motion
+//! preference, the session bus and clean quitting.
 
 pub mod instance;
 pub mod motion;

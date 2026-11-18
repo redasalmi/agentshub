@@ -9,22 +9,24 @@ bin ──▶ app ──▶ core
  │       │
  ├─────▶ ui ────▶ core
  │
- └─────▶ platform ──▶ core
+ └─────▶ platform
 ```
 
 - **core** — domain and backend. No `gpui_kit`, `Window`, `Entity`, `Context`
   or `App`. It owns the database, migrations, transcripts, sessions, reports,
-  worktrees, settings model and the chat lifecycle state machine.
-- **app** — use cases and async orchestration. It owns the catalog (projects
-  and chats), open chat runtime, status, notifications policy and settings.
-  It may use GPUI entities and window handles for dialogs, but never builds
-  element trees.
-- **ui** — rendering only. Views read snapshots and emit intents. No `Store`,
+  worktrees, CLI process control and the chat lifecycle state machine.
+- **app** — use cases and async orchestration. It currently owns the catalog,
+  settings, persistence of settings and startup. It may use GPUI entities and
+  window handles for dialogs, but never builds element trees.
+- **ui** — rendering only. It currently owns the history view; the other views
+  still live in the binary. Views read snapshots and emit intents. No `Store`,
   `rusqlite`, `std::fs` or `std::process`.
-- **platform** — Linux adapters: tray, D-Bus notifications, single instance,
-  systemd scope, desktop motion.
+- **platform** — Linux adapters: tray, systemd scope, desktop motion, single
+  instance and SIGTERM. It calls back into the binary for window and workspace
+  actions instead of naming them.
 - **bin** — composition root: starts the app, opens the window, wires the
-  layers.
+  layers, and still hosts the workspace controller and most views while they
+  move to `app` and `ui`.
 
 ## Where things belong
 
@@ -32,8 +34,8 @@ bin ──▶ app ──▶ core
 | --- | --- |
 | SQL, migration, query | `core::store` |
 | Transcript parser or CLI session discovery | `core::transcript`, `core::sessions` |
-| Git worktree or process control | `core::worktree`, `core::pty` |
-| State machine for open/stop/delete races | `core::chat::lifecycle` |
+| Git worktree or process control | `core::worktree`, `core::process` |
+| State machine for open/stop/delete races | `core::lifecycle` |
 | Use case that touches the database and the UI | `app` |
 | Button, row, pane, dialog | `ui` |
 | Tray, D-Bus, systemd | `platform` |
@@ -47,6 +49,14 @@ bin ──▶ app ──▶ core
    them (see `core::store`).
 5. The database schema and migration order are append-only.
 6. Refactors do not change user-visible behavior, strings, shortcuts or UI.
+
+## Remaining migration
+
+`workspace`, `sidebar`, `terminal`, `terminal_view`, `alerts`, `palette`,
+`appearance` and `window` are still in the binary. Moving them needs the
+snapshot and intent boundary that rule 2 describes: views read a snapshot and
+emit intents, and the workspace applies them. Until then the binary may use
+`core`, `app` and `ui` directly; the crates themselves stay bounded.
 
 ## Verification
 
