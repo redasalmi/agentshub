@@ -19,7 +19,7 @@ default_dir() {
 }
 recorded() {
 	[ "$(sql "SELECT COUNT(*) FROM sessions
-		WHERE agent = '$1' AND COALESCE(cli_id, agent_id) = '$2'")" = 1 ]
+		WHERE agent = '$1' AND agent_id = '$2'")" = 1 ]
 }
 saved() { [ "$(sql "SELECT value FROM settings WHERE key = '$1_config_dir'")" = "$HOME/$1-work" ]; }
 started() { [ "$(cli_count "$1")" -ge "$2" ]; }
