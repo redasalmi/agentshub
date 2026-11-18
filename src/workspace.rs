@@ -655,8 +655,6 @@ impl Workspace {
 
 
 
-
-
     /// Lists the projects and chats again, and the earlier sessions of the
     /// chats whose CLI runs.
     fn refresh(&mut self, cx: &mut Context<Self>) {
