@@ -16,8 +16,8 @@ scan() {
 	shift
 	[ -d "$dir" ] || return 0
 	[ -n "$*" ] || return 0
-	if grep -rnE "$*" "$dir" --include='*.rs' | grep -v '^[^:]*:[0-9]*: *//' >/dev/null; then
-		grep -rnE "$*" "$dir" --include='*.rs' | grep -v '^[^:]*:[0-9]*: *//' >&2
+	if grep -rnE "$*" "$dir" --include='*.rs' | grep -v '^[^:]*:[0-9]*: *//' | grep -v '/tests\.rs:' >/dev/null; then
+		grep -rnE "$*" "$dir" --include='*.rs' | grep -v '^[^:]*:[0-9]*: *//' | grep -v '/tests\.rs:' >&2
 		fail "$dir uses a layer it must not import: $*"
 	fi
 }

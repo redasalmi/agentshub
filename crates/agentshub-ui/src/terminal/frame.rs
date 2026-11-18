@@ -54,7 +54,7 @@ pub struct GridSize {
     pub cell_height: f32,
 }
 
-pub use agentshub_ui::theme::Colors;
+pub use crate::theme::Colors;
 
 pub(super) fn set_colors(terminal: &mut VtTerminal<'_, '_>, colors: Colors) -> Result<()> {
     let mut palette = terminal.default_color_palette()?;

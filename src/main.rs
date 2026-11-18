@@ -64,6 +64,14 @@ fn main() {
     if instance.owns_name() {
         std::thread::spawn(scope::stop_leftovers);
     }
+    #[cfg(target_os = "linux")]
+    agentshub_ui::terminal::set_scope(agentshub_ui::terminal::Scope {
+        pidfd: scope::pidfd,
+        watch: scope::watch,
+        available: scope::available,
+        stop_all: scope::stop_all,
+        wait_stopped: scope::wait_stopped,
+    });
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
         terminal_view::init(cx);
