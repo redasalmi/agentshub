@@ -53,7 +53,7 @@ mod catalog;
 mod chat_view;
 mod chats;
 
-use catalog::Catalog;
+use agentshub_app::catalog::Catalog;
 mod codex;
 mod commands;
 mod dialogs;
