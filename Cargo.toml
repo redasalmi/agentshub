@@ -5,11 +5,12 @@ edition = "2024"
 rust-version = "1.91"
 
 [workspace]
-members = ["crates/agentshub-core"]
+members = ["crates/agentshub-core", "crates/agentshub-platform"]
 resolver = "3"
 
 [dependencies]
 agentshub-core = { path = "crates/agentshub-core" }
+agentshub-platform = { path = "crates/agentshub-platform" }
 anyhow = "1"
 gpui-kit = "0.8.0"
 jiff = "0.2.38"

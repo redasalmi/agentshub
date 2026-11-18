@@ -97,7 +97,7 @@ fn activate_owner() -> zbus::Result<()> {
 
 /// Shows the window each time a later launch asks for it, including those
 /// that asked while the app was starting.
-pub fn serve(instance: Instance, cx: &mut App) {
+pub fn serve(instance: Instance, cx: &mut App, show: impl Fn(Option<String>, &mut App) + 'static) {
     cx.spawn(async move |cx| {
         // Taken whole, so the task keeps the connection, and with it the
         // name, for as long as the app runs.
@@ -106,7 +106,7 @@ pub fn serve(instance: Instance, cx: &mut App) {
             shown,
         } = instance;
         while let Ok(token) = shown.recv().await {
-            cx.update(|cx| crate::tray::show(token, cx));
+            cx.update(|cx| show(token, cx));
         }
     })
     .detach();

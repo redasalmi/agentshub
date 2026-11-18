@@ -114,6 +114,7 @@ name = "agentshub"
 version = "0.15.0"
 dependencies = [
  "agentshub-core",
+ "agentshub-platform",
  "anyhow",
  "gpui-kit",
  "jiff",
@@ -146,6 +147,16 @@ dependencies = [
  "serde_json",
  "smol",
  "uuid",
+ "zbus 5.19.0",
+]
+
+[[package]]
+name = "agentshub-platform"
+version = "0.15.0"
+dependencies = [
+ "gpui-kit",
+ "libc",
+ "smol",
  "zbus 5.19.0",
 ]
 

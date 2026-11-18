@@ -2,11 +2,9 @@ mod alerts;
 mod appearance;
 mod bootstrap;
 mod history;
-mod instance;
 mod palette;
 mod settings;
 mod sidebar;
-mod sigterm;
 mod terminal;
 mod terminal_view;
 mod tray;
@@ -18,6 +16,7 @@ pub use agentshub_core::scope;
 pub use agentshub_core::{
     agent, lifecycle, process, reports, sessions, status, store, transcript, worktree,
 };
+pub use agentshub_platform::{instance, sigterm};
 pub use window::{Contents, open_window};
 
 use std::borrow::Cow;
@@ -81,7 +80,7 @@ fn main() {
                 alerts::init(&workspace, cx);
                 appearance::watch_desktop_motion(cx);
                 tray::init(workspace, cx);
-                instance::serve(instance, cx);
+                instance::serve(instance, cx, tray::show);
             });
         })
         .detach();
