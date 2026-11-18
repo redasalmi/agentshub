@@ -7,12 +7,11 @@
 //! a notification too, and the same on desktops whose server plays none.
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
-use smol::stream::StreamExt as _;
-use zbus::zvariant::Value;
+
+use agentshub_platform::notifications::{self as dbus, Bus, DEFAULT_ACTION, Event, Note, Signal};
 
 use crate::agent::Agent;
 use crate::settings::Settings;
@@ -21,20 +20,7 @@ use crate::store::Item;
 use crate::transcript::Kind;
 use crate::workspace::{self, Workspace};
 
-mod dbus;
 mod sound;
-
-#[cfg(test)]
-use dbus::escape;
-use dbus::{capabilities, close, listen, notify, notify_args};
-
-const BUS_NAME: &str = "org.freedesktop.Notifications";
-const OBJECT_PATH: &str = "/org/freedesktop/Notifications";
-/// The bus itself, which says when the notification server changes.
-const DBUS: &str = "org.freedesktop.DBus";
-const DBUS_PATH: &str = "/org/freedesktop/DBus";
-/// The action invoked by clicking a notification's body.
-const DEFAULT_ACTION: &str = "default";
 
 /// Sounds closer together than this play once, so agents finishing together
 /// don't make a racket.
@@ -75,58 +61,6 @@ impl Alert {
 struct Click {
     chat: i64,
     token: Option<String>,
-}
-
-#[derive(Debug)]
-enum Signal {
-    ActionInvoked(u32, String),
-    ActivationToken(u32, String),
-    Closed(u32),
-}
-
-impl Signal {
-    /// The notification it's about.
-    fn id(&self) -> u32 {
-        match *self {
-            Self::ActionInvoked(id, _) | Self::ActivationToken(id, _) | Self::Closed(id) => id,
-        }
-    }
-}
-
-/// What the connection to the notification server brings in, in the order
-/// it came: a reply and the signals that follow it about the notification
-/// it names must be seen to in that order, as must a change of server and
-/// what each server says.
-#[derive(Debug)]
-enum Event {
-    /// The server has changed: the unique name of the one there now, if any.
-    Owner(Option<String>),
-    /// A signal from the server there now.
-    Signal(Signal),
-    /// The reply to the call with this serial: the id of the notification
-    /// it showed, or why it showed none. A notification shown by a server
-    /// that has since gone counts as none.
-    Reply {
-        serial: NonZeroU32,
-        id: Result<u32, String>,
-    },
-}
-
-/// The connection to the notification server. Notifications are sent on the
-/// same connection their signals come in on: servers may send a click only
-/// to the connection that sent the notification.
-#[derive(Clone)]
-struct Bus {
-    connection: zbus::Connection,
-}
-
-/// What a notification says. The body is plain text.
-#[derive(Debug, PartialEq, Eq)]
-struct Note {
-    summary: String,
-    body: String,
-    /// Whether it stays on screen until the user sees to it.
-    urgent: bool,
 }
 
 /// Where a chat's notification is at.
@@ -347,9 +281,6 @@ struct Alerts {
     /// The connection to the server, once it's open.
     bus: Option<Bus>,
     tracker: Tracker,
-    /// The ticket of each notification whose reply hasn't come, by the
-    /// serial of its call.
-    calls: HashMap<NonZeroU32, u64>,
     last_sound: Option<Instant>,
 }
 
@@ -360,13 +291,12 @@ pub fn init(workspace: &Entity<Workspace>, cx: &mut App) {
         workspace: workspace.downgrade(),
         bus: None,
         tracker: Tracker::default(),
-        calls: HashMap::new(),
         last_sound: None,
     });
 
     let (events, received) = smol::channel::unbounded();
     cx.spawn(async move |cx| {
-        let (bus, owner) = match cx.background_spawn(listen(events)).await {
+        let (bus, owner) = match cx.background_spawn(dbus::listen(events)).await {
             Ok(it) => it,
             Err(err) => {
                 eprintln!("can't listen to the notification server: {err}");
@@ -545,20 +475,7 @@ pub fn test(cx: &mut App) {
             urgent: false,
         };
         cx.background_spawn(async move {
-            let shown = async {
-                let (server, markup) = capabilities(&bus.connection, BUS_NAME).await?;
-                let args = notify_args(note, 0, false, markup);
-                bus.connection
-                    .call_method(
-                        Some(server.as_str()),
-                        OBJECT_PATH,
-                        Some(BUS_NAME),
-                        "Notify",
-                        &args,
-                    )
-                    .await
-            };
-            if let Err(err) = shown.await {
+            if let Err(err) = dbus::test(&bus, note).await {
                 eprintln!("can't show a notification: {err}");
             }
         })
@@ -585,10 +502,6 @@ fn receive(event: Event, cx: &mut App) {
             None
         }
         Event::Signal(signal) => alerts.tracker.signal(signal),
-        Event::Reply { serial, id } => alerts
-            .calls
-            .remove(&serial)
-            .and_then(|ticket| alerts.tracker.replied(ticket, id)),
     };
     run(effect, cx);
 }
@@ -608,42 +521,55 @@ fn run(effect: Option<Effect>, cx: &mut App) {
 }
 
 /// Sends `note` to the server, in place of notification `replaces` unless
-/// it's 0. Its reply comes in with the server's other messages.
+/// it's 0.
 fn send(ticket: u64, note: Note, replaces: u32, cx: &mut App) {
-    let alerts = cx.global_mut::<Alerts>();
     // An id means something only to the server that gave it, so a
     // replacement goes to that server alone. A new one goes to whichever
     // server there is, which the bus starts if need be.
-    let destination = if replaces == 0 {
-        Some(BUS_NAME.to_owned())
-    } else {
-        alerts.tracker.owner.clone()
-    };
-    let (Some(bus), Some(destination)) = (alerts.bus.clone(), destination) else {
-        let effect = alerts
-            .tracker
-            .replied(ticket, Err("no notification server".into()));
-        run(effect, cx);
+    let Some(bus) = cx.global::<Alerts>().bus.clone() else {
+        failed(ticket, "no notification server", cx);
         return;
     };
-    // Whether the body is escaped depends on the server, which may not be
-    // the one there was when the last notification was sent, so it's asked
-    // each time, and the notification goes to the server that answered.
+    let destination = if replaces == 0 {
+        None
+    } else {
+        let Some(owner) = cx.global::<Alerts>().tracker.owner.clone() else {
+            failed(ticket, "no notification server", cx);
+            return;
+        };
+        Some(owner)
+    };
     cx.spawn(async move |cx| {
-        let connection = bus.connection.clone();
-        let asked = cx
-            .background_spawn(async move { capabilities(&connection, &destination).await })
+        let sent = cx
+            .background_spawn(async move {
+                dbus::send(&bus, destination.as_deref(), note, replaces).await
+            })
             .await;
-        cx.update(|cx| match asked {
-            Ok((server, markup)) => notify(ticket, note, replaces, &bus, &server, markup, cx),
-            Err(err) => {
-                let effect = cx
-                    .global_mut::<Alerts>()
-                    .tracker
-                    .replied(ticket, Err(err.to_string()));
-                run(effect, cx);
-            }
+        cx.update(|cx| {
+            let effect = cx.global_mut::<Alerts>().tracker.replied(ticket, sent);
+            run(effect, cx);
         });
+    })
+    .detach();
+}
+
+/// Tells the tracker that the notification with `ticket` couldn't be sent.
+fn failed(ticket: u64, error: &str, cx: &mut App) {
+    let effect = cx
+        .global_mut::<Alerts>()
+        .tracker
+        .replied(ticket, Err(error.into()));
+    run(effect, cx);
+}
+
+/// Takes notification `id` off the screen of the server that showed it.
+fn close(id: u32, cx: &mut App) {
+    let alerts = cx.global::<Alerts>();
+    let (Some(bus), Some(owner)) = (alerts.bus.clone(), alerts.tracker.owner.clone()) else {
+        return;
+    };
+    cx.background_spawn(async move {
+        dbus::close(&bus, &owner, id).await;
     })
     .detach();
 }
@@ -672,7 +598,7 @@ mod tests {
     use serde_json::json;
 
     use super::sound::chime;
-    use super::{Alert, Click, Effect, Note, Signal, Tracker, details, escape};
+    use super::{Alert, Click, Effect, Note, Signal, Tracker, details};
     use crate::status::{Need, Status};
     use crate::store::Item;
     use crate::transcript::Kind;
@@ -976,11 +902,5 @@ mod tests {
         let clipped = details(Alert::Finished, &[text(Kind::Assistant, &long)]).unwrap();
         assert_eq!(clipped.chars().count(), 160);
         assert!(clipped.ends_with("word…"));
-    }
-
-    #[test]
-    fn escapes_markup_in_bodies() {
-        assert_eq!(escape("Fix <Button> · R&D"), "Fix &lt;Button&gt; · R&amp;D");
-        assert_eq!(escape("plain"), "plain");
     }
 }

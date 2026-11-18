@@ -3,6 +3,7 @@
 
 pub mod instance;
 pub mod motion;
+pub mod notifications;
 #[cfg(target_os = "linux")]
 pub mod scope;
 pub mod sigterm;
