@@ -95,7 +95,7 @@ impl Workspace {
         let theme = cx.observe_global::<Theme>(|this, cx| {
             let colors = appearance::terminal_colors(cx);
             for chat in &this.chats {
-                if let Some(terminal) = &chat.terminal {
+                if let Some(terminal) = &chat.pane.terminal {
                     terminal.terminal.read(cx).set_colors(colors);
                 }
             }

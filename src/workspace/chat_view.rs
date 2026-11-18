@@ -17,7 +17,7 @@ impl Workspace {
         let shell = self.shown_shell(cx);
         // Without a terminal, the history takes the sheet but for its header
         // and footer, and the shell.
-        let history_max = if chat.terminal.is_none() {
+        let history_max = if chat.pane.terminal.is_none() {
             viewport
                 - px(140.)
                 - if shell.is_some() {
@@ -88,16 +88,22 @@ impl Workspace {
                     // leave the CLI, which keeps its least height.
                     v_flex()
                         .size_full()
-                        .children(chat.history.read(cx).height(history_max).map(|height| {
-                            chat.history.clone().cached(
-                                StyleRefinement::default()
-                                    .w_full()
-                                    .h(height)
-                                    .flex_shrink(1.)
-                                    .min_h_0(),
-                            )
-                        }))
-                        .children(chat.terminal.as_ref().map(|terminal| {
+                        .children(
+                            chat.pane
+                                .history
+                                .read(cx)
+                                .height(history_max)
+                                .map(|height| {
+                                    chat.pane.history.clone().cached(
+                                        StyleRefinement::default()
+                                            .w_full()
+                                            .h(height)
+                                            .flex_shrink(1.)
+                                            .min_h_0(),
+                                    )
+                                }),
+                        )
+                        .children(chat.pane.terminal.as_ref().map(|terminal| {
                             // With the shell beside it, which of the two has
                             // the keyboard.
                             let focused = shell.is_some()
@@ -112,7 +118,7 @@ impl Workspace {
                                 .when(focused, |this| this.child(focus_bar(cx)))
                                 .child(terminal.view.clone())
                         })),
-                    if chat.terminal.is_some() {
+                    if chat.pane.terminal.is_some() {
                         MIN_TERMINAL_HEIGHT
                     } else {
                         px(0.)
@@ -262,7 +268,7 @@ impl Workspace {
             .unwrap_or_else(|| "New chat".into());
         let pinned = entry.is_some_and(|entry| entry.pinned);
         let tone = Tone::of(self.sidebar.read(cx).running(chat.id));
-        let history = chat.history.read(cx);
+        let history = chat.pane.history.read(cx);
         let (earlier, open) = (history.count(), history.is_open());
         let focus = self.focus_handle.clone();
 

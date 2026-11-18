@@ -87,7 +87,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(chat) = self.chats.iter().find(|chat| Some(chat.id) == self.active) {
-            chat.history.update(cx, |history, cx| history.toggle(cx));
+            chat.pane
+                .history
+                .update(cx, |history, cx| history.toggle(cx));
             cx.notify();
         }
     }

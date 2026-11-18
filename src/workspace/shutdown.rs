@@ -112,7 +112,7 @@ impl Workspace {
         // queued watcher callback cannot run once we're released.
         for chat in self.chats.iter().filter(|chat| !removed.contains(&chat.id)) {
             if chat.agent == Agent::Codex
-                && let Some(terminal) = &chat.terminal
+                && let Some(terminal) = &chat.pane.terminal
                 && let Some((agent_id, path)) =
                     sessions::codex_session(&terminal.terminal.read(cx).pid())
             {
@@ -130,7 +130,7 @@ impl Workspace {
         let reaped: Vec<_> = self
             .chats
             .iter()
-            .filter_map(|chat| chat.terminal.as_ref())
+            .filter_map(|chat| chat.pane.terminal.as_ref())
             .map(|terminal| terminal.terminal.read(cx).shutdown())
             .chain(
                 self.lifecycle

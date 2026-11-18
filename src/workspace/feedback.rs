@@ -64,7 +64,7 @@ impl Workspace {
             .chats
             .iter()
             .find(|chat| Some(chat.id) == self.active)
-            .and_then(|chat| chat.terminal.as_ref())
+            .and_then(|chat| chat.pane.terminal.as_ref())
             .filter(|_| !self.settings_shown)
         {
             Some(terminal) => terminal.view.focus_handle(cx).focus(window, cx),

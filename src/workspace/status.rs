@@ -47,7 +47,8 @@ impl Workspace {
         }
         for chat in &self.chats {
             let current = chat.current_session();
-            chat.history
+            chat.pane
+                .history
                 .update(cx, |history, cx| history.refresh(current, changed, cx));
         }
     }

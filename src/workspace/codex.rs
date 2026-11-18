@@ -70,7 +70,7 @@ impl Workspace {
             if chat.agent != Agent::Codex {
                 return None;
             }
-            let pid = chat.terminal.as_ref()?.terminal.read(cx).pid();
+            let pid = chat.pane.terminal.as_ref()?.terminal.read(cx).pid();
             if !pid.may_be_running() {
                 return None;
             }

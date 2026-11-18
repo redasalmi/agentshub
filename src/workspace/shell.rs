@@ -98,7 +98,7 @@ impl Workspace {
         let shown = !self.hidden && !self.settings_shown;
         let chat = self.active.filter(|_| shown);
         for each in &self.chats {
-            if let Some(terminal) = &each.terminal {
+            if let Some(terminal) = &each.pane.terminal {
                 terminal
                     .terminal
                     .read(cx)

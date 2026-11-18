@@ -366,17 +366,16 @@ struct Recording {
     agent_id: String,
 }
 
-struct Chat {
+/// A chat's backend state: what its CLI is doing and which session it is in.
+struct ChatRuntime {
     id: i64,
     agent: Agent,
     /// Its project's folder, which its CLI runs in.
     cwd: PathBuf,
     /// The name of the file its CLI reports its sessions to.
     report: String,
-    terminal: Option<ChatTerminal>,
     /// Startup failure or exit message, shown alongside the saved history.
     message: Option<SharedString>,
-    history: Entity<History>,
     /// The session the CLI is in, once known. It changes when the CLI
     /// switches to another session, as on `/clear`.
     session: Option<i64>,
@@ -400,6 +399,31 @@ struct Chat {
     fresh_on_restart: bool,
 }
 
+/// A chat's view state: its terminal and the history above it.
+struct ChatPane {
+    terminal: Option<ChatTerminal>,
+    history: Entity<History>,
+}
+
+struct Chat {
+    runtime: ChatRuntime,
+    pane: ChatPane,
+}
+
+impl std::ops::Deref for Chat {
+    type Target = ChatRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl std::ops::DerefMut for Chat {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
+}
+
 /// A chat being added, with what starting it needs once it is.
 #[derive(Clone)]
 struct PendingChat {
@@ -420,7 +444,8 @@ struct ChatTerminal {
 
 impl Chat {
     fn running(&self) -> bool {
-        self.terminal
+        self.pane
+            .terminal
             .as_ref()
             .is_some_and(|terminal| !terminal.exited)
     }

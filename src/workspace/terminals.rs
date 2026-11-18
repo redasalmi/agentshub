@@ -90,22 +90,23 @@ impl Workspace {
             history
         });
         self.chats.push(Chat {
-            id,
-            agent,
-            cwd: cwd.to_path_buf(),
-            report,
-            terminal,
-            message,
-            history,
-            session: session.map(|session| session.id),
-            transcript,
-            recording: None,
-            status: None,
-            turn: None,
-            unseen: false,
-            codex: Codex::default(),
-            notice: None,
-            fresh_on_restart: false,
+            runtime: ChatRuntime {
+                id,
+                agent,
+                cwd: cwd.to_path_buf(),
+                report,
+                message,
+                session: session.map(|session| session.id),
+                transcript,
+                recording: None,
+                status: None,
+                turn: None,
+                unseen: false,
+                codex: Codex::default(),
+                notice: None,
+                fresh_on_restart: false,
+            },
+            pane: ChatPane { terminal, history },
         });
         self.chats.last_mut().expect("a chat was just pushed")
     }
@@ -193,7 +194,7 @@ impl Workspace {
         // A CLI that quits by itself without failing, as on a startup error,
         // keeps its terminal too, since only typing quits it otherwise.
         let quit = success
-            && chat.terminal.as_ref().is_some_and(|terminal| {
+            && chat.pane.terminal.as_ref().is_some_and(|terminal| {
                 terminal.terminal.read(cx).input() != terminal::Input::Untouched
             });
         if quit {
@@ -204,7 +205,7 @@ impl Workspace {
             }
             return;
         }
-        if let Some(terminal) = &mut chat.terminal {
+        if let Some(terminal) = &mut chat.pane.terminal {
             terminal.exited = true;
         }
         chat.message = Some(
@@ -216,7 +217,8 @@ impl Workspace {
         );
         chat.status = None;
         let session = chat.session;
-        chat.history
+        chat.pane
+            .history
             .update(cx, |history, cx| history.refresh(None, &[], cx));
         self.sync_sidebar(cx);
         cx.notify();
@@ -246,6 +248,7 @@ impl Workspace {
         let index = self.chats.iter().position(|chat| chat.id == id)?;
         let chat = self.chats.remove(index);
         let reaped = chat
+            .pane
             .terminal
             .map(|terminal| terminal.terminal.read(cx).shutdown());
         if self.active == Some(id) {
@@ -269,7 +272,7 @@ impl Workspace {
     ) -> bool {
         !chat.unseen
             && matches!(chat.status, Some(Status::Idle | Status::Done))
-            && chat.terminal.as_ref().is_some_and(|terminal| {
+            && chat.pane.terminal.as_ref().is_some_and(|terminal| {
                 !terminal.exited
                     && terminal
                         .terminal
@@ -290,6 +293,7 @@ impl Workspace {
     fn codex_session(&self, id: i64, cx: &App) -> Option<(String, PathBuf)> {
         let chat = self.chats.iter().find(|chat| chat.id == id)?;
         let terminal = chat
+            .pane
             .terminal
             .as_ref()
             .filter(|_| chat.agent == Agent::Codex)?;
