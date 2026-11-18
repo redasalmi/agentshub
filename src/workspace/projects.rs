@@ -1,5 +1,6 @@
 //! Adding, removing and archiving projects, and the database file behind them.
 
+use super::render::render_import;
 use super::*;
 
 impl Workspace {

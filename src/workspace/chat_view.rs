@@ -1,5 +1,6 @@
 //! The chat sheet: its header, history, terminal, shell and empty state.
 
+use super::render::{focus_bar, key_hint, render_shortcuts, status_pill, stay_put};
 use super::*;
 
 impl Workspace {

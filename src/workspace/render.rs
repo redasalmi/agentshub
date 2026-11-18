@@ -168,3 +168,248 @@ impl Render for Workspace {
             .into_any_element()
     }
 }
+
+pub(super) fn render_shortcuts(window: &Window, cx: &App) -> impl IntoElement {
+    let bound: [(&'static str, Box<dyn Action>); 12] = [
+        (
+            "Search chats, messages, projects and commands",
+            Box::new(OpenSearch),
+        ),
+        (
+            "Show the running chats of every project",
+            Box::new(ShowRunning),
+        ),
+        (
+            "Open the next chat that needs you",
+            Box::new(NextNeedingYou),
+        ),
+        ("Start an agent in the selected project", Box::new(NewChat)),
+        ("Show or hide the project's shell", Box::new(ToggleShell)),
+        ("Show or hide the earlier sessions", Box::new(ToggleHistory)),
+        ("Rename the chat", Box::new(RenameChat)),
+        ("Add a project", Box::new(AddProject)),
+        ("Open or close the settings", Box::new(ToggleSettings)),
+        ("Close the idle chats", Box::new(CloseIdleChats)),
+        ("Close all the chats", Box::new(CloseAllChats)),
+        ("Show the keyboard shortcuts", Box::new(ShowShortcuts)),
+    ];
+    let unbound: [(&'static str, SharedString); 4] = [
+        (
+            "Open a chat by its place in the list; hold Alt to see the numbers",
+            "Alt+1…9".into(),
+        ),
+        (
+            "Select a project by its place in the rail; hold Ctrl to see the numbers",
+            "Ctrl+1…9".into(),
+        ),
+        (
+            "Make the terminals' text bigger or smaller",
+            "Ctrl+scroll".into(),
+        ),
+        ("Copy or paste in a terminal", "Ctrl+Shift+C / V".into()),
+    ];
+    let rows = bound
+        .iter()
+        .filter_map(|(label, action)| {
+            palette::shortcut(action.as_ref(), window).map(|keys| (*label, keys))
+        })
+        .chain(unbound);
+    let theme = cx.theme();
+    v_flex().children(rows.map(|(label, keys)| {
+        h_flex()
+            .py_2()
+            .gap_4()
+            .border_b_1()
+            .border_color(theme.border)
+            .text_sm()
+            .child(div().flex_1().min_w_0().child(label))
+            .child(
+                div()
+                    .flex_none()
+                    .px_1p5()
+                    .rounded(px(4.))
+                    .bg(appearance::palette(cx).strong)
+                    .text_xs()
+                    .font_family(theme.mono_font_family.clone())
+                    .child(keys),
+            )
+    }))
+}
+
+/// The bar on the edge of the terminal that has the keyboard, while two show.
+pub(super) fn focus_bar(cx: &App) -> impl IntoElement {
+    div()
+        .absolute()
+        .left_0()
+        .top_3()
+        .bottom_3()
+        .w(px(3.))
+        .rounded_r(px(2.))
+        .bg(appearance::palette(cx).accent)
+}
+
+/// Keeps a press on the title bar's controls from moving the window.
+pub(super) fn stay_put(element: Div) -> Div {
+    element
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+}
+
+/// A shortcut's keys, and what they do.
+pub(super) fn key_hint(keys: SharedString, label: &'static str, cx: &App) -> impl IntoElement {
+    let palette = appearance::palette(cx);
+    h_flex()
+        .flex_none()
+        .gap_1p5()
+        .child(
+            div()
+                .px_1p5()
+                .rounded(px(4.))
+                .bg(palette.strong)
+                .text_color(palette.secondary_foreground)
+                .child(keys),
+        )
+        .child(label)
+}
+
+pub(super) fn status_pill(
+    tone: Tone,
+    turn: Option<Turn>,
+    spin: bool,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let palette = appearance::palette(cx);
+    let label = capitalized(tone.label());
+    let (label, time) = match turn {
+        Some(Turn::Since(start)) => (format!("{label} ·"), Some(duration(start.elapsed()))),
+        Some(Turn::Took(took)) => (format!("{label} · took"), Some(duration(took))),
+        None => (label, None),
+    };
+    let (background, foreground) = tone
+        .tint(cx)
+        .map(|tint| (tint.soft, tint.text))
+        .unwrap_or((palette.strong, palette.secondary_foreground));
+    h_flex()
+        .flex_none()
+        .h(px(26.))
+        .px_2p5()
+        .gap_2()
+        .rounded_full()
+        .bg(background)
+        .text_color(foreground)
+        .text_xs()
+        .font_medium()
+        .child(if spin {
+            sidebar::live_dot(tone, cx)
+        } else {
+            sidebar::dot(tone, cx)
+        })
+        .child(h_flex().gap_1().child(label).when_some(time, |this, time| {
+            // Figures of the same width, so the pill doesn't jitter as
+            // they count up.
+            this.child(
+                div()
+                    .font_family(theme.mono_font_family.clone())
+                    .child(time),
+            )
+        }))
+}
+
+pub(super) fn render_broken(reason: SharedString, cx: &Context<Workspace>) -> AnyElement {
+    let theme = cx.theme();
+    h_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .p_8()
+        .bg(theme.background)
+        .text_color(theme.foreground)
+        .child(
+            v_flex()
+                .max_w(px(440.))
+                .gap_4()
+                .child(
+                    div()
+                        .text_xl()
+                        .font_semibold()
+                        .child("Agents Hub can't start"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.4))
+                        .text_color(theme.muted_foreground)
+                        .child(reason),
+                )
+                .child(
+                    Button::new("quit")
+                        .label("Quit")
+                        .on_click(|_, _, cx| cx.quit()),
+                ),
+        )
+        .into_any_element()
+}
+
+/// The projects of a database about to be imported, each with its first few
+/// chats.
+pub(super) fn render_import(projects: &[store::Project], theme: &Theme) -> impl IntoElement {
+    /// The chats listed under each project; the others are counted.
+    const SHOWN_CHATS: usize = 3;
+    v_flex()
+        .id("import-projects")
+        .max_h(px(260.))
+        .overflow_y_scroll()
+        .gap_3()
+        .p_3()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .text_sm()
+        .children(projects.iter().map(|project| {
+            let more = project.chats.len().saturating_sub(SHOWN_CHATS);
+            v_flex()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_medium()
+                                .text_color(theme.foreground)
+                                .child(project.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .child(home_relative(&project.path)),
+                        ),
+                )
+                .children(project.chats.iter().take(SHOWN_CHATS).map(|chat| {
+                    div()
+                        .pl_3()
+                        .truncate()
+                        .text_color(theme.muted_foreground)
+                        .child(chat.title.clone().unwrap_or_else(|| "New chat".into()))
+                }))
+                .when(more > 0, |list| {
+                    list.child(
+                        div()
+                            .pl_3()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("and {} more", plural(more, "chat"))),
+                    )
+                })
+                .when(project.chats.is_empty(), |list| {
+                    list.child(
+                        div()
+                            .pl_3()
+                            .text_color(theme.muted_foreground)
+                            .child("No chats"),
+                    )
+                })
+        }))
+}
