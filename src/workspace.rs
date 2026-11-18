@@ -53,6 +53,8 @@ mod chats;
 mod codex;
 mod commands;
 mod dialogs;
+mod feedback;
+mod layout;
 mod lifecycle;
 mod new_chat;
 mod open_chat;
@@ -427,208 +429,15 @@ impl Chat {
     }
 }
 
-impl Workspace {
 
 
 
 
 
 
-    /// Says so if a setting couldn't be saved, which then lasts until Agents
-    /// Hub quits.
-    fn save_setting(
-        &self,
-        saved: impl Future<Output = anyhow::Result<()>> + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            if let Err(err) = saved.await {
-                eprintln!("can't save the settings: {err:#}");
-                let message =
-                    format!("Couldn't save the setting, so it lasts until Agents Hub quits: {err}");
-                this.update(cx, |this, cx| this.say(message, cx)).ok();
-            }
-        })
-        .detach();
-    }
-
-    /// Says `message` in the window, unless it is closed to the tray.
-    fn say(&self, message: String, cx: &mut App) {
-        self.window
-            .update(cx, |_, window, cx| window.push_notification(message, cx))
-            .ok();
-    }
-
-    /// Says `message` with a button that makes the `undo` change.
-    fn offer_undo(
-        &self,
-        message: &'static str,
-        undo: Change,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let this = cx.entity().downgrade();
-        window.push_notification(
-            Notification::new()
-                .message(message)
-                .action(move |_, _, cx| {
-                    let (this, undo) = (this.clone(), undo.clone());
-                    Button::new("undo").label("Undo").on_click(cx.listener(
-                        move |note, _, window, cx| {
-                            this.update(cx, |this, cx| this.change(undo.clone(), cx))
-                                .ok();
-                            note.dismiss(window, cx);
-                        },
-                    ))
-                })
-                // A button keeps it up unless it's told otherwise.
-                .autohide(true),
-            cx,
-        );
-    }
 
 
 
-    /// Focuses the shown chat's CLI, or the workspace if it has none running
-    /// or the settings cover it. A terminal out of the rendered tree can't
-    /// hold the focus: keys would skip the workspace's bindings.
-    pub fn focus_chat(&self, window: &mut Window, cx: &mut App) {
-        match self
-            .chats
-            .iter()
-            .find(|chat| Some(chat.id) == self.active)
-            .and_then(|chat| chat.terminal.as_ref())
-            .filter(|_| !self.settings_shown)
-        {
-            Some(terminal) => terminal.view.focus_handle(cx).focus(window, cx),
-            None => self.focus_handle.focus(window, cx),
-        }
-    }
-
-
-}
-
-impl Workspace {
-    /// The sidebar's right edge, which resizes it when dragged and restores
-    /// its default width when double clicked.
-    fn render_sidebar_edge(&self, cx: &Context<Self>) -> impl IntoElement {
-        let workspace = cx.weak_entity();
-        resize_handle("sidebar-edge", Axis::Horizontal)
-            .inside(HandleEdge::Trailing)
-            .on_drag(ResizeSidebar, move |drag, _, _, cx| {
-                cx.stop_propagation();
-                let workspace = workspace.clone();
-                cx.new(|cx| {
-                    // The drag lets go of what it carries once it ends, which
-                    // is when the width the user settled on is saved.
-                    cx.on_release(move |_, cx| {
-                        workspace
-                            .update(cx, |this, cx| this.save_sidebar_width(cx))
-                            .ok();
-                    })
-                    .detach();
-                    drag.clone()
-                })
-            })
-            .on_double_click(cx.listener(|this, _, _, cx| {
-                this.sidebar_width = px(DEFAULT_SIDEBAR_WIDTH);
-                this.save_sidebar_width(cx);
-                cx.notify();
-            }))
-    }
-
-    /// The rail's right edge, which resizes the rail when dragged, folds it
-    /// to the projects' marks when dragged narrow enough, and restores its
-    /// default width when double clicked. The sidebar grows or shrinks with
-    /// it, so its list keeps its width.
-    fn render_rail_edge(&self, window_width: Pixels, cx: &Context<Self>) -> impl IntoElement {
-        let workspace = cx.weak_entity();
-        div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left_0()
-            .w(sidebar::rail(window_width, cx).1)
-            .child(
-                resize_handle("rail-edge", Axis::Horizontal)
-                    .inside(HandleEdge::Trailing)
-                    .on_drag(ResizeRail, move |drag, _, _, cx| {
-                        cx.stop_propagation();
-                        let workspace = workspace.clone();
-                        cx.new(|cx| {
-                            // Saved once the drag ends, as the sidebar's width.
-                            cx.on_release(move |_, cx| {
-                                workspace.update(cx, |this, cx| this.save_rail(cx)).ok();
-                            })
-                            .detach();
-                            drag.clone()
-                        })
-                    })
-                    .on_double_click(cx.listener(|this, _, _, cx| {
-                        this.resize_rail(true, DEFAULT_RAIL_WIDTH, cx);
-                        this.save_rail(cx);
-                    })),
-            )
-    }
-
-    /// Shows the rail `width` wide, naming the projects, or with their marks
-    /// alone, without saving it.
-    fn resize_rail(&mut self, named: bool, width: f32, cx: &mut Context<Self>) {
-        let settings = *cx.global::<Settings>();
-        if settings.project_names == named && settings.rail_width == width {
-            return;
-        }
-        cx.set_global(Settings {
-            project_names: named,
-            rail_width: width,
-            ..settings
-        });
-        self.sidebar.update(cx, |_, cx| cx.notify());
-        cx.notify();
-    }
-
-    fn save_rail(&mut self, cx: &mut Context<Self>) {
-        let settings = *cx.global::<Settings>();
-        let width = Settings::set_rail_width(&self.store, settings.rail_width, cx);
-        let names = Settings::set_project_names(&self.store, settings.project_names, cx);
-        self.save_setting(
-            async move {
-                width.await?;
-                names.await
-            },
-            cx,
-        );
-    }
-
-    /// Shows the shell taking `share` of the window's height, without saving
-    /// it.
-    fn resize_shell(&mut self, share: f32, cx: &mut Context<Self>) {
-        let settings = *cx.global::<Settings>();
-        if settings.shell_share == share {
-            return;
-        }
-        cx.set_global(Settings {
-            shell_share: share,
-            ..settings
-        });
-        cx.notify();
-    }
-
-    fn save_shell_share(&mut self, cx: &mut Context<Self>) {
-        let share = cx.global::<Settings>().shell_share;
-        let saved = Settings::set_shell_share(&self.store, share, cx);
-        self.save_setting(saved, cx);
-    }
-
-    fn save_sidebar_width(&mut self, cx: &mut Context<Self>) {
-        let width = f32::from(self.sidebar_width);
-        if cx.global::<Settings>().sidebar_width == width {
-            return;
-        }
-        let saved = Settings::set_sidebar_width(&self.store, width, cx);
-        self.save_setting(saved, cx);
-    }
-}
 
 
 
