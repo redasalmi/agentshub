@@ -6,10 +6,15 @@ rust-version = "1.91"
 publish = false
 
 [dependencies]
+anyhow = "1"
 gpui-kit = "0.8.0"
+ksni = { version = "0.3.7", default-features = false, features = ["async-io"] }
 libc = "0.2"
+raw-window-handle = "0.6"
 smol = "2"
 uuid = { version = "1", features = ["v4"] }
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 zbus = "5"
 
 [lints]

@@ -5,3 +5,5 @@ pub mod motion;
 #[cfg(target_os = "linux")]
 pub mod scope;
 pub mod sigterm;
+#[cfg(target_os = "linux")]
+pub mod tray;

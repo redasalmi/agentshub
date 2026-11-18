@@ -79,6 +79,7 @@ fn main() {
                 alerts::init(&workspace, cx);
                 motion::watch_desktop_motion(cx, appearance::apply_motion);
                 tray::init(workspace, cx);
+                cx.observe_global::<settings::Settings>(tray::sync).detach();
                 instance::serve(instance, cx, tray::show);
             });
         })

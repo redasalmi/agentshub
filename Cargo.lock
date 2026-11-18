@@ -120,20 +120,16 @@ dependencies = [
  "anyhow",
  "gpui-kit",
  "jiff",
- "ksni",
  "libc",
  "libghostty-vt",
  "notify",
  "portable-pty",
- "raw-window-handle",
  "rodio",
  "rusqlite",
  "serde_json",
  "smol",
  "unicode-segmentation",
  "uuid",
- "wayland-client",
- "wayland-protocols",
  "zbus 5.19.0",
 ]
 
@@ -166,10 +162,15 @@ dependencies = [
 name = "agentshub-platform"
 version = "0.15.0"
 dependencies = [
+ "anyhow",
  "gpui-kit",
+ "ksni",
  "libc",
+ "raw-window-handle",
  "smol",
  "uuid",
+ "wayland-client",
+ "wayland-protocols",
  "zbus 5.19.0",
 ]
 
