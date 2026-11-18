@@ -6,8 +6,8 @@ enforced by the Cargo workspace (see `Cargo.toml`) and by
 
 ```
 bin ──▶ app ──▶ core
- │       │
- ├─────▶ ui ────▶ core
+ │       ▲
+ ├─────▶ ui ─────┘
  │
  └─────▶ platform
 ```
@@ -15,18 +15,19 @@ bin ──▶ app ──▶ core
 - **core** — domain and backend. No `gpui_kit`, `Window`, `Entity`, `Context`
   or `App`. It owns the database, migrations, transcripts, sessions, reports,
   worktrees, CLI process control and the chat lifecycle state machine.
-- **app** — use cases and async orchestration. It currently owns the catalog,
-  settings, persistence of settings and startup. It may use GPUI entities and
-  window handles for dialogs, but never builds element trees.
-- **ui** — rendering only. It currently owns the history view; the other views
-  still live in the binary. Views read snapshots and emit intents. No `Store`,
-  `rusqlite`, `std::fs` or `std::process`.
-- **platform** — Linux adapters: tray, systemd scope, desktop motion, single
-  instance and SIGTERM. It calls back into the binary for window and workspace
-  actions instead of naming them.
+- **app** — use cases and async orchestration. It owns the catalog, settings,
+  persistence of settings and startup. It may use GPUI entities and window
+  handles for dialogs, but never builds element trees.
+- **ui** — rendering only. It owns the theme, sidebar, search palette and
+  history view; the chat, settings and terminal views still live in the
+  binary. Views read app state and emit intents. No `Store`, `rusqlite`,
+  `std::fs` or `std::process`.
+- **platform** — Linux adapters: tray, D-Bus notifications, systemd scope,
+  desktop motion, single instance and SIGTERM. It calls back into the binary
+  for window and workspace actions instead of naming them.
 - **bin** — composition root: starts the app, opens the window, wires the
-  layers, and still hosts the workspace controller and most views while they
-  move to `app` and `ui`.
+  layers, and still hosts the workspace controller and the remaining views
+  while they move to `app` and `ui`.
 
 ## Where things belong
 
@@ -52,11 +53,11 @@ bin ──▶ app ──▶ core
 
 ## Remaining migration
 
-`workspace`, `sidebar`, `terminal`, `terminal_view`, `alerts`, `palette`,
-`appearance` and `window` are still in the binary. Moving them needs the
+`workspace`, `chat_view`, `settings_view`, `terminal`, `terminal_view`,
+`alerts` and `window` are still in the binary. Moving the views needs the
 snapshot and intent boundary that rule 2 describes: views read a snapshot and
-emit intents, and the workspace applies them. Until then the binary may use
-`core`, `app` and `ui` directly; the crates themselves stay bounded.
+emit intents, and the workspace applies them. The terminal also needs its
+systemd scope injected before it can move out of the binary.
 
 ## Verification
 
