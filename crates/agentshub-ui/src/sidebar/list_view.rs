@@ -80,7 +80,7 @@ impl Sidebar {
                                     .icon(IconName::Plus)
                                     .tooltip_with_action(
                                         "Start an agent here",
-                                        &crate::workspace::NewChat,
+                                        &super::NewChat,
                                         None,
                                     )
                                     .on_click(cx.listener(move |_, _, _, cx| {

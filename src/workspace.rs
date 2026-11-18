@@ -40,7 +40,10 @@ use crate::settings::{
     Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SHELL_SHARE, DEFAULT_SIDEBAR_WIDTH,
     DEFAULT_TERMINAL_FONT_SIZE, Motion, Settings, ThemeFamily,
 };
-use crate::sidebar::{self, Held, Sidebar, SidebarEvent, Tone, home_relative};
+use crate::sidebar::{
+    self, Held, MAX_SIDEBAR_WIDTH, MIN_MAIN_WIDTH, MIN_SIDEBAR_WIDTH, Sidebar, SidebarEvent, Tone,
+    home_relative, rail_room,
+};
 use crate::status::Status;
 use crate::store::{self, Change, Store};
 use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
@@ -83,15 +86,6 @@ pub(crate) use session::import_chat;
 pub(crate) use session::reported_sessions;
 
 use crate::lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
-
-/// The narrowest the sidebar can be dragged.
-const MIN_SIDEBAR_WIDTH: Pixels = px(300.);
-
-/// The widest the sidebar can be dragged.
-const MAX_SIDEBAR_WIDTH: Pixels = px(600.);
-
-/// How much of the window the sidebar always leaves to the chat.
-const MIN_MAIN_WIDTH: Pixels = px(360.);
 
 /// The least room a chat's title keeps beside its status and actions; with
 /// less, they move below it.
@@ -326,12 +320,6 @@ fn shell_edge_appearance(strong: Hsla) -> ResizeHandleRenderer {
                 .into_any_element(),
         )
     })
-}
-
-/// The most room the rail has in a window `window_width` wide: what leaves
-/// the rest of the sidebar and the chat their least room.
-pub fn rail_room(window_width: Pixels) -> Pixels {
-    window_width - MIN_MAIN_WIDTH - MIN_SIDEBAR_WIDTH + sidebar::RAIL_WIDTH
 }
 
 /// `width` kept within the sidebar's limits, and narrow enough to leave the

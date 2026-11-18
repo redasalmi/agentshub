@@ -5,12 +5,13 @@ use gpui_kit::*;
 use crate::settings::ThemeFamily;
 use crate::sidebar::NUMBERED;
 
+pub use crate::sidebar::NewChat;
+
 actions!(
     workspace,
     [
         ToggleShell,
         OpenSearch,
-        NewChat,
         AddProject,
         ToggleSettings,
         ToggleHistory,
