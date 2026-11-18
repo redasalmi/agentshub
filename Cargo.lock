@@ -190,6 +190,7 @@ dependencies = [
  "portable-pty",
  "serde_json",
  "smol",
+ "unicode-segmentation",
 ]
 
 [[package]]
