@@ -66,4 +66,12 @@ cargo build
 
 It needs `kwin_wayland`, Xwayland, `dbus-run-session`, `xdotool`, `spectacle`, `sqlite3` and `jq`, and prints `PASS` or `FAIL` with a folder of screenshots and logs under `target/verify/`. The [verify skill](.claude/skills/verify/SKILL.md) explains the scenarios and how to write one.
 
+To try a dev build with your real `claude`, `codex` and `pi` on your own desktop, without touching the installed copy or its chats:
+
+```sh
+scripts/try-dev.sh [--keep] [PROJECT_DIR...]
+```
+
+It builds the app and runs it with a new database, seeded with the given projects or this repository, and a session bus of its own, so it runs beside the installed copy instead of handing off to it. The agents run with your usual data folder and session bus, so they keep their logins and save their sessions where they always do. There's no tray, so closing the window (or Ctrl+C) quits, and the database is deleted unless you pass `--keep`. It needs `dbus-daemon` and `sqlite3`.
+
 [REVIEW.md](REVIEW.md) lists what a change must not break.
