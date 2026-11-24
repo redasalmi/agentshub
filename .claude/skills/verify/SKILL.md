@@ -48,6 +48,11 @@ another config folder in the settings, start a second chat, relaunch and check
 each chat resumed in its own folder, with the CLI's variable unset for the
 default one.
 
+`scenarios/rendering.sh`: has the fake Claude draw what fonts alone get wrong
+(its block logo, check marks, boxes, a usage bar, braille, Powerline, emoji and
+text attributes) and shoots it at the default size and zoomed in. Compare the
+shots with the same text in Ghostty.
+
 To cover a change, add a scenario next to it or a step to an existing one. A
 scenario is bash sourced with `set -e` after `scripts/lib.sh`:
 
@@ -75,7 +80,8 @@ shortcuts to clicks, since coordinates move with the layout.
 The fake CLI (`scripts/fake-cli`) reports its session the way the real one
 does (Claude through the `--settings` SessionStart hook, pi through
 `--extension`, Codex not at all), honours `--resume`, `resume` and
-`--session`, and echoes each line back, writing it to its transcript.
+`--session`, and echoes each line back, writing it to its transcript. Given
+`AHV_SCREEN`, a file, it prints that file first, as a CLI's screen, and logs `screen`.
 It keeps transcripts in its config folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 `PI_CODING_AGENT_DIR` or the default), laid out as each CLI does: Claude's
 under `projects/`, Codex's rollout under `sessions/`, held open, with its

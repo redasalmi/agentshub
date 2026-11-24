@@ -9,24 +9,24 @@ use libghostty_vt::mouse;
 use libghostty_vt::render::CursorVisualStyle;
 use libghostty_vt::style::RgbColor;
 use libghostty_vt::terminal::Scrollbar;
-use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::terminal::{Frame, GridSize, MouseInput, Run, Terminal};
 use crate::theme as appearance;
 use agentshub_app::settings::Settings;
 
+mod font;
 mod input;
 mod paint;
+mod sprite;
+mod symbol;
 
+use font::{terminal_font, wide_font};
 #[cfg(test)]
 use input::key_code;
 use input::{key_input, key_mods, mouse_button, shell_escape};
 use paint::{cell_size, paint_frame, paint_marked_text, thumb_bounds};
 
 const CONTEXT: &str = "Terminal";
-const FONT_FAMILY: &str = "JetBrains Mono";
-const FONT_FALLBACKS: [&str; 4] = ["DejaVu Sans Mono", "Noto Sans Mono", "Menlo", "Consolas"];
-const LINE_HEIGHT: f32 = 1.3;
 const SCROLLBAR_WIDTH: Pixels = px(6.);
 const MIN_THUMB_HEIGHT: Pixels = px(24.);
 
@@ -42,6 +42,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-c", Copy, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-v", Paste, Some(CONTEXT)),
     ]);
+    font::init(cx);
 }
 
 pub fn color(rgb: RgbColor) -> Hsla {
@@ -472,12 +473,15 @@ impl Render for TerminalView {
                                 );
                             }
                             if let Some((text, cursor)) = marked_text.zip(frame.cursor.as_ref()) {
-                                let origin = grid_bounds.origin
-                                    + point(
-                                        cell.width * cursor.col as f32,
-                                        cell.height * cursor.row as f32,
-                                    );
-                                paint_marked_text(text, &frame, origin, cell, window, cx);
+                                paint_marked_text(
+                                    text,
+                                    &frame,
+                                    (cursor.col, cursor.row),
+                                    grid_bounds.origin,
+                                    cell,
+                                    window,
+                                    cx,
+                                );
                             }
                         }
                     },

@@ -1,5 +1,7 @@
 use std::fs;
 
+use unicode_segmentation::UnicodeSegmentation as _;
+
 use super::*;
 
 fn white() -> RgbColor {
@@ -67,12 +69,38 @@ fn renders_pty_output_into_styled_runs() {
         let row = &frame.rows[0];
         if let Some(red) = row.iter().find(|run| run.text.as_str() == "red") {
             assert_eq!(row[0].text.as_str(), "hello ");
+            assert_eq!(
+                row[0].cell_texts().collect::<Vec<_>>(),
+                ["h", "e", "l", "l", "o", " "]
+            );
             assert_eq!(row[0].fg, white());
             break (red.fg, red.attrs.bold);
         }
     };
     assert!(red.r > red.g && red.r > red.b, "{red:?} isn't red");
     assert!(bold);
+}
+
+#[test]
+fn counts_cells_whose_text_joins_into_one_grapheme() {
+    // Two regional indicators in cells of their own make one grapheme, the
+    // box line after them still has a cell of its own.
+    let text = "\u{1F1FA}\u{1F1F8}│";
+    let run = Run {
+        col: 4,
+        cells: 3,
+        text: text.into(),
+        offsets: vec![0, 4, 8],
+        fg: white(),
+        bg: None,
+        attrs: frame::Attrs::default(),
+        wide: false,
+    };
+    assert_eq!(text.graphemes(true).count(), 2);
+    assert_eq!(
+        run.cell_texts().collect::<Vec<_>>(),
+        ["\u{1F1FA}", "\u{1F1F8}", "│"]
+    );
 }
 
 #[cfg(target_os = "linux")]

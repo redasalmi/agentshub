@@ -115,7 +115,13 @@ entry() {
 }
 
 printf '\e[1mfake %s\e[0m  session %s (%s)\r\n' "$agent" "$session" "$reason"
-printf 'cwd %s\r\n> ' "$PWD"
+printf 'cwd %s\r\n' "$PWD"
+# A scenario can give it a screen to draw, as a real CLI's output.
+if [ -n "${AHV_SCREEN:-}" ] && [ -f "$AHV_SCREEN" ]; then
+	cat "$AHV_SCREEN"
+	echo "screen $agent pid=$$" >>"$log"
+fi
+printf '> '
 while IFS= read -r line; do
 	echo "input $agent $line" >>"$log"
 	entry user "$line"

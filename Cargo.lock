@@ -172,6 +172,7 @@ dependencies = [
  "agentshub-core",
  "agentshub-platform",
  "anyhow",
+ "fontdb",
  "gpui-kit",
  "jiff",
  "ksni",

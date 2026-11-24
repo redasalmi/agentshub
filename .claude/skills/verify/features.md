@@ -26,4 +26,5 @@ judge its screenshots. How to do each one (keys, clicks) is in `docs/`, mostly
 | Project shell | Shell in the project shows and hides | |
 | Earlier sessions | The chat's earlier sessions show and hide | |
 | Copy, paste | Selection copied; clipboard pasted to the CLI | |
-| Font size | Terminal text grows and shrinks | |
+| Font size | Terminal text grows and shrinks | rendering |
+| Agent output | Box lines, blocks and braille meet without seams; check marks, symbols and emoji draw (emoji in one color where the system's color emoji are COLRv1) | rendering |

@@ -9,6 +9,8 @@ pub struct Frame {
     pub cursor: Option<Cursor>,
     pub background: RgbColor,
     pub scrollbar: Scrollbar,
+    /// How many columns each row has.
+    pub cols: u16,
 }
 
 /// Neighbouring cells of one row that share a style.
@@ -16,6 +18,9 @@ pub struct Run {
     pub col: u16,
     pub cells: u16,
     pub text: SharedString,
+    /// Where each cell's text starts in `text`. A cell's text can join the
+    /// next one's into a grapheme, so graphemes don't count cells.
+    pub offsets: Vec<u32>,
     pub fg: RgbColor,
     pub bg: Option<RgbColor>,
     pub attrs: Attrs,
@@ -29,10 +34,23 @@ pub struct Attrs {
     pub italic: bool,
     pub faint: bool,
     pub underline: bool,
+    pub curly_underline: bool,
     pub strikethrough: bool,
 }
 
 impl Run {
+    /// Each cell's text, from the run's first column. A double-width
+    /// character is one, though it covers two columns.
+    pub fn cell_texts(&self) -> impl Iterator<Item = &str> {
+        self.offsets.iter().enumerate().map(|(ix, start)| {
+            let end = self
+                .offsets
+                .get(ix + 1)
+                .map_or(self.text.len(), |end| *end as usize);
+            self.text.get(*start as usize..end).unwrap_or_default()
+        })
+    }
+
     /// Blank cells still paint when they carry a decoration.
     pub fn paints_text(&self) -> bool {
         !self.text.trim().is_empty() || self.attrs.underline || self.attrs.strikethrough
@@ -88,11 +106,13 @@ pub(super) fn build_frame<'alloc>(
     let mut frame_rows = Vec::new();
     let mut selection = Vec::new();
     let mut text = String::new();
+    let mut cols = 0;
     let mut row_iter = rows.update(&snapshot)?;
     while let Some(row) = row_iter.next() {
         selection.push(row.selection()?);
         let mut runs: Vec<Run> = Vec::new();
         let mut run_text = String::new();
+        let mut run_offsets = Vec::new();
         let mut cell_iter = cells.update(row)?;
         let mut col = 0;
         while let Some(cell) = cell_iter.next() {
@@ -132,6 +152,7 @@ pub(super) fn build_frame<'alloc>(
                     italic: style.italic,
                     faint: style.faint,
                     underline: style.underline != Underline::None,
+                    curly_underline: style.underline == Underline::Curly,
                     strikethrough: style.strikethrough,
                 };
             }
@@ -140,17 +161,21 @@ pub(super) fn build_frame<'alloc>(
             if let Some(run) = runs.last_mut().filter(|run| {
                 !wide && !run.wide && run.fg == fg && run.bg == bg && run.attrs == attrs
             }) {
+                run_offsets.push(run_text.len() as u32);
                 run_text.push_str(&text);
                 run.cells += 1;
             } else {
                 if let Some(run) = runs.last_mut() {
                     run.text = std::mem::take(&mut run_text).into();
+                    run.offsets = std::mem::take(&mut run_offsets);
                 }
+                run_offsets.push(0);
                 run_text.push_str(&text);
                 runs.push(Run {
                     col: x,
                     cells: 1,
                     text: SharedString::default(),
+                    offsets: Vec::new(),
                     fg,
                     bg,
                     attrs,
@@ -160,7 +185,9 @@ pub(super) fn build_frame<'alloc>(
         }
         if let Some(run) = runs.last_mut() {
             run.text = run_text.into();
+            run.offsets = run_offsets;
         }
+        cols = cols.max(col);
         runs.retain(|run| run.bg.is_some() || run.paints_text());
         frame_rows.push(runs);
     }
@@ -171,5 +198,6 @@ pub(super) fn build_frame<'alloc>(
         cursor,
         background: colors.background,
         scrollbar: terminal.scrollbar()?,
+        cols,
     })
 }
