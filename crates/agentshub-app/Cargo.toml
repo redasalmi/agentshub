@@ -1,13 +1,13 @@
 [package]
 name = "agentshub-app"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.91"
 publish = false
 
 [dependencies]
-agentshub-core = { path = "../agentshub-core", version = "0.16.0" }
-agentshub-platform = { path = "../agentshub-platform", version = "0.16.0" }
+agentshub-core = { path = "../agentshub-core", version = "0.17.0" }
+agentshub-platform = { path = "../agentshub-platform", version = "0.17.0" }
 anyhow = "1"
 gpui-kit = "0.8.0"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
