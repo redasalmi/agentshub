@@ -96,13 +96,22 @@ pub struct Worktree {
     pub folder: PathBuf,
 }
 
+/// What a checkout made.
+#[derive(Debug)]
+pub struct Created {
+    pub worktree: Worktree,
+    /// What in the project couldn't be read, so isn't in the worktree,
+    /// relative to the repository's working tree.
+    pub unreadable: Vec<PathBuf>,
+}
+
 /// A worktree being checked out for a new chat, on a thread of its own,
 /// since that takes a while in a large repository. What it makes is taken
 /// once: by the chat, through `created`, or by `abandon`.
 pub struct Checkout {
     project: PathBuf,
     git: Arc<Mutex<Git>>,
-    created: smol::channel::Receiver<anyhow::Result<Worktree>>,
+    created: smol::channel::Receiver<anyhow::Result<Created>>,
 }
 
 /// The git checking a worktree out.
@@ -144,7 +153,7 @@ impl Checkout {
 
     /// What the checkout made, once git is done, or an error once it was
     /// taken.
-    pub fn created(&self) -> smol::channel::Receiver<anyhow::Result<Worktree>> {
+    pub fn created(&self) -> smol::channel::Receiver<anyhow::Result<Created>> {
         self.created.clone()
     }
 
@@ -218,7 +227,7 @@ pub fn abandon(checkouts: Vec<Checkout>) {
                 }
             };
             // A checkout that failed or was stopped removed what it made.
-            if let Ok(Ok(worktree)) = created {
+            if let Ok(Ok(Created { worktree, .. })) = created {
                 let branch = branch_of(&worktree.root);
                 let left = discard(&checkout.project, &worktree.root, &branch);
                 if !left.is_empty() {
@@ -235,7 +244,7 @@ pub fn abandon(checkouts: Vec<Checkout>) {
 
 /// Makes a worktree of `project`'s repository in `dir`, unless the
 /// checkout `state` is for is stopped first.
-fn create_in(project: &Path, dir: &Path, state: &Mutex<Git>) -> anyhow::Result<Worktree> {
+fn create_in(project: &Path, dir: &Path, state: &Mutex<Git>) -> anyhow::Result<Created> {
     let repo = repo(project)?.context("The project isn't in a git repository.")?;
     let parent = dir.join(project_dir_name(&repo.root));
     std::fs::create_dir_all(&parent)
@@ -255,36 +264,40 @@ fn create_in(project: &Path, dir: &Path, state: &Mutex<Git>) -> anyhow::Result<W
         .arg(&path)
         .arg("HEAD");
     let (status, stderr) = run_checkout(command, state)?;
-    let failed = if status.success() {
+    let copied = if status.success() {
         let skip = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-        mirror::mirror(&repo.root, &path, &skip, &|| lock(state).stopped)
-            .err()
-            .map(|err| {
-                (
-                    format!("Couldn't copy the project into the worktree {name}"),
-                    format!("{err:#}"),
-                )
-            })
+        mirror::mirror(&repo.root, &path, &skip, &|| lock(state).stopped).map_err(|err| {
+            (
+                format!("Couldn't copy the project into the worktree {name}"),
+                format!("{err:#}"),
+            )
+        })
     } else {
-        Some((
+        Err((
             format!("git couldn't create the worktree {name}"),
             stderr.trim().to_string(),
         ))
     };
-    if let Some((what, why)) = failed {
-        // Git can fail after making the branch and the checkout, as when a
-        // post-checkout hook fails or it is stopped, and leaves them behind,
-        // as a copy that fails does. No chat would refer to them, so they go
-        // again.
-        let left = discard(&repo.root, &path, &branch);
-        if left.is_empty() {
-            bail!("{what}: {why}");
+    let unreadable = match copied {
+        Ok(unreadable) => unreadable,
+        Err((what, why)) => {
+            // Git can fail after making the branch and the checkout, as when a
+            // post-checkout hook fails or it is stopped, and leaves them behind,
+            // as a copy that fails does. No chat would refer to them, so they go
+            // again.
+            let left = discard(&repo.root, &path, &branch);
+            if left.is_empty() {
+                bail!("{what}: {why}");
+            }
+            bail!("{what}, and {}: {why}", left.join(" and "));
         }
-        bail!("{what}, and {}: {why}", left.join(" and "));
-    }
-    Ok(Worktree {
-        folder: path.join(&repo.prefix),
-        root: path,
+    };
+    Ok(Created {
+        worktree: Worktree {
+            folder: path.join(&repo.prefix),
+            root: path,
+        },
+        unreadable,
     })
 }
 
@@ -464,7 +477,8 @@ mod tests {
             &base.join("worktrees"),
             &Mutex::default(),
         )
-        .unwrap();
+        .unwrap()
+        .worktree;
         assert_eq!(worktree.folder, worktree.root.join("app"));
         assert!(worktree.root.starts_with(base.join("worktrees/repo")));
         assert!(worktree.folder.join("main.rs").exists());
@@ -494,7 +508,9 @@ mod tests {
     #[test]
     fn keeps_commits_made_on_a_detached_head_on_a_branch() {
         let (base, root) = setup();
-        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default()).unwrap();
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default())
+            .unwrap()
+            .worktree;
         run(&worktree.root, &["checkout", "-q", "--detach"]);
         fs::write(worktree.root.join("detached.rs"), "").unwrap();
         run(&worktree.root, &["add", "."]);
@@ -512,7 +528,9 @@ mod tests {
     #[test]
     fn a_detached_head_a_branch_has_needs_no_rescue() {
         let (base, root) = setup();
-        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default()).unwrap();
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default())
+            .unwrap()
+            .worktree;
         run(&worktree.root, &["checkout", "-q", "--detach"]);
         assert_eq!(remove(&worktree, &root).unwrap(), Removal::Removed);
         let output = git(&root)
@@ -526,7 +544,9 @@ mod tests {
     #[test]
     fn a_kept_worktree_gets_no_rescue_branch() {
         let (base, root) = setup();
-        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default()).unwrap();
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default())
+            .unwrap()
+            .worktree;
         run(&worktree.root, &["checkout", "-q", "--detach"]);
         fs::write(worktree.root.join("detached.rs"), "").unwrap();
         run(&worktree.root, &["add", "."]);
@@ -553,7 +573,8 @@ mod tests {
             &base.join("worktrees"),
             &Mutex::default(),
         )
-        .unwrap();
+        .unwrap()
+        .worktree;
         run(&worktree.root, &["rm", "-q", "-r", "app"]);
         run(&worktree.root, &["commit", "-q", "-m", "drop app"]);
         assert!(!worktree.folder.exists());
@@ -565,7 +586,9 @@ mod tests {
     #[test]
     fn forgets_a_worktree_deleted_by_hand() {
         let (base, root) = setup();
-        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default()).unwrap();
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default())
+            .unwrap()
+            .worktree;
         fs::remove_dir_all(&worktree.root).unwrap();
         assert_eq!(remove(&worktree, &root).unwrap(), Removal::Removed);
         let output = git(&root).args(["worktree", "list"]).output().unwrap();
@@ -808,10 +831,14 @@ mod tests {
         fs::write(root.join("vendor/sub/.git"), "gitdir: /elsewhere").unwrap();
         fs::write(root.join("vendor/sub/lib.rs"), "lib").unwrap();
 
-        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default()).unwrap();
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default())
+            .unwrap()
+            .worktree;
 
         let mut expected = tree(&root);
-        expected.remove(Path::new("vendor/sub/.git"));
+        for path in ["vendor/sub", "vendor/sub/.git", "vendor/sub/lib.rs"] {
+            expected.remove(Path::new(path));
+        }
         assert_eq!(tree(&worktree.root), expected);
         assert_eq!(rev(&worktree.root, "HEAD"), rev(&root, "HEAD"));
         let output = git(&worktree.root)
@@ -846,7 +873,9 @@ mod tests {
         run(&root, &["commit", "-q", "-m", "ignore"]);
         fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
         fs::write(root.join("node_modules/pkg/index.js"), "").unwrap();
-        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default()).unwrap();
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default())
+            .unwrap()
+            .worktree;
         assert!(worktree.root.join("node_modules/pkg/index.js").exists());
         assert_eq!(remove(&worktree, &root).unwrap(), Removal::Removed);
         assert!(!worktree.root.exists());
@@ -857,7 +886,7 @@ mod tests {
     fn a_repository_holding_the_worktrees_isnt_copied_into_them() {
         let (base, root) = setup();
         let dir = root.join("worktrees");
-        let worktree = create_in(&root, &dir, &Mutex::default()).unwrap();
+        let worktree = create_in(&root, &dir, &Mutex::default()).unwrap().worktree;
         assert!(worktree.root.join("app/main.rs").exists());
         assert!(!worktree.root.join("worktrees").exists());
         fs::remove_dir_all(base).unwrap();
@@ -865,28 +894,126 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn leaves_nothing_behind_when_a_file_cant_be_copied() {
+    fn leaves_out_what_cant_be_read() {
         let (base, root) = setup();
-        let secret = root.join("secret");
-        fs::write(&secret, "").unwrap();
-        chmod(&secret, 0o000);
-        // Root reads it anyway.
-        if File::open(&secret).is_ok() {
+        fs::write(root.join("secret"), "").unwrap();
+        fs::create_dir(root.join("pgdata")).unwrap();
+        fs::write(root.join("pgdata/table"), "").unwrap();
+        chmod(&root.join("secret"), 0o000);
+        chmod(&root.join("pgdata"), 0o000);
+        // Root reads them anyway.
+        if File::open(root.join("secret")).is_ok() {
+            chmod(&root.join("pgdata"), 0o755);
             fs::remove_dir_all(base).unwrap();
             return;
         }
-        let dir = base.join("worktrees");
-        let err = format!(
-            "{:#}",
-            create_in(&root, &dir, &Mutex::default()).unwrap_err()
+        let created = create_in(&root, &base.join("worktrees"), &Mutex::default()).unwrap();
+        let mut unreadable = created.unreadable.clone();
+        unreadable.sort();
+        assert_eq!(
+            unreadable,
+            [PathBuf::from("pgdata"), PathBuf::from("secret")]
         );
-        assert!(
-            err.contains("Couldn't copy") && err.contains("secret"),
-            "{err}"
+        let worktree = created.worktree;
+        assert!(worktree.folder.join("app/main.rs").exists());
+        assert!(!worktree.root.join("secret").exists());
+        assert!(!worktree.root.join("pgdata").exists());
+        chmod(&root.join("pgdata"), 0o755);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn what_goes_during_the_copy_goes_from_the_worktree_too() {
+        let (base, root) = setup();
+        fs::write(root.join("cache.rs"), "").unwrap();
+        run(&root, &["add", "."]);
+        run(&root, &["commit", "-q", "-m", "cache"]);
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("target/debug/out"), "").unwrap();
+        let dst = base.join("copy");
+        run(
+            &root,
+            &["worktree", "add", "-q", "--detach", dst.to_str().unwrap()],
         );
-        assert!(!err.contains("left"), "{err}");
-        assert_nothing_left(&root, &dir);
-        chmod(&secret, 0o644);
+        let first = std::cell::Cell::new(true);
+        let unreadable = mirror::mirror(&root, &dst, &base.join("worktrees"), &|| {
+            if first.replace(false) {
+                fs::remove_file(root.join("cache.rs")).unwrap();
+                fs::remove_dir_all(root.join("target")).unwrap();
+            }
+            false
+        })
+        .unwrap();
+        assert!(unreadable.is_empty());
+        assert!(dst.join("app/main.rs").exists());
+        assert!(!dst.join("cache.rs").exists());
+        assert!(!dst.join("target").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn leaves_submodules_empty_so_no_change_in_them_goes_unseen() {
+        let (base, root) = setup();
+        let lib = base.join("lib");
+        fs::create_dir(&lib).unwrap();
+        fs::write(lib.join("lib.rs"), "v1").unwrap();
+        run(&lib, &["init", "-q"]);
+        run(&lib, &["add", "."]);
+        run(&lib, &["commit", "-q", "-m", "lib"]);
+        run(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                lib.to_str().unwrap(),
+                "lib",
+            ],
+        );
+        run(&root, &["commit", "-q", "-m", "submodule"]);
+        fs::write(root.join("lib/lib.rs"), "changed in the project").unwrap();
+
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default())
+            .unwrap()
+            .worktree;
+        assert!(worktree.root.join("lib").is_dir());
+        assert_eq!(fs::read_dir(worktree.root.join("lib")).unwrap().count(), 0);
+        assert!(worktree.root.join(".gitmodules").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaves_python_virtualenvs_out() {
+        let (base, root) = setup();
+        fs::create_dir_all(root.join(".venv/bin")).unwrap();
+        fs::write(root.join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        std::os::unix::fs::symlink("/usr/bin/python3", root.join(".venv/bin/python")).unwrap();
+        fs::write(root.join(".gitignore"), ".venv/\n").unwrap();
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default())
+            .unwrap()
+            .worktree;
+        assert!(worktree.root.join(".gitignore").exists());
+        assert!(!worktree.root.join(".venv").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn stops_in_the_middle_of_a_large_file() {
+        let (base, root) = setup();
+        File::create(root.join("large"))
+            .unwrap()
+            .set_len(3 * mirror::CHUNK)
+            .unwrap();
+        let dst = base.join("copy");
+        fs::create_dir(&dst).unwrap();
+        let copied = || fs::metadata(dst.join("large")).map_or(0, |meta| meta.len());
+        let err =
+            mirror::mirror(&root, &dst, &base.join("worktrees"), &|| copied() > 0).unwrap_err();
+        assert_eq!(err.root_cause().to_string(), "The worktree was abandoned.");
+        assert_eq!(copied(), mirror::CHUNK);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -904,7 +1031,12 @@ mod tests {
     fn abandoning_keeps_a_checkout_its_chat_took() {
         let (base, root) = setup();
         let checkout = Checkout::start_in(&root, Some(base.join("worktrees")));
-        let worktree = checkout.created().recv_blocking().unwrap().unwrap();
+        let worktree = checkout
+            .created()
+            .recv_blocking()
+            .unwrap()
+            .unwrap()
+            .worktree;
         // The checkout's thread drops its end of the channel just after
         // sending, which is what makes the checkout count as taken.
         let deadline = Instant::now() + Duration::from_secs(10);

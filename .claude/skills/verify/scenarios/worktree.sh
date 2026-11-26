@@ -8,7 +8,7 @@ seed_project "$project"
 git -C "$project" -c user.name=verify -c user.email=verify@example.com \
 	commit -q --allow-empty -m init
 cd "$project"
-printf '/.env\nnode_modules/\n' >.gitignore
+printf '/.env\nnode_modules/\n.venv/\n/locked/\n' >.gitignore
 printf 'tracked\n' >tracked.txt
 printf 'gone\n' >gone.txt
 printf '#!/bin/sh\necho ran\n' >run.sh
@@ -22,6 +22,11 @@ printf 'TOKEN=verify\n' >.env
 mkdir -p node_modules/pkg node_modules/.bin empty
 printf 'module.exports = 1\n' >node_modules/pkg/index.js
 ln -s ../pkg/index.js node_modules/.bin/pkg
+mkdir -p .venv/bin locked
+printf 'home = /usr/bin\n' >.venv/pyvenv.cfg
+printf 'data\n' >locked/table
+chmod 000 locked
+trap 'chmod 755 "$project/locked"' EXIT
 cd - >/dev/null
 
 sqlite3 "$DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('worktree_by_default', 1);"
@@ -33,6 +38,7 @@ shot new-chat
 key Return
 
 wait_until 30 "fake claude to start" cli_started claude
+shot unreadable-notice
 started=$(cli_started claude)
 cwd=$(field cwd "$started")
 log "claude started: $started"
@@ -46,9 +52,10 @@ agentshub/*) ;;
 *) fail "the worktree isn't on an agentshub branch" ;;
 esac
 
-# Every path, with its kind, mode, size, modification time and link target.
+# Every path, with its kind, mode, size, modification time and link target,
+# but for what isn't copied: a virtualenv, and what can't be read.
 listing() {
-	(cd "$1" && find . -path ./.git -prune -o \
+	(cd "$1" && find . \( -path ./.git -o -path ./.venv -o -path ./locked \) -prune -o \
 		\( -type f -printf '%P f %m %s %T@\n' \) -o \
 		\( -type l -printf '%P l %l\n' \) -o \
 		\( -type d -printf '%P d %m\n' \) | LC_ALL=C sort)
@@ -57,10 +64,12 @@ listing "$project" >"$AHV_OUT/project.list"
 listing "$cwd" >"$AHV_OUT/worktree.list"
 diff -u "$AHV_OUT/project.list" "$AHV_OUT/worktree.list" >&2 ||
 	fail "the worktree's files differ from the project's"
-diff -r --no-dereference -x .git "$project" "$cwd" >&2 ||
+diff -r --no-dereference -x .git -x .venv -x locked "$project" "$cwd" >&2 ||
 	fail "the worktree's contents differ from the project's"
 assert_eq "$(git -C "$cwd" status --porcelain | LC_ALL=C sort)" \
 	"$(git -C "$project" status --porcelain | LC_ALL=C sort)" "the worktree's git status"
+[ ! -e "$cwd/.venv" ] || fail "the virtualenv was copied"
+[ ! -e "$cwd/locked" ] || fail "the unreadable folder is in the worktree"
 log "worktree matches the project: $(wc -l <"$AHV_OUT/project.list") paths"
 
 key ctrl+grave

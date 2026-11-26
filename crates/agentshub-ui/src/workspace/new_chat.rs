@@ -127,24 +127,31 @@ impl Workspace {
             let Ok(created) = created.recv().await else {
                 return;
             };
+            let created =
+                created.map(|created| (created.worktree, unreadable_message(&created.unreadable)));
             let added = this.update_in(cx, |this, window, cx| match &created {
                 // All the chats were closed meanwhile, this one with them.
-                Ok(worktree) if this.lifecycle.closed_all() != closed_all => {
+                Ok((worktree, _)) if this.lifecycle.closed_all() != closed_all => {
                     this.remove_worktree(worktree, &project, None, cx)
                 }
                 Err(_) if this.lifecycle.closed_all() != closed_all => {}
-                Ok(worktree) => this.add_chat(
-                    project_id,
-                    agent,
-                    &project,
-                    Some(worktree),
-                    title.clone(),
-                    Asked {
-                        navigations,
-                        closed_all,
-                    },
-                    cx,
-                ),
+                Ok((worktree, unreadable)) => {
+                    if let Some(message) = unreadable {
+                        window.push_notification(message.clone(), cx);
+                    }
+                    this.add_chat(
+                        project_id,
+                        agent,
+                        &project,
+                        Some(worktree),
+                        title.clone(),
+                        Asked {
+                            navigations,
+                            closed_all,
+                        },
+                        cx,
+                    )
+                }
                 Err(err) => {
                     window.push_notification(format!("Couldn't create a worktree: {err:#}"), cx)
                 }
@@ -153,7 +160,7 @@ impl Workspace {
             // The workspace outlives its window (see `tray`), so shutdown
             // still has to know of it.
             if added.is_err()
-                && let Ok(worktree) = created
+                && let Ok((worktree, _)) = created
             {
                 let app: &mut AsyncApp = cx;
                 let job = this
@@ -404,4 +411,27 @@ impl Workspace {
         })
         .detach();
     }
+}
+
+/// Tells what of the project the worktree lacks as it couldn't be read, if
+/// anything.
+fn unreadable_message(unreadable: &[PathBuf]) -> Option<String> {
+    const SHOWN: usize = 3;
+    let mut names: Vec<String> = unreadable
+        .iter()
+        .take(SHOWN)
+        .map(|path| path.display().to_string())
+        .collect();
+    if unreadable.len() > SHOWN {
+        names.push(format!("{} more", unreadable.len() - SHOWN));
+    }
+    let last = names.pop()?;
+    let list = if names.is_empty() {
+        last
+    } else {
+        format!("{} and {last}", names.join(", "))
+    };
+    Some(format!(
+        "The worktree doesn't have what you can't read in the project: {list}."
+    ))
 }

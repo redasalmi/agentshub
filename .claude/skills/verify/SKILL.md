@@ -49,7 +49,9 @@ each chat resumed in its own folder, with the CLI's variable unset for the
 default one.
 
 `scenarios/worktree.sh`: seed a project with uncommitted changes, an
-untracked file, `.env` and `node_modules`, start a chat in a worktree, check
+untracked file, `.env`, `node_modules`, a virtualenv and an unreadable
+folder, start a chat in a worktree, check the notice about the unreadable
+folder, check
 the CLI runs in it and that it matches the project path for path (kind, mode,
 size, modification time, link target, contents and git status), and run
 commands in its project shell.

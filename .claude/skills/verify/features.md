@@ -12,7 +12,7 @@ judge its screenshots. How to do each one (keys, clicks) is in `docs/`, mostly
 | Start from the empty state | That agent starts in the project folder | |
 | New chat dialog | Agent cards, name field, worktree checkbox in git projects | smoke |
 | Start from the dialog | Enter starts the picked agent, a number or click starts that one; the chat runs it | smoke |
-| Chat in a worktree | CLI's cwd is a new checkout on its own branch, holding what the project folder holds: uncommitted changes, untracked and ignored files, modes, modification times | worktree |
+| Chat in a worktree | CLI's cwd is a new checkout on its own branch, holding what the project folder holds: uncommitted changes, untracked and ignored files, modes, modification times; not virtualenvs, nor what can't be read, which a notice names | worktree |
 | Type to the agent | The CLI gets the keys; nothing else does | smoke |
 | Chat title | Sidebar and header show the first prompt or the CLI's title | smoke |
 | Resume after restart | The chat resumes the same session (`--resume <id>`) | smoke |

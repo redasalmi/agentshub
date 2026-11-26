@@ -16,7 +16,9 @@ The copy starts as your project folder is at that moment, file for file: changes
 
 - The new branch starts from the commit you have checked out. Your uncommitted changes are in the copy as uncommitted changes, including ones you had staged.
 - On btrfs or XFS, the copy shares the files' contents with your project until one side changes them, so even a large `node_modules` takes almost no extra room. On other filesystems, everything is copied in full.
-- A submodule's files are copied, but not its link to its own repository, so git commands in it work on the chat's branch.
+- Python virtual environments (a `.venv` or any folder with a `pyvenv.cfg`) aren't copied, since they point back to your project folder and would run its code instead of the copy's. The agent makes its own, as with `uv sync`.
+- Files and folders you can't read, such as a database folder a container owns, are left out, and Agents Hub tells you which.
+- Submodules are left empty, as git leaves them in any new worktree. To have them in the copy, run `git submodule update --init` there.
 
 ## Where your work ends up
 
