@@ -155,4 +155,16 @@ impl Settings {
         });
         store.set_text(THEME, value.key())
     }
+
+    pub fn set_editor(
+        store: &Store,
+        value: Editor,
+        cx: &mut App,
+    ) -> impl Future<Output = Result<()>> + use<> {
+        cx.set_global(Self {
+            editor: Some(value),
+            ..*cx.global::<Self>()
+        });
+        store.set_text(EDITOR, value.key())
+    }
 }

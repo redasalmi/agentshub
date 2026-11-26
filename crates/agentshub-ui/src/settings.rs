@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
@@ -16,7 +17,9 @@ use agentshub_app::settings::{
     Appearance, DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE, Motion,
     Settings, ThemeFamily,
 };
+use agentshub_core::editors::Editor;
 
+use crate::chat::{PickEditor, editor_choices, editor_icon, editor_menu};
 use crate::palette;
 use crate::theme as appearance;
 
@@ -37,6 +40,7 @@ pub enum SettingsIntent {
     Zoom(f32),
     SetCloseToTray(bool),
     SetWorktreeByDefault(bool),
+    SetEditor(Editor),
     SetNotificationPopups(bool),
     SetNotificationSound(bool),
     TestNotifications,
@@ -95,6 +99,7 @@ fn render_settings(
     let theme_focus = choice_focus("theme", ThemeFamily::ALL.len(), window, cx);
     let mode_focus = choice_focus("appearance", Appearance::ALL.len(), window, cx);
     let motion_focus = choice_focus("motion", Motion::ALL.len(), window, cx);
+    let editor_row = render_editor_row(cx);
     let theme = cx.theme();
     let palette = appearance::palette(cx);
     let Settings {
@@ -306,7 +311,7 @@ fn render_settings(
         ))
         .child(settings_group(
             "Behavior",
-            vec![
+            [
                 setting_row(
                     "Keep running in the tray",
                     Some(
@@ -337,7 +342,10 @@ fn render_settings(
                         .into_any_element(),
                     cx,
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(editor_row)
+            .collect(),
             cx,
         ))
         .child(settings_group(
@@ -443,6 +451,37 @@ fn render_settings(
                 .child(concat!("Agents Hub ", env!("CARGO_PKG_VERSION"))),
         )
         .into_any_element()
+}
+
+/// The editor chats open in, once the installed ones are known and there are
+/// any.
+fn render_editor_row(cx: &mut Context<SettingsView>) -> Option<AnyElement> {
+    let (current, all) = editor_choices(cx)?;
+    let view = cx.entity().downgrade();
+    let pick: PickEditor = Rc::new(move |editor, window, cx| {
+        view.update(cx, |this, cx| {
+            this.send(SettingsIntent::SetEditor(editor), window, cx);
+        })
+        .ok();
+    });
+    let editor = current.editor;
+    Some(setting_row(
+        "Code editor",
+        Some("The editor the button in a chat's header opens the chat's folder in."),
+        Button::new("editor-setting")
+            .outline()
+            .small()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(editor_icon(current.icon.as_deref()))
+                    .child(editor.name()),
+            )
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| editor_menu(menu, editor, &all, &pick))
+            .into_any_element(),
+        cx,
+    ))
 }
 
 /// A titled group of settings, one row each, in a card.

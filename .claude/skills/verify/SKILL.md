@@ -61,12 +61,19 @@ commands in its project shell.
 text attributes) and shoots it at the default size and zoomed in. Compare the
 shots with the same text in Ghostty.
 
+`scenarios/editor.sh`: installs a fake Zed (with an icon) and VS Code (without),
+opens the chat's folder from the header, picks VS Code from its menu, checks
+both launches in `editor.log` and the saved setting, then picks Zed in the
+settings and checks nothing opened. Editors installed under `/usr/share` show in
+the menus too, after the fakes.
+
 To cover a change, add a scenario next to it or a step to an existing one. A
 scenario is bash sourced with `set -e` after `scripts/lib.sh`:
 
 | Helper | Does |
 | --- | --- |
 | `seed_project DIR` | Creates a git repo and adds it as a project (app stopped) |
+| `seed_editor ID [SVG]` | Installs a fake editor as desktop entry `ID`, logging `ID\|cwd\|args` to `$EDITOR_LOG` |
 | `app_start` / `app_stop` | Launches on Xwayland and waits for the window / SIGTERMs by PID |
 | `key ctrl+shift+n` | xdotool key names; pauses after |
 | `type_text "..."` | Types into the focused window |

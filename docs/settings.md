@@ -13,6 +13,7 @@ Open the settings by clicking the gear button at the bottom of the rail, choosin
 
 - **Keep running in the tray**: closing the window keeps your agents working. See [Notifications and the tray](notifications-and-tray.md).
 - **Start chats in a git worktree**: new chats in git projects get their own copy of the project. See [Separate checkouts for each chat](worktrees.md).
+- **Code editor**: the editor the button at the top of a chat opens the chat's folder in. It lists the installed editors Agents Hub knows. See [Working in a chat](working-in-a-chat.md#opening-the-folder-in-your-editor).
 
 ## Notifications
 

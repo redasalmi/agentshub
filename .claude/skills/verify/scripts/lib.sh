@@ -137,3 +137,23 @@ assert_clis_gone() {
 }
 
 assert_eq() { [ "$1" = "$2" ] || fail "$3: expected '$2', got '$1'"; }
+
+# seed_editor DESKTOP_ID [SVG]: installs a fake editor as the desktop entry
+# DESKTOP_ID, which logs "DESKTOP_ID|cwd|args" to $EDITOR_LOG and exits. With
+# SVG, the entry names an icon of that SVG.
+EDITOR_LOG="$AHV_OUT/editor.log"
+seed_editor() {
+	local id=$1 bin="$AHV_WORK/editors/$1"
+	mkdir -p "$AHV_WORK/editors" "$XDG_DATA_HOME/applications"
+	printf '#!/bin/sh\necho "%s|$(pwd -P)|$*" >>"%s"\n' "$id" "$EDITOR_LOG" >"$bin"
+	chmod +x "$bin"
+	{
+		printf '[Desktop Entry]\nType=Application\nName=%s\nExec=%s %%U\n' "$id" "$bin"
+		if [ -n "${2:-}" ]; then
+			mkdir -p "$XDG_DATA_HOME/icons/hicolor/scalable/apps"
+			printf '%s' "$2" >"$XDG_DATA_HOME/icons/hicolor/scalable/apps/agentshub-test-$id.svg"
+			printf 'Icon=agentshub-test-%s\n' "$id"
+		fi
+	} >"$XDG_DATA_HOME/applications/$id.desktop"
+	log "seeded editor $id"
+}

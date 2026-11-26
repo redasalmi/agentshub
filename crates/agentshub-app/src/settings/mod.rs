@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use gpui_kit::*;
 use rusqlite::types::{FromSql, Value};
 
+use agentshub_core::editors::Editor;
 use agentshub_core::store::Store;
 
 mod apply;
@@ -22,6 +23,7 @@ const RAIL_WIDTH: &str = "rail_width";
 const SHELL_SHARE: &str = "shell_share";
 const MOTION: &str = "motion";
 const TERMINAL_FONT_SIZE: &str = "terminal_font_size";
+const EDITOR: &str = "editor";
 
 /// The sidebar's width until the user drags its edge.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 340.;
@@ -170,6 +172,8 @@ pub struct Settings {
     pub shell_share: f32,
     pub motion: Motion,
     pub terminal_font_size: f32,
+    /// The editor chats open their folder in, when the user picked one.
+    pub editor: Option<Editor>,
 }
 
 impl Default for Settings {
@@ -187,6 +191,7 @@ impl Default for Settings {
             shell_share: DEFAULT_SHELL_SHARE,
             motion: Motion::default(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
+            editor: None,
         }
     }
 }
@@ -233,6 +238,7 @@ impl Settings {
             terminal_font_size: read::<f32>(saved, TERMINAL_FONT_SIZE)
                 .filter(|size| (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(size))
                 .unwrap_or(defaults.terminal_font_size),
+            editor: read::<String>(saved, EDITOR).and_then(|key| Editor::from_key(&key)),
         }
     }
 }
@@ -240,9 +246,10 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::{
-        APPEARANCE, Appearance, CLOSE_TO_TRAY, MOTION, Motion, SHELL_SHARE, SIDEBAR_WIDTH,
+        APPEARANCE, Appearance, CLOSE_TO_TRAY, EDITOR, MOTION, Motion, SHELL_SHARE, SIDEBAR_WIDTH,
         Settings, ThemeFamily,
     };
+    use agentshub_core::editors::Editor;
     use agentshub_core::store::Db;
 
     #[test]
@@ -254,12 +261,21 @@ mod tests {
         db.set_number(SIDEBAR_WIDTH, 450.).unwrap();
         db.set_number(SHELL_SHARE, 0.5).unwrap();
         db.set_text(MOTION, "wobbly").unwrap();
+        db.set_text(EDITOR, "kate").unwrap();
         let settings = Settings::load(&db.settings().unwrap());
+        assert_eq!(settings.editor, Some(Editor::Kate));
         assert!(settings.close_to_tray);
         assert_eq!(settings.appearance, Appearance::Dark);
         assert_eq!(settings.sidebar_width, 450.);
         assert_eq!(settings.shell_share, 0.5);
         assert_eq!(settings.motion, Settings::default().motion);
+    }
+
+    #[test]
+    fn unknown_editor_loads_as_none() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_text(EDITOR, "notepad").unwrap();
+        assert_eq!(Settings::load(&db.settings().unwrap()).editor, None);
     }
 
     #[test]

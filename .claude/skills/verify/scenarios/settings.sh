@@ -1,9 +1,11 @@
 # Opens the settings, changes notifications, closes them, and reopens them
 # to change the theme. Covers: settings intents reaching the workspace,
-# persistence, the close shortcut and the theme cards.
+# persistence, the close shortcut and the theme cards. An editor is installed
+# so the Code editor row shows on every machine.
 
 project="$AHV_WORK/project"
 seed_project "$project"
+seed_editor dev.zed.Zed
 
 setting() { sql "SELECT value FROM settings WHERE key = '$1'"; }
 
@@ -16,9 +18,9 @@ shot opened
 xdotool mousemove 640 400
 for _ in 1 2 3 4 5 6 7 8 9 10; do xdotool click 5; sleep 0.1; done
 shot notifications
-click 1090 247
+click 1090 318
 wait_until 5 "popups off" [ "$(setting notification_popups)" = "0" ]
-click 1090 316
+click 1090 389
 wait_until 5 "sound off" [ "$(setting notification_sound)" = "0" ]
 shot changed
 

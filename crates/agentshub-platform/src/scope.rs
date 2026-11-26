@@ -300,6 +300,50 @@ pub fn stop_leftovers() {
     }
 }
 
+/// Moves `pid`, an app started for the user such as an editor, into a scope
+/// of its own, named the way desktop launchers name theirs. Nothing here stops
+/// it, so it outlives Agents Hub, and `stop_leftovers` never matches it.
+pub fn adopt(pid: u32, desktop_id: &str) {
+    let Some(bus) = BUS.as_ref() else {
+        return;
+    };
+    let Some(pidfd) = pidfd(pid) else {
+        return;
+    };
+    let escaped: String = desktop_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '.' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = format!(
+        "app-{PREFIX}-{escaped}-{}.scope",
+        uuid::Uuid::new_v4().simple()
+    );
+    let properties = vec![
+        (
+            "Description",
+            Value::from(format!("{desktop_id} opened from Agents Hub")),
+        ),
+        ("PIDFDs", Value::from(vec![Fd::from(pidfd)])),
+        ("CollectMode", Value::from("inactive-or-failed")),
+    ];
+    let aux: Vec<(&str, Vec<(&str, Value)>)> = Vec::new();
+    if let Err(err) = bus.call_method(
+        Some(DESTINATION),
+        PATH,
+        Some(MANAGER),
+        "StartTransientUnit",
+        &(name.as_str(), "fail", properties, aux),
+    ) {
+        eprintln!("can't put {desktop_id} in a scope of its own: {err}");
+    }
+}
+
 /// Whether systemd can put a process in a scope from its pidfd, which takes
 /// systemd 255 or later.
 pub fn available() -> bool {
@@ -315,4 +359,46 @@ pub fn available() -> bool {
     child.kill().ok();
     child.wait().ok();
     available
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adopted(desktop_id: &str) -> Vec<String> {
+        let Some(bus) = BUS.as_ref() else {
+            return Vec::new();
+        };
+        bus.call_method(
+            Some(DESTINATION),
+            PATH,
+            Some(MANAGER),
+            "ListUnitsByPatterns",
+            &(
+                vec!["active"],
+                vec![format!("app-{PREFIX}-{desktop_id}-*.scope")],
+            ),
+        )
+        .and_then(|reply| reply.body().deserialize::<Vec<Unit>>())
+        .map(|units| units.into_iter().map(|(name, ..)| name).collect())
+        .unwrap_or_default()
+    }
+
+    #[test]
+    fn adopts_into_a_scope_of_its_own() {
+        if !available() {
+            return;
+        }
+        let id = format!("sleep{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        adopt(child.id(), &id);
+        let scopes = adopted(&id);
+        child.kill().ok();
+        child.wait().ok();
+        assert_eq!(scopes.len(), 1, "{scopes:?}");
+        assert!(!scopes[0].starts_with(PREFIX));
+    }
 }

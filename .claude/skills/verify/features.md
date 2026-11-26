@@ -24,6 +24,7 @@ judge its screenshots. How to do each one (keys, clicks) is in `docs/`, mostly
 | Rename chat | Title editable and saved | |
 | Archive, close idle, close all | Those chats leave; their CLIs stop | |
 | Project shell | Shell in the project shows and hides | |
+| Open in editor | The header's editor icon opens the chat's folder in the current editor; picking another from its menu opens it there and makes it the default, as the Code editor setting shows; picking in the settings opens nothing | editor |
 | Earlier sessions | The chat's earlier sessions show and hide | |
 | Copy, paste | Selection copied; clipboard pasted to the CLI | |
 | Font size | Terminal text grows and shrinks | rendering |

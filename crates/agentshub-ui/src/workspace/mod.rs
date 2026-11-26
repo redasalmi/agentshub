@@ -56,6 +56,7 @@ use agentshub_app::catalog::Catalog;
 mod codex;
 mod commands;
 mod dialogs;
+mod editor;
 mod feedback;
 mod format;
 mod layout;

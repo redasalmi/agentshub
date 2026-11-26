@@ -70,6 +70,7 @@ impl Workspace {
             active: self.active.is_some(),
             earlier,
             history_open,
+            editors: crate::chat::editor_choices(cx),
             focus: self.chat_focus.clone(),
             on,
             save,
@@ -130,6 +131,12 @@ impl Workspace {
             ChatIntent::ToggleHistory => self.toggle_history(&ToggleHistory, window, cx),
             ChatIntent::ToggleShell => self.toggle_shell(&ToggleShell, window, cx),
             ChatIntent::ResizeShell(share) => self.resize_shell(share, cx),
+            ChatIntent::OpenEditor(editor) => self.open_chat_in(editor, id, cx),
+            ChatIntent::PickEditor(editor) => {
+                let saved = Settings::set_editor(&self.store, editor, cx);
+                self.save_setting(saved, cx);
+                self.open_chat_in(editor, id, cx);
+            }
         }
     }
 

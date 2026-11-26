@@ -21,6 +21,8 @@ pub struct Scope {
     pub stop_all: fn(),
     /// Waits for every scope to be stopped and empty.
     pub wait_stopped: fn(),
+    /// Moves an app started for the user into a scope that is never stopped.
+    pub adopt: fn(u32, &str),
 }
 
 static SCOPE: OnceLock<Scope> = OnceLock::new();
@@ -51,12 +53,15 @@ fn no_stop() {}
 
 fn no_wait() {}
 
+fn no_adopt(_: u32, _: &str) {}
+
 const DEFAULT: Scope = Scope {
     pidfd: no_pidfd,
     watch: no_watch,
     available: no_available,
     stop_all: no_stop,
     wait_stopped: no_wait,
+    adopt: no_adopt,
 };
 
 pub(super) fn pidfd(pid: u32) -> Option<OwnedFd> {
@@ -69,6 +74,10 @@ pub(super) fn watch(
     gone: smol::channel::Sender<()>,
 ) -> mpsc::Sender<()> {
     (hooks().watch)(program, pidfd, gone)
+}
+
+pub(crate) fn adopt(pid: u32, desktop_id: &str) {
+    (hooks().adopt)(pid, desktop_id);
 }
 
 #[cfg(test)]

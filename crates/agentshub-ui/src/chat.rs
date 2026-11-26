@@ -1,24 +1,26 @@
 //! The chat sheet: its header, history, terminal and shell.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::base::{InteractiveElementExt as _, ResizeHandleRenderer, ResizeHandleState};
 use gpui_kit::component::TitleBar;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu};
+use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::resizable::{HandleEdge, resize_handle, resize_handle_appearance};
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use agentshub_app::settings::DEFAULT_SHELL_SHARE;
+use agentshub_app::editors::Installed;
+use agentshub_app::settings::{DEFAULT_SHELL_SHARE, Settings};
 use agentshub_core::agent::Agent;
+use agentshub_core::editors::{self, Editor, Found};
 use agentshub_core::format::{Turn, capitalized, duration};
 
 use crate::history::History;
@@ -60,6 +62,10 @@ pub enum ChatIntent {
     ToggleHistory,
     ToggleShell,
     ResizeShell(f32),
+    /// Opens the chat's folder in that editor.
+    OpenEditor(Editor),
+    /// Makes that editor the one chats open in, and opens the chat's folder.
+    PickEditor(Editor),
 }
 
 type On = Rc<dyn Fn(ChatIntent, &mut Window, &mut App)>;
@@ -93,6 +99,8 @@ pub struct ChatSheet {
     pub active: bool,
     pub earlier: usize,
     pub history_open: bool,
+    /// The editor the chat opens in, and every installed one.
+    pub editors: Option<(EditorChoice, Vec<EditorChoice>)>,
     pub focus: FocusHandle,
     pub on: On,
     /// Saves the shell's height once a drag ends.
@@ -441,6 +449,9 @@ impl ChatSheet {
                                         }),
                                 )
                             })
+                            .when_some(self.editors.clone(), |this, (current, all)| {
+                                this.child(editor_button(&current, all, Rc::clone(&on)))
+                            })
                             .child({
                                 let on = Rc::clone(&on);
                                 Button::new("shell")
@@ -480,6 +491,82 @@ impl ChatSheet {
             )
             .into_any_element()
     }
+}
+
+/// An installed editor, with the icon its desktop entry names.
+#[derive(Clone)]
+pub struct EditorChoice {
+    pub editor: Editor,
+    pub icon: Option<PathBuf>,
+}
+
+/// The editor chats open in, and every installed one, once they are known.
+pub fn editor_choices(cx: &App) -> Option<(EditorChoice, Vec<EditorChoice>)> {
+    let installed = &cx.try_global::<Installed>()?.0;
+    let choice = |found: &Found| EditorChoice {
+        editor: found.editor,
+        icon: found.icon.clone(),
+    };
+    let current = editors::pick(installed, cx.global::<Settings>().editor)?;
+    Some((choice(current), installed.iter().map(choice).collect()))
+}
+
+/// An editor's icon, or a folder of code when none was found.
+pub fn editor_icon(icon: Option<&Path>) -> AnyElement {
+    match icon {
+        Some(path) => img(path.to_path_buf())
+            .flex_none()
+            .size_4()
+            .into_any_element(),
+        None => Icon::new(ExtraIcon::FolderCode).small().into_any_element(),
+    }
+}
+
+pub type PickEditor = Rc<dyn Fn(Editor, &mut Window, &mut App)>;
+
+/// The installed editors with their icons, `current` checked.
+pub fn editor_menu(
+    menu: PopupMenu,
+    current: Editor,
+    all: &[EditorChoice],
+    pick: &PickEditor,
+) -> PopupMenu {
+    all.iter().fold(menu, |menu, choice| {
+        let (editor, icon) = (choice.editor, choice.icon.clone());
+        let pick = Rc::clone(pick);
+        menu.item(
+            PopupMenuItem::element(move |_, _| {
+                h_flex()
+                    .gap_2()
+                    .child(editor_icon(icon.as_deref()))
+                    .child(editor.name())
+            })
+            .checked(editor == current)
+            .on_click(move |_, window, cx| pick(editor, window, cx)),
+        )
+    })
+}
+
+/// Opens the chat's folder in the current editor, or picks another.
+fn editor_button(current: &EditorChoice, all: Vec<EditorChoice>, on: On) -> impl IntoElement {
+    let editor = current.editor;
+    let pick: PickEditor = {
+        let on = Rc::clone(&on);
+        Rc::new(move |editor, window, cx| on(ChatIntent::PickEditor(editor), window, cx))
+    };
+    DropdownButton::new("editor")
+        .ghost()
+        .small()
+        .button(
+            Button::new("open-editor")
+                .ghost()
+                .small()
+                .child(editor_icon(current.icon.as_deref()))
+                .tooltip(format!("Open in {}", editor.name()))
+                .on_click(move |_, window, cx| on(ChatIntent::OpenEditor(editor), window, cx)),
+        )
+        .menu_accessibility_label("Choose the editor")
+        .dropdown_menu(move |menu, _, _| editor_menu(menu, editor, &all, &pick))
 }
 
 /// The bar on the edge of the terminal that has the keyboard.

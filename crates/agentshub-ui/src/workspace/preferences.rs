@@ -135,6 +135,10 @@ impl Workspace {
                 let saved = Settings::set_worktree_by_default(&self.store, value, cx);
                 self.save_setting(saved, cx);
             }
+            SettingsIntent::SetEditor(value) => {
+                let saved = Settings::set_editor(&self.store, value, cx);
+                self.save_setting(saved, cx);
+            }
             SettingsIntent::SetNotificationPopups(value) => {
                 let saved = Settings::set_notification_popups(&self.store, value, cx);
                 self.save_setting(saved, cx);

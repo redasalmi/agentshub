@@ -3,4 +3,5 @@
 pub mod alerts;
 pub mod bootstrap;
 pub mod catalog;
+pub mod editors;
 pub mod settings;

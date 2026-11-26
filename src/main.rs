@@ -24,6 +24,7 @@ gpui_kit::assets::icon_assets!(
         Archive,
         ArchiveRestore,
         Clock,
+        FolderCode,
         Pencil,
         Pin,
         PinOff,
@@ -63,9 +64,11 @@ fn main() {
         available: scope::available,
         stop_all: scope::stop_all,
         wait_stopped: scope::wait_stopped,
+        adopt: scope::adopt,
     });
     application().with_assets(Assets).run(move |cx| {
         init(cx);
+        agentshub_app::editors::look_up(cx);
         agentshub_ui::terminal_view::init(cx);
         workspace::init(cx);
         // The tray decides whether closing the window quits.
