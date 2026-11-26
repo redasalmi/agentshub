@@ -101,6 +101,11 @@ impl TerminalView {
         }
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the scroll steps of one wheel event"
+    )]
     fn scroll_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let line_height = cell_size(window, cx).height;
         if event.modifiers.control {
@@ -251,6 +256,11 @@ impl TerminalView {
         });
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a row within the scrollback, from a fraction in 0..=1"
+    )]
     fn drag_thumb(&self, y: Pixels, cx: &App) {
         let (Some(grab), Some(frame)) = (self.thumb_grab, self.terminal.read(cx).frame()) else {
             return;
@@ -397,6 +407,11 @@ impl Focusable for TerminalView {
 }
 
 impl Render for TerminalView {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "grid sizes in cells, at least 1 and far below u16::MAX"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let terminal = self.terminal.clone();
         let frame = terminal.read(cx).frame();
@@ -404,7 +419,7 @@ impl Render for TerminalView {
         let background = frame
             .as_ref()
             .map_or(cx.theme().background, |frame| color(frame.background));
-        let bounds = self.bounds.clone();
+        let bounds = Rc::clone(&self.bounds);
         let view = cx.entity();
         let focus_handle = self.focus_handle.clone();
         let marked_text = self.marked_text.clone();

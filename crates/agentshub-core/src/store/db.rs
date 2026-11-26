@@ -96,7 +96,9 @@ fn lock_dir(dir: &Path) -> anyhow::Result<fs::File> {
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs() as i64)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -503,7 +505,7 @@ impl Db {
         for (position, id) in ids.iter().enumerate() {
             tx.execute(
                 "UPDATE chats SET position = ?2 WHERE id = ?1",
-                params![id, position as i64],
+                params![id, position],
             )?;
         }
         tx.commit()
@@ -529,7 +531,7 @@ impl Db {
         for (position, id) in ids.iter().enumerate() {
             tx.execute(
                 "UPDATE projects SET position = ?2 WHERE id = ?1",
-                params![id, position as i64],
+                params![id, position],
             )?;
         }
         tx.commit()
@@ -698,7 +700,7 @@ impl Db {
                         agent: agent(&row.get::<_, String>(0)?)?,
                         agent_id: row.get(1)?,
                         path: PathBuf::from(row.get::<_, String>(2)?),
-                        offset: row.get::<_, i64>(3)? as u64,
+                        offset: row.get(3)?,
                         parser: row.get(4)?,
                     })
                 },
@@ -716,7 +718,7 @@ impl Db {
             Ok((
                 row.get(0)?,
                 PathBuf::from(row.get::<_, String>(1)?),
-                row.get::<_, i64>(2)? as u64,
+                row.get(2)?,
                 row.get(3)?,
             ))
         })?
@@ -807,7 +809,7 @@ impl Db {
                         OR (session_id = ?2 AND kind = 'notice')
                      ORDER BY id DESC LIMIT ?3",
                 )?;
-                let rows = stmt.query_map(params![leaf, session_id, limit as i64], item_row)?;
+                let rows = stmt.query_map(params![leaf, session_id, limit], item_row)?;
                 rows.collect::<Result<Vec<_>>>()?
             }
             // Codex transcripts don't branch, and their items have no line ids
@@ -817,7 +819,7 @@ impl Db {
                     "SELECT id, kind, payload FROM items
                      WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
                 )?;
-                let rows = stmt.query_map(params![session_id, limit as i64], item_row)?;
+                let rows = stmt.query_map(params![session_id, limit], item_row)?;
                 rows.collect::<Result<Vec<_>>>()?
             }
         };
@@ -1218,7 +1220,10 @@ mod tests {
             let session = record(&db, chat(&db), &id, "startup").session_id;
             save(&db, session, vec![message("1", Kind::User, "needle")]);
         }
-        assert_eq!(found(&db, "needle").len(), SEARCH_HITS as usize);
+        assert_eq!(
+            found(&db, "needle").len(),
+            usize::try_from(SEARCH_HITS).unwrap()
+        );
     }
 
     #[test]

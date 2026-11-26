@@ -67,7 +67,7 @@ impl Pty {
         let (stop_tx, stop_rx) = mpsc::channel();
         let (reaped_tx, reaped) = smol::channel::bounded::<()>(1);
         let exit_tx = tx.clone();
-        let reaper_pid = pid.clone();
+        let reaper_pid = Arc::clone(&pid);
         // The CLI's scope is stopped once the reaper is done, and the CLI only
         // counts as reaped once nothing is left in it: what it started can go
         // on writing in its folder until then. The CLI is only moved there

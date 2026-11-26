@@ -19,10 +19,10 @@ struct Application {
 
 #[zbus::interface(name = "org.freedesktop.Application")]
 impl Application {
-    fn activate(&self, platform_data: HashMap<String, OwnedValue>) {
+    fn activate(&self, mut platform_data: HashMap<String, OwnedValue>) {
         let token = platform_data
-            .get("activation-token")
-            .and_then(|token| String::try_from(token.clone()).ok());
+            .remove("activation-token")
+            .and_then(|token| String::try_from(token).ok());
         self.shown.try_send(token).ok();
     }
 }

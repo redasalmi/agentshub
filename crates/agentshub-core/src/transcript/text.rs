@@ -1,6 +1,6 @@
 //! Trimming the text, tool calls and times out of transcript lines.
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::*;
 

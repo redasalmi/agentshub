@@ -97,6 +97,7 @@ struct Canvas {
 }
 
 impl Canvas {
+    #[expect(clippy::cast_sign_loss, reason = "canvas sizes are non-negative")]
     fn new(metrics: Metrics) -> Self {
         Self {
             width: metrics.width,
@@ -109,6 +110,7 @@ impl Canvas {
         self.shade(x0, y0, x1, y1, 0xff);
     }
 
+    #[expect(clippy::cast_sign_loss, reason = "canvas coordinates are non-negative")]
     fn shade(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, alpha: u8) {
         let (x0, x1) = (x0.clamp(0, self.width), x1.clamp(0, self.width));
         let (y0, y1) = (y0.clamp(0, self.height), y1.clamp(0, self.height));
@@ -122,6 +124,7 @@ impl Canvas {
 
     /// The pixels as rectangles: each row's runs of one alpha, merged with
     /// the same run in the rows below.
+    #[expect(clippy::cast_sign_loss, reason = "canvas coordinates are non-negative")]
     fn into_rects(self) -> Rc<[Rect]> {
         let mut done = Vec::new();
         let mut open: Vec<Rect> = Vec::new();
@@ -165,6 +168,10 @@ impl Canvas {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the low byte of a braille code point is its dot pattern"
+)]
 fn rects(ch: char, metrics: Metrics) -> Option<Rc<[Rect]>> {
     let mut canvas = Canvas::new(metrics);
     let cp = ch as u32;
@@ -204,6 +211,10 @@ const LINES: [&[u8; 4]; 128] = [
 
 /// Ghostty's `linesChar`: each arm runs from its edge to the centre, ending
 /// where the arms across it need it to, so joints and corners close up.
+#[expect(
+    clippy::too_many_lines,
+    reason = "follows Ghostty's linesChar in one piece, so the two can be compared"
+)]
 fn lines(canvas: &mut Canvas, arms: &[u8; 4], metrics: Metrics) {
     let [up, right, down, left] = *arms;
     let Metrics {
@@ -408,14 +419,26 @@ fn dashes(canvas: &mut Canvas, cp: u32, metrics: Metrics) {
 
 /// Where a fraction of a cell's side starts and ends, rounded as Ghostty
 /// rounds it, so halves meet on odd sizes.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "pixel sizes within one cell"
+)]
 fn fraction_start(fraction: f32, side: i32) -> i32 {
     side - ((1. - fraction) * side as f32).round() as i32
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "pixel sizes within one cell"
+)]
 fn fraction_end(fraction: f32, side: i32) -> i32 {
     (fraction * side as f32).round() as i32
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "pixel sizes within one cell"
+)]
 fn blocks(canvas: &mut Canvas, cp: u32, metrics: Metrics) {
     let Metrics { width, height, .. } = metrics;
     let lower = |canvas: &mut Canvas, eighths: f32| {
@@ -565,6 +588,7 @@ fn sextants(canvas: &mut Canvas, index: u32, metrics: Metrics) {
 
 /// The curved and slanted sprites, in device pixels, anti-aliased by the
 /// path renderer and clipped to the cell.
+#[expect(clippy::too_many_lines, reason = "one match with an arm per sprite")]
 fn path(ch: char, metrics: Metrics, scale: f32) -> Option<PathBuilder> {
     let (w, h) = (metrics.width as f32, metrics.height as f32);
     let light = metrics.thickness as f32;
@@ -693,6 +717,10 @@ mod tests {
     };
 
     /// The sprite's pixels, failing if any two of its rectangles overlap.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "canvas sizes and coordinates are non-negative"
+    )]
     fn pixels(ch: char, metrics: Metrics) -> Vec<Vec<u8>> {
         let mut grid = vec![vec![0u8; metrics.width as usize]; metrics.height as usize];
         for rect in rects(ch, metrics).unwrap().iter() {

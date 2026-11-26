@@ -83,6 +83,10 @@ const MIN_SETTING_TEXT_WIDTH: Pixels = px(200.);
 const SEGMENT_SLIDE: SpringConfig = SpringConfig::new(420., 32., 1.);
 
 /// The settings, on a sheet `width` wide.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the settings sheet's element tree, one section after another"
+)]
 fn render_settings(
     width: Pixels,
     window: &mut Window,

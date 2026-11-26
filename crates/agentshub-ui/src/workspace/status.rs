@@ -144,7 +144,7 @@ impl Workspace {
                     body.push('\n');
                     body.push_str(&details);
                 }
-                let mut summary = crate::sidebar::activity(agent, Some(Some(status)));
+                let mut summary = sidebar::activity(agent, Some(Some(status)));
                 if let Some(took) = took {
                     summary = format!("{summary} · {}", duration(took));
                 }

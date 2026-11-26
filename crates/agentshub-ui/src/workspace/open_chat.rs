@@ -6,6 +6,10 @@ impl Workspace {
     /// Shows a chat, resuming its last session if its CLI doesn't run.
     /// Shows a chat, starting its CLI unless it runs. An archived chat, or
     /// one in an archived project, is brought back first.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the states a chat can be in when opened, checked in order"
+    )]
     pub fn open_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         if self.lifecycle.is_deleting(id) || self.is_removing(id, cx) {
             return;

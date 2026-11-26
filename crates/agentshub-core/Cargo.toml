@@ -10,7 +10,7 @@ anyhow = "1"
 jiff = "0.2.38"
 libc = "0.2"
 notify = "8"
-rusqlite = { version = "0.42", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled", "fallible_uint"] }
 serde_json = "1"
 smol = "2"
 uuid = { version = "1", features = ["v4"] }

@@ -25,6 +25,10 @@ impl Workspace {
     /// Opens the search modal over the chats of every project, the agents
     /// the selected project can start, the projects, the commands, and what
     /// is archived; or with `archived_only`, over what is archived alone.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "builds every section of the search modal from the same lists"
+    )]
     pub(super) fn open_palette(
         &mut self,
         archived_only: bool,
@@ -292,7 +296,7 @@ impl Workspace {
         let places = Rc::new(places);
         Rc::new(move |query, cx| {
             let hits = store.search(query);
-            let places = places.clone();
+            let places = Rc::clone(&places);
             cx.spawn(async move |_| {
                 let hits = hits.await.unwrap_or_else(|err| {
                     eprintln!("can't search the messages: {err}");

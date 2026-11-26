@@ -7,7 +7,7 @@ impl Workspace {
     /// Hub quits.
     pub(super) fn save_setting(
         &self,
-        saved: impl Future<Output = anyhow::Result<()>> + 'static,
+        saved: impl Future<Output = Result<()>> + 'static,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {

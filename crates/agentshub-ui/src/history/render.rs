@@ -11,7 +11,7 @@ impl History {
         v_flex()
             .child(
                 h_flex()
-                    .id(("session", id as u64))
+                    .id(("session", id.cast_unsigned()))
                     .h(ROW_HEIGHT)
                     .flex_none()
                     .px_6()
@@ -55,7 +55,7 @@ impl History {
                             .when(self.more.contains(&id), |this| {
                                 this.child(
                                     h_flex()
-                                        .id(("earlier", id as u64))
+                                        .id(("earlier", id.cast_unsigned()))
                                         .cursor_pointer()
                                         .text_xs()
                                         .text_color(theme.muted_foreground)
@@ -74,6 +74,10 @@ impl History {
             }))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match over the item kinds, each arm building its element"
+    )]
     fn render_item(&self, item: &Item, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let payload = &item.payload;
@@ -82,7 +86,7 @@ impl History {
         let id = item.id;
         let toggle = |label: SharedString| {
             h_flex()
-                .id(("item", id as u64))
+                .id(("item", id.cast_unsigned()))
                 .gap_1p5()
                 .min_w_0()
                 .cursor_pointer()

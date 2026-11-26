@@ -77,6 +77,10 @@ impl Grid {
         point(origin.x, origin.y + self.baseline - centered)
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "device pixel sizes of one cell"
+    )]
     fn new(cell: Size<Pixels>, window: &Window, cx: &App) -> Self {
         let font_size = font_size(cx);
         let scale = window.scale_factor();
@@ -138,6 +142,10 @@ fn sprite_char(text: &str) -> Option<char> {
         .filter(|ch| chars.next().is_none() && sprite::covers(*ch))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "paints everything a frame holds on the grid it sets up"
+)]
 pub(super) fn paint_frame(
     frame: &Frame,
     origin: Point<Pixels>,
@@ -297,6 +305,10 @@ fn symbol_cells(run: &Run, chars: &[char], col: u16) -> u16 {
 /// Draws the run's sprites, and its symbols fitted to the cells they may
 /// cover, and returns the rest of its text with a space in each of their
 /// cells, for the font to draw.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a column within one terminal row"
+)]
 fn paint_cells(
     run: &Run,
     origin: Point<Pixels>,

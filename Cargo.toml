@@ -43,6 +43,20 @@ unnecessary_safety_comment = "warn"
 unnecessary_safety_doc = "warn"
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
+redundant_clone = "warn"
+needless_collect = "warn"
+match_same_arms = "warn"
+needless_pass_by_value = "warn"
+too_many_lines = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+clone_on_ref_ptr = "warn"
+
+[workspace.lints.rust]
+unused_qualifications = "warn"
+redundant_imports = "warn"
+unreachable_pub = "warn"
 
 # Dependencies are built optimized even in dev builds: GPUI and the terminal
 # are far too slow unoptimized, and they rarely need a debugger.

@@ -267,7 +267,7 @@ impl Workspace {
     pub(super) fn at_rest(
         chat: &Chat,
         kept: bool,
-        last_prompt: &anyhow::Result<(bool, Option<i64>)>,
+        last_prompt: &Result<(bool, Option<i64>)>,
         cx: &App,
     ) -> bool {
         !chat.unseen

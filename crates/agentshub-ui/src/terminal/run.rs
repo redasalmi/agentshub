@@ -2,6 +2,14 @@
 
 use super::*;
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the PTY thread owns its master and channels, so they close when it returns"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the terminal thread's message loop, whose arms share the terminal and its state"
+)]
 pub(super) fn run(
     rx: mpsc::Receiver<Msg>,
     master: Box<dyn MasterPty + Send>,
@@ -22,7 +30,7 @@ pub(super) fn run(
     let replies = Rc::new(RefCell::new(Vec::new()));
     terminal
         .on_pty_write({
-            let replies = replies.clone();
+            let replies = Rc::clone(&replies);
             move |_, data| replies.borrow_mut().extend_from_slice(data)
         })?
         .on_device_attributes(|_| {
@@ -272,9 +280,19 @@ pub(super) fn run(
                 }
             }
             Some(Msg::Resize(new_size)) => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "pixel sizes are positive and clamped to u16"
+                )]
                 let to_px = |cells: u16, size: f32| {
                     (cells as u32 * size as u32).min(u16::MAX as u32) as u16
                 };
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "cell sizes are a few positive pixels"
+                )]
                 let (cell_width, cell_height) =
                     (new_size.cell_width as u32, new_size.cell_height as u32);
                 terminal.resize(new_size.cols, new_size.rows, cell_width, cell_height)?;

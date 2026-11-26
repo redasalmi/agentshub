@@ -8,6 +8,10 @@ use super::*;
 impl Workspace {
     /// Stops every CLI, saves what is queued, and reads the sessions the
     /// CLIs left before they go.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the shutdown steps run in order, each on what the last took from the lifecycle"
+    )]
     pub(super) fn shutdown(&mut self, cx: &mut App) {
         // The changes the user made are saved before anything else, so that a
         // chat whose delete is saved can have its worktree removed.

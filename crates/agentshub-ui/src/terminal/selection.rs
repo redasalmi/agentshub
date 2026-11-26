@@ -140,6 +140,11 @@ pub(super) fn whole_pixel_position(size: GridSize, x: f32, y: f32) -> (f32, f32)
 
 /// The viewport cell at a whole-pixel position, or the nearest one when it's
 /// past the grid's edges.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "pointer positions in the grid are non-negative and clamped to it"
+)]
 pub(super) fn viewport_cell(size: GridSize, x: f32, y: f32) -> PointCoordinate {
     PointCoordinate {
         x: ((x / size.cell_width.trunc()) as u16).min(size.cols.saturating_sub(1)),
@@ -147,6 +152,11 @@ pub(super) fn viewport_cell(size: GridSize, x: f32, y: f32) -> PointCoordinate {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "cell sizes are a few positive pixels"
+)]
 pub(super) fn geometry(size: GridSize) -> gesture::Geometry {
     gesture::Geometry {
         columns: size.cols.into(),
@@ -156,6 +166,11 @@ pub(super) fn geometry(size: GridSize) -> gesture::Geometry {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "cell sizes are a few positive pixels"
+)]
 pub(super) fn encoder_size(size: GridSize) -> mouse::EncoderSize {
     mouse::EncoderSize {
         screen_width: size.cols as u32 * size.cell_width as u32,

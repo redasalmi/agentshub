@@ -209,7 +209,7 @@ impl Workspace {
     fn show_read(
         &mut self,
         id: i64,
-        read: smol::channel::Receiver<anyhow::Result<bool>>,
+        read: smol::channel::Receiver<Result<bool>>,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| match read.recv().await {
@@ -249,7 +249,7 @@ pub(crate) fn import_chat(
     agent: Agent,
     key: &str,
     mut sessions: Vec<i64>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let mut failure = None;
     for (agent_id, report) in reports.read(key, agent) {
         let recorded =

@@ -121,8 +121,9 @@ pub fn wait_stopped() {
 pub fn pidfd(pid: u32) -> Option<OwnedFd> {
     // SAFETY: pidfd_open takes no pointers.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0 as libc::c_uint) };
+    let fd = libc::c_int::try_from(fd).ok().filter(|fd| *fd >= 0)?;
     // SAFETY: a descriptor pidfd_open returns is new, and nothing else owns it.
-    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) })
+    Some(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Moves the process `pidfd` refers to, a CLI that `program` started, into a
@@ -173,7 +174,7 @@ fn start(program: &str, id: u64, pidfd: OwnedFd) -> Option<Scope> {
         ("CollectMode", Value::from("inactive-or-failed")),
         (
             "TimeoutStopUSec",
-            Value::from(STOP_TIMEOUT.as_micros() as u64),
+            Value::from(u64::try_from(STOP_TIMEOUT.as_micros()).unwrap_or(u64::MAX)),
         ),
     ];
     let aux: Vec<(&str, Vec<(&str, Value)>)> = Vec::new();

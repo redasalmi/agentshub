@@ -3,6 +3,10 @@
 use super::*;
 
 impl Workspace {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "creates every part of the workspace and the tasks that feed it"
+    )]
     pub fn new(opened: Opened, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let Opened {
             store,

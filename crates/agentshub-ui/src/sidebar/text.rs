@@ -110,7 +110,7 @@ pub fn activity(agent: Agent, running: Option<Option<Status>>) -> String {
 }
 
 /// How many agents need the user, work, sit idle, or haven't said.
-pub fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String {
+pub(super) fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String {
     let (mut working, mut need_you, mut idle, mut unknown) = (0, 0, 0, 0);
     for status in running {
         match status {

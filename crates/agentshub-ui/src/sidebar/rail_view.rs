@@ -113,6 +113,10 @@ impl Sidebar {
 
     /// A project in the rail, with how many of its chats need the user: a
     /// row with its mark and its name, or a tile with its mark alone.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree for a project, as a row or a tile"
+    )]
     fn render_project(
         &self,
         index: usize,
@@ -184,7 +188,7 @@ impl Sidebar {
 
         let item = if named {
             h_flex()
-                .id(("project", id as u64))
+                .id(("project", id.cast_unsigned()))
                 .relative()
                 .flex_none()
                 .h(ROW_HEIGHT)
@@ -217,7 +221,7 @@ impl Sidebar {
                 .when(open > 0, |this| this.child(count()))
         } else {
             div()
-                .id(("project", id as u64))
+                .id(("project", id.cast_unsigned()))
                 .relative()
                 .flex_none()
                 .size(TILE_SIZE)

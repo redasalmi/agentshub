@@ -3,6 +3,10 @@
 use super::*;
 
 impl Render for Workspace {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the workspace's whole element tree, from one read of its state"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let window_width = window.viewport_size().width;
         let names = sidebar::names_width(window_width, cx);

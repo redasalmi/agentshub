@@ -1,7 +1,5 @@
 //! Removing a chat's worktree, keeping any commits only it had.
 
-use std::path::Path;
-
 use anyhow::bail;
 
 use super::*;

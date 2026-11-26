@@ -478,7 +478,7 @@ impl Sidebar {
                     .child(self.render_chat(NUMBERED, &leaving.chat, cx))
                     // Gone from the data, it no longer answers the pointer.
                     .child(div().absolute().inset_0().occlude()),
-                ("chat-out", leaving.chat.id as u64),
+                ("chat-out", leaving.chat.id.cast_unsigned()),
                 true,
             ),
         }

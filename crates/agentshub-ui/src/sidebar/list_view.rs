@@ -3,6 +3,10 @@
 use super::*;
 
 impl Sidebar {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree for a project's chat list"
+    )]
     pub(super) fn render_list(&self, project: &Project, cx: &Context<Self>) -> impl IntoElement {
         let id = project.id;
         let sidebar = cx.entity();
@@ -78,11 +82,7 @@ impl Sidebar {
                                     .primary()
                                     .small()
                                     .icon(IconName::Plus)
-                                    .tooltip_with_action(
-                                        "Start an agent here",
-                                        &super::NewChat,
-                                        None,
-                                    )
+                                    .tooltip_with_action("Start an agent here", &NewChat, None)
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(SidebarEvent::NewChat(id))
                                     })),
@@ -179,7 +179,7 @@ impl Sidebar {
                     let delay = STAGGER.as_secs_f32() * index.min(10) as f32;
                     let total = REVEAL.as_secs_f32() + delay;
                     self.render_archived_chat(chat, cx).with_animation(
-                        ("archived-in", chat.id as u64),
+                        ("archived-in", chat.id.cast_unsigned()),
                         Animation::new(Duration::from_secs_f32(total)),
                         move |row, delta| {
                             let shown =
@@ -370,6 +370,10 @@ impl Sidebar {
     }
 
     /// A chat in the list, `index` being its place in it.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree for a chat row, with its menu and drag and drop"
+    )]
     pub(super) fn render_chat(
         &self,
         index: usize,
@@ -440,7 +444,7 @@ impl Sidebar {
             // What the glyph means, for the one the user doesn't know yet.
             .child(
                 div()
-                    .id(("tone", id as u64))
+                    .id(("tone", id.cast_unsigned()))
                     .child(popping_dot(tone, popped, cx))
                     .tooltip(move |window, cx| Tooltip::new(meaning.clone()).build(window, cx)),
             )

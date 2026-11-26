@@ -2,7 +2,6 @@
 
 use std::f32::consts::TAU;
 use std::num::NonZero;
-use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -29,7 +28,7 @@ pub(super) fn play(kind: Alert, cx: &mut App) {
     }
 }
 
-fn play_blocking(kind: Alert) -> anyhow::Result<()> {
+fn play_blocking(kind: Alert) -> Result<()> {
     let mut sink = rodio::DeviceSinkBuilder::open_default_sink()?;
     sink.log_on_drop(false);
     let player = rodio::Player::connect_new(sink.mixer());
@@ -57,6 +56,11 @@ fn notes(kind: Alert) -> &'static [(f32, f32)] {
 }
 
 /// A soft bell-like sound, made here so no sound files ship with the app.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "sample counts for a short tone, from non-negative times"
+)]
 pub(super) fn chime(kind: Alert) -> Vec<f32> {
     const NOTE_LEN: f32 = 0.7;
     const ATTACK: f32 = 0.004;

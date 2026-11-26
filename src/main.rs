@@ -37,12 +37,12 @@ impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         match ExtraIcons.load(path)? {
             Some(bytes) => Ok(Some(bytes)),
-            None => gpui_kit::assets::Assets.load(path),
+            None => assets::Assets.load(path),
         }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        let mut paths = assets::Assets.list(path)?;
         paths.extend(ExtraIcons.list(path)?);
         Ok(paths)
     }
@@ -64,8 +64,8 @@ fn main() {
         stop_all: scope::stop_all,
         wait_stopped: scope::wait_stopped,
     });
-    gpui_kit::application().with_assets(Assets).run(move |cx| {
-        gpui_kit::init(cx);
+    application().with_assets(Assets).run(move |cx| {
+        init(cx);
         agentshub_ui::terminal_view::init(cx);
         workspace::init(cx);
         // The tray decides whether closing the window quits.

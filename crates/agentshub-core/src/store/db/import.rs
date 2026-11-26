@@ -194,7 +194,7 @@ fn shape(conn: &Connection) -> Result<Vec<String>> {
 /// The shape of a database Agents Hub wrote at `version`.
 fn expected_shape(version: i64) -> Result<Vec<String>> {
     let conn = Connection::open_in_memory()?;
-    for migration in &MIGRATIONS[..version as usize] {
+    for migration in &MIGRATIONS[..usize::try_from(version).unwrap_or(usize::MAX)] {
         conn.execute_batch(migration)?;
     }
     shape(&conn)

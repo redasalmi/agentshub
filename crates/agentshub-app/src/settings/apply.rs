@@ -8,7 +8,7 @@ impl Settings {
         store: &Store,
         value: bool,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             notification_popups: value,
             ..*cx.global::<Self>()
@@ -20,7 +20,7 @@ impl Settings {
         store: &Store,
         value: bool,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             notification_sound: value,
             ..*cx.global::<Self>()
@@ -35,7 +35,7 @@ impl Settings {
         store: &Store,
         value: bool,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             close_to_tray: value,
             ..*cx.global::<Self>()
@@ -47,7 +47,7 @@ impl Settings {
         store: &Store,
         value: bool,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             worktree_by_default: value,
             ..*cx.global::<Self>()
@@ -59,7 +59,7 @@ impl Settings {
         store: &Store,
         value: bool,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             project_names: value,
             ..*cx.global::<Self>()
@@ -71,7 +71,7 @@ impl Settings {
         store: &Store,
         value: f32,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             rail_width: value,
             ..*cx.global::<Self>()
@@ -83,7 +83,7 @@ impl Settings {
         store: &Store,
         value: f32,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             shell_share: value,
             ..*cx.global::<Self>()
@@ -95,7 +95,7 @@ impl Settings {
         store: &Store,
         value: f32,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             sidebar_width: value,
             ..*cx.global::<Self>()
@@ -108,7 +108,7 @@ impl Settings {
         store: &Store,
         value: Appearance,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             appearance: value,
             ..*cx.global::<Self>()
@@ -121,7 +121,7 @@ impl Settings {
         store: &Store,
         value: Motion,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             motion: value,
             ..*cx.global::<Self>()
@@ -134,7 +134,7 @@ impl Settings {
         store: &Store,
         value: f32,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         let value = value.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE);
         cx.set_global(Self {
             terminal_font_size: value,
@@ -148,7 +148,7 @@ impl Settings {
         store: &Store,
         value: ThemeFamily,
         cx: &mut App,
-    ) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    ) -> impl Future<Output = Result<()>> + use<> {
         cx.set_global(Self {
             theme: value,
             ..*cx.global::<Self>()

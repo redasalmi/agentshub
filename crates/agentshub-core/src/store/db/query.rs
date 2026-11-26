@@ -50,6 +50,10 @@ impl Db {
     /// Saves a read, and says whether the history shows anything new. The
     /// session can be gone, deleted with its chat while its transcript was
     /// being parsed; then nothing is saved.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one transaction's steps, sharing its leaf, the kept ids and whether anything changed"
+    )]
     pub(crate) fn save_read_state(&self, session_id: i64, read: &transcript::Read) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction()?;
@@ -228,7 +232,7 @@ impl Db {
                 session_id,
                 read.prompt,
                 read.prompted,
-                read.offset as i64,
+                read.offset,
                 transcript::PARSER,
                 update_leaf,
                 leaf,

@@ -561,7 +561,7 @@ fn close(id: u32, cx: &mut App) {
 
 /// Brings the window back on the chat that was clicked.
 fn open(click: Click, cx: &mut App) {
-    let open = cx.global::<Alerts>().open.clone();
+    let open = Rc::clone(&cx.global::<Alerts>().open);
     (open)(click.chat, click.token, cx);
 }
 
@@ -597,7 +597,7 @@ mod tests {
         item(kind, json!({ "text": text }))
     }
 
-    fn tool(name: &str, input: serde_json::Value, output: Option<&str>) -> Item {
+    fn tool(name: &str, input: &serde_json::Value, output: Option<&str>) -> Item {
         item(
             Kind::Tool,
             json!({ "id": "1", "name": name, "input": input, "output": output }),
@@ -822,7 +822,7 @@ mod tests {
             text(Kind::Assistant, "old reply"),
             text(Kind::User, "second"),
             text(Kind::Assistant, "Looking."),
-            tool("Read", json!({ "file_path": "a.rs" }), Some("…")),
+            tool("Read", &json!({ "file_path": "a.rs" }), Some("…")),
             text(Kind::Assistant, "Fixed it.\n\n  Tests   pass."),
         ];
         assert_eq!(
@@ -839,7 +839,7 @@ mod tests {
         let mut items = vec![
             text(Kind::User, "clean up"),
             text(Kind::Assistant, "Removing the build."),
-            tool("Bash", json!({ "command": "rm -rf target" }), None),
+            tool("Bash", &json!({ "command": "rm -rf target" }), None),
         ];
         assert_eq!(
             details(Alert::NeedsYou, &items).as_deref(),
@@ -852,7 +852,7 @@ mod tests {
         );
         items.push(tool(
             "AskUserQuestion",
-            json!({ "questions": [{ "question": "Keep the cache?" }] }),
+            &json!({ "questions": [{ "question": "Keep the cache?" }] }),
             None,
         ));
         assert_eq!(
@@ -861,7 +861,7 @@ mod tests {
         );
         items.push(tool(
             "shell",
-            json!({ "command": ["bash", "-lc", "ls"] }),
+            &json!({ "command": ["bash", "-lc", "ls"] }),
             None,
         ));
         assert_eq!(

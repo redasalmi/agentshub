@@ -25,6 +25,10 @@ pub(super) struct PaletteLists {
 }
 
 impl Workspace {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one walk over the projects fills every list"
+    )]
     pub(super) fn palette_lists(&self, cx: &App) -> PaletteLists {
         let sidebar = self.sidebar.read(cx);
         let installed = self.installed.clone();

@@ -114,12 +114,12 @@ impl Change {
             }
             Self::ArchiveChat { chat, archived } => {
                 if let Some((project, at)) = find(projects, chat) {
-                    projects[project].chats[at].archived_at = archived.then(db::now);
+                    projects[project].chats[at].archived_at = archived.then(now);
                 }
             }
             Self::ArchiveProject { project, archived } => {
                 if let Some(project) = projects.iter_mut().find(|each| each.id == project) {
-                    project.archived_at = archived.then(db::now);
+                    project.archived_at = archived.then(now);
                 }
             }
             Self::RestoreChat(chat) => {
@@ -199,7 +199,7 @@ impl Store {
         for _ in 0..READERS {
             let db = db.reader()?;
             let asked = asked.clone();
-            let order = order.clone();
+            let order = Arc::clone(&order);
             thread::Builder::new()
                 .name("db-read".into())
                 .spawn(move || {
@@ -211,7 +211,7 @@ impl Store {
                 .context("couldn't start a thread to read the database on")?;
         }
         let (writes, asked) = channel::unbounded::<Job>();
-        let done = order.clone();
+        let done = Arc::clone(&order);
         thread::Builder::new()
             .name("db-write".into())
             .spawn(move || {
@@ -311,7 +311,7 @@ impl Store {
         if let Some((_, running)) = lock(&self.searching).take() {
             running.interrupt();
         }
-        let (searches, searching) = (self.searches.clone(), self.searching.clone());
+        let (searches, searching) = (Arc::clone(&self.searches), Arc::clone(&self.searching));
         self.read(move |db| {
             if searches.load(Ordering::SeqCst) != search {
                 return Ok(Vec::new());
@@ -349,7 +349,7 @@ impl Store {
         let reading = {
             let mut transcripts = lock(&self.transcripts);
             transcripts.retain(|_, reading| Arc::strong_count(reading) > 1);
-            transcripts.entry(session_id).or_default().clone()
+            Arc::clone(transcripts.entry(session_id).or_default())
         };
         let _reading = lock(&reading);
         let read = self.read(move |db| Ok(db.transcript(session_id)?));
@@ -793,10 +793,8 @@ mod tests {
     #[test]
     fn writes_run_in_the_order_they_were_asked_for() {
         let store = store();
-        let added: Vec<_> = ["a", "b", "c"]
-            .map(|name| store.add_project(PathBuf::from(format!("/home/me/{name}"))))
-            .into_iter()
-            .collect();
+        let added = ["a", "b", "c"]
+            .map(|name| store.add_project(PathBuf::from(format!("/home/me/{name}"))));
         let ids: Vec<i64> = added
             .into_iter()
             .map(|added| smol::block_on(added).unwrap())
@@ -874,7 +872,7 @@ mod tests {
     #[test]
     fn waits_for_the_writes_asked_for() {
         let store = store();
-        let order = store.order.clone();
+        let order = Arc::clone(&store.order);
         let slow = store.write(|db| {
             thread::sleep(Duration::from_millis(200));
             Ok(db.add_project(&PathBuf::from("/home/me/slow"))?)

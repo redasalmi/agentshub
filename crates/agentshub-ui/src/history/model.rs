@@ -1,9 +1,5 @@
 //! The history's data: the sessions, what is expanded and what is loading.
 
-use std::rc::Rc;
-
-use agentshub_core::store::HistorySource;
-
 use super::*;
 
 pub struct HistoryModel {
@@ -44,10 +40,7 @@ impl HistoryModel {
 }
 
 /// Lists a chat's sessions.
-pub(super) async fn sessions(
-    source: Rc<dyn HistorySource>,
-    chat_id: i64,
-) -> anyhow::Result<Vec<Session>> {
+pub(super) async fn sessions(source: Rc<dyn HistorySource>, chat_id: i64) -> Result<Vec<Session>> {
     let (send, recv) = smol::channel::bounded(1);
     source.sessions(
         chat_id,
@@ -59,10 +52,7 @@ pub(super) async fn sessions(
 }
 
 /// Reads a session's transcript.
-pub(super) async fn read_transcript(
-    source: Rc<dyn HistorySource>,
-    id: i64,
-) -> anyhow::Result<bool> {
+pub(super) async fn read_transcript(source: Rc<dyn HistorySource>, id: i64) -> Result<bool> {
     let (send, recv) = smol::channel::bounded(1);
     source.read_transcript(
         id,
@@ -78,7 +68,7 @@ pub(super) async fn items(
     source: Rc<dyn HistorySource>,
     id: i64,
     limit: usize,
-) -> anyhow::Result<Vec<Item>> {
+) -> Result<Vec<Item>> {
     let (send, recv) = smol::channel::bounded(1);
     source.items(
         id,

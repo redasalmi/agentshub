@@ -181,6 +181,10 @@ fn glyph(groups: &[[u32; 3]], ch: char) -> Option<u32> {
 /// font without an `m`, which emoji fonts don't have, and the
 /// terminal's own font always draws the `m` itself. The new cmap holds
 /// the old format 12 mappings, that one and the variation sequences.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the tables it writes are far below the format's u16 and u32 limits"
+)]
 fn with_latin_m(font: &[u8]) -> Option<Vec<u8>> {
     let record = table_record(font, 0, b"cmap")?;
     let Cmap {
@@ -244,6 +248,10 @@ mod tests {
     use super::{NOTO_EMOJI, cmap_subtables, draws_in_color, glyph, table, with_latin_m};
 
     /// An OpenType file with these tables and nothing else.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the tables it writes are far below the format's u16 and u32 limits"
+    )]
     fn font(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
         let mut data = vec![0, 1, 0, 0];
         data.extend((tables.len() as u16).to_be_bytes());

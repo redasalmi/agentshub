@@ -40,6 +40,11 @@ pub struct Colors {
 }
 
 /// `color` as the terminal's own color type.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "color channels are in 0..=1"
+)]
 pub fn rgb_color(color: Hsla) -> RgbColor {
     let rgba = color.to_rgb();
     RgbColor {
@@ -50,11 +55,8 @@ pub fn rgb_color(color: Hsla) -> RgbColor {
 }
 
 const fn hex(rgb: u32) -> RgbColor {
-    RgbColor {
-        r: (rgb >> 16) as u8,
-        g: (rgb >> 8) as u8,
-        b: rgb as u8,
-    }
+    let [_, r, g, b] = rgb.to_be_bytes();
+    RgbColor { r, g, b }
 }
 
 /// Loads the fonts and the theme files, and puts the default family's themes
@@ -70,8 +72,8 @@ pub fn init(cx: &mut App) {
     };
     let pair = themes.of(ThemeFamily::default());
     let theme = Theme::global_mut(cx);
-    theme.light_theme = pair.light.clone();
-    theme.dark_theme = pair.dark.clone();
+    theme.light_theme = Rc::clone(&pair.light);
+    theme.dark_theme = Rc::clone(&pair.dark);
     cx.set_global(themes);
 }
 
@@ -160,7 +162,7 @@ pub fn follow_system(window: &mut Window, cx: &mut App) {
 pub fn apply(window: &mut Window, cx: &mut App) {
     let settings = *cx.global::<Settings>();
     let pair = cx.global::<Themes>().of(settings.theme);
-    let (light, dark) = (pair.light.clone(), pair.dark.clone());
+    let (light, dark) = (Rc::clone(&pair.light), Rc::clone(&pair.dark));
     // `Theme::change` loads the mode's theme even when the mode stays, so
     // the family's themes take effect either way.
     let theme = Theme::global_mut(cx);
@@ -396,6 +398,11 @@ const PROJECT_DARK: [(u32, u32); 8] = [
 
 /// The color project `id` is marked with. Projects added one after another
 /// get different ones.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "a palette index from a few colors"
+)]
 pub fn project_tint(id: i64, cx: &App) -> Tint {
     let colors = if cx.theme().is_dark() {
         &PROJECT_DARK

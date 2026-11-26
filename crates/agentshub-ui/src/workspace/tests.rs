@@ -164,11 +164,7 @@ fn restarting_records_the_session_the_cli_reported() {
     let queued = reported_sessions(&mut reports, "cli", Agent::Claude);
     assert_eq!(
         queued,
-        vec![(
-            "second".to_string(),
-            second.clone(),
-            Some("clear".to_string())
-        )]
+        vec![("second".to_string(), second, Some("clear".to_string()))]
     );
     for (agent_id, path, reason) in queued {
         db.record_session(chat, Agent::Claude, &agent_id, &path, reason.as_deref())

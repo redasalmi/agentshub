@@ -126,7 +126,7 @@ impl Checkout {
         let git = Arc::<Mutex<Git>>::default();
         let (tx, created) = smol::channel::bounded(1);
         thread::spawn({
-            let (project, git) = (project.to_path_buf(), git.clone());
+            let (project, git) = (project.to_path_buf(), Arc::clone(&git));
             move || {
                 let created = dir
                     .context("There is no home folder to keep the worktree in.")
@@ -161,7 +161,7 @@ impl Checkout {
         if !stop(&self.git, false) {
             return;
         }
-        let git = self.git.clone();
+        let git = Arc::clone(&self.git);
         thread::spawn(move || {
             thread::sleep(STOP_GRACE);
             stop(&git, true);

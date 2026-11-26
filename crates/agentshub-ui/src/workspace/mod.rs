@@ -186,9 +186,7 @@ pub struct Workspace {
 }
 
 /// Takes the worktree out of `job` and removes it, unless it was taken.
-fn take_and_remove(
-    job: &Mutex<Option<(Worktree, PathBuf)>>,
-) -> Option<anyhow::Result<worktree::Removal>> {
+fn take_and_remove(job: &Mutex<Option<(Worktree, PathBuf)>>) -> Option<Result<worktree::Removal>> {
     agentshub_core::lifecycle::take_and_remove(job, worktree::remove)
 }
 

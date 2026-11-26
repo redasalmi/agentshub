@@ -73,7 +73,7 @@ impl History {
     /// found something.
     pub fn refresh(&mut self, current: Option<i64>, changed: &[i64], cx: &mut Context<Self>) {
         self.reload.extend(changed);
-        let sessions = list_sessions(self.source.clone(), self.chat_id);
+        let sessions = list_sessions(Rc::clone(&self.source), self.chat_id);
         self.listing = Some(cx.spawn(async move |this, cx| {
             let sessions = sessions.await;
             this.update(cx, |this, cx| this.list(sessions, current, cx))
@@ -83,7 +83,7 @@ impl History {
 
     fn list(
         &mut self,
-        sessions: anyhow::Result<Vec<Session>>,
+        sessions: Result<Vec<Session>>,
         current: Option<i64>,
         cx: &mut Context<Self>,
     ) {
@@ -160,11 +160,11 @@ impl History {
     /// session is the first time its transcript has to be read since the chat
     /// opened, so the read and the load happen together.
     fn load(&mut self, id: i64, cx: &mut Context<Self>) {
-        let source = self.source.clone();
+        let source = Rc::clone(&self.source);
         let limit = self.limits.get(&id).copied().unwrap_or(ITEMS_PAGE);
         self.expanded.entry(id).or_default();
         cx.spawn(async move |this, cx| {
-            let read = read_transcript(source.clone(), id).await;
+            let read = read_transcript(Rc::clone(&source), id).await;
             let items = read_items(source, id, limit).await;
             this.update(cx, |this, cx| {
                 if !this.expanded.contains_key(&id) {

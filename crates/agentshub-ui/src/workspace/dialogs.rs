@@ -113,6 +113,10 @@ impl Workspace {
         }));
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the dialog's element tree and the state its controls share"
+    )]
     fn show_new_chat_dialog(
         &mut self,
         project: store::Project,
@@ -134,7 +138,7 @@ impl Workspace {
         let picker = cx.focus_handle().tab_stop(true);
         let project_path = project.path.clone();
         let start = Rc::new({
-            let (title, use_worktree) = (title.clone(), use_worktree.clone());
+            let (title, use_worktree) = (title.clone(), Rc::clone(&use_worktree));
             let workspace = cx.weak_entity();
             move |agent: Agent, window: &mut Window, cx: &mut App| {
                 let title = title.read(cx).value().to_string();
@@ -170,7 +174,7 @@ impl Workspace {
                 // Enter, in the name too, starts the chosen agent. It closes
                 // the dialog itself, before the chat opens.
                 .on_ok({
-                    let (start, chosen) = (start.clone(), chosen.clone());
+                    let (start, chosen) = (Rc::clone(&start), Rc::clone(&chosen));
                     move |_, window, cx| {
                         if let Some(agent) = chosen.get() {
                             start(agent, window, cx);
@@ -204,8 +208,11 @@ impl Workspace {
                                         )
                                         .gap_2()
                                         .on_key_down({
-                                            let (agents, chosen, start) =
-                                                (agents.clone(), chosen.clone(), start.clone());
+                                            let (agents, chosen, start) = (
+                                                Rc::clone(&agents),
+                                                Rc::clone(&chosen),
+                                                Rc::clone(&start),
+                                            );
                                             move |event: &KeyDownEvent, window, cx| {
                                                 let keystroke = &event.keystroke;
                                                 if keystroke.modifiers.number_of_modifiers() > 0 {
@@ -245,7 +252,7 @@ impl Workspace {
                                         .children(agents.iter().enumerate().map(
                                             |(index, agent)| {
                                                 let agent = *agent;
-                                                let start = start.clone();
+                                                let start = Rc::clone(&start);
                                                 let picked = picked == Some(agent);
                                                 v_flex()
                                                     .id(("agent", index as u64))
@@ -316,7 +323,7 @@ impl Workspace {
                                 }))
                         })
                         .when(in_git, |content| {
-                            let use_worktree = use_worktree.clone();
+                            let use_worktree = Rc::clone(&use_worktree);
                             content.child(
                                 v_flex()
                                     .gap_1()

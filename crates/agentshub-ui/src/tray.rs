@@ -12,7 +12,7 @@ pub use agentshub_platform::tray::remember_bounds;
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let open = workspace.clone();
     let settings = workspace.clone();
-    let hidden = workspace.clone();
+    let hidden = workspace;
     let enabled = cx.global::<Settings>().close_to_tray;
     platform::init(
         platform::Hooks {

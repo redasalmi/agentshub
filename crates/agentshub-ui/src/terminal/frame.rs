@@ -84,6 +84,10 @@ pub(super) fn set_colors(terminal: &mut VtTerminal<'_, '_>, colors: Colors) -> R
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the terminal's rows and cells builds the whole frame"
+)]
 pub(super) fn build_frame<'alloc>(
     render_state: &mut RenderState<'alloc>,
     rows: &mut RowIterator<'alloc>,
@@ -161,6 +165,10 @@ pub(super) fn build_frame<'alloc>(
             if let Some(run) = runs.last_mut().filter(|run| {
                 !wide && !run.wide && run.fg == fg && run.bg == bg && run.attrs == attrs
             }) {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a run's text is part of one terminal row"
+                )]
                 run_offsets.push(run_text.len() as u32);
                 run_text.push_str(&text);
                 run.cells += 1;

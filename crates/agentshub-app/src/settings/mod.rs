@@ -215,26 +215,22 @@ impl Settings {
                 .unwrap_or(defaults.notification_popups),
             notification_sound: read::<bool>(saved, NOTIFICATION_SOUND)
                 .unwrap_or(defaults.notification_sound),
-            sidebar_width: read::<f64>(saved, SIDEBAR_WIDTH)
-                .map(|width| width as f32)
+            sidebar_width: read::<f32>(saved, SIDEBAR_WIDTH)
                 .filter(|width| width.is_finite() && *width > 0.)
                 .unwrap_or(defaults.sidebar_width),
             worktree_by_default: read::<bool>(saved, WORKTREE_BY_DEFAULT)
                 .unwrap_or(defaults.worktree_by_default),
             project_names: read::<bool>(saved, PROJECT_NAMES).unwrap_or(defaults.project_names),
-            rail_width: read::<f64>(saved, RAIL_WIDTH)
-                .map(|width| width as f32)
+            rail_width: read::<f32>(saved, RAIL_WIDTH)
                 .filter(|width| width.is_finite() && *width > 0.)
                 .unwrap_or(defaults.rail_width),
-            shell_share: read::<f64>(saved, SHELL_SHARE)
-                .map(|share| share as f32)
+            shell_share: read::<f32>(saved, SHELL_SHARE)
                 .filter(|share| share.is_finite() && *share > 0. && *share < 1.)
                 .unwrap_or(defaults.shell_share),
             motion: read::<String>(saved, MOTION)
                 .and_then(|key| Motion::from_key(&key))
                 .unwrap_or(defaults.motion),
-            terminal_font_size: read::<f64>(saved, TERMINAL_FONT_SIZE)
-                .map(|size| size as f32)
+            terminal_font_size: read::<f32>(saved, TERMINAL_FONT_SIZE)
                 .filter(|size| (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(size))
                 .unwrap_or(defaults.terminal_font_size),
         }

@@ -437,7 +437,7 @@ impl Lifecycle {
         let job = Arc::new(Mutex::new(Some((worktree.clone(), project.to_path_buf()))));
         self.removals.retain(Removal::is_pending);
         self.removals.push(Removal {
-            job: job.clone(),
+            job: Arc::clone(&job),
             waits,
         });
         job
@@ -711,6 +711,7 @@ mod tests {
         }
 
         /// Applies `event`, or returns false if it can't happen now.
+        #[expect(clippy::too_many_lines, reason = "one match with an arm per event")]
         fn apply(&mut self, event: Event) -> bool {
             match event {
                 Event::Open(id) => {
@@ -1113,7 +1114,7 @@ mod adding_tests {
                     let (added, given) = self.lifecycle.added(saving, saved);
                     assert_eq!(
                         given.map(|(worktree, _)| worktree.root),
-                        made.map(|n| super::adding_tests::worktree(n).0.root)
+                        made.map(|n| worktree(n).0.root)
                     );
                     match added {
                         Added::Lost | Added::Failed(_) | Added::Delete(_) => {
@@ -1156,10 +1157,8 @@ mod adding_tests {
                         .drain(..)
                         .filter_map(|(_, _, made, _)| made)
                         .collect();
-                    let saving: HashSet<PathBuf> = made
-                        .iter()
-                        .map(|&n| super::adding_tests::worktree(n).0.root)
-                        .collect();
+                    let saving: HashSet<PathBuf> =
+                        made.iter().map(|&n| worktree(n).0.root).collect();
                     // No chat took them, so shutdown removes them.
                     self.removed.extend(made);
                     assert_eq!(adding, saving, "shutdown's worktrees");
@@ -1557,6 +1556,10 @@ mod view_tests {
             self.shown = Some(id);
         }
 
+        #[expect(
+            clippy::too_many_lines,
+            reason = "the model's one match with an arm per event"
+        )]
         fn apply(&mut self, event: Event) -> bool {
             match event {
                 Event::Open(id) => {
@@ -1991,6 +1994,10 @@ mod removal_tests {
             }
         }
 
+        #[expect(
+            clippy::too_many_lines,
+            reason = "the model's one match with an arm per event"
+        )]
         fn apply(&mut self, event: Event) -> bool {
             if self.quit {
                 return false;

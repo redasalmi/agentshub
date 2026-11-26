@@ -162,14 +162,22 @@ INSERT INTO items_fts (items_fts) VALUES ('rebuild');
 ];
 
 /// The schema version this build writes.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "a const can't use try_from, and there are far fewer migrations than i64::MAX"
+)]
 pub(super) const SCHEMA: i64 = MIGRATIONS.len() as i64;
 
 /// Takes a database from `version` to the one this build writes.
 pub(super) fn migrate(conn: &mut Connection, version: i64) -> Result<()> {
-    for (done, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+    for (done, migration) in MIGRATIONS
+        .iter()
+        .enumerate()
+        .skip(usize::try_from(version).unwrap_or(usize::MAX))
+    {
         let tx = conn.transaction()?;
         tx.execute_batch(migration)?;
-        tx.pragma_update(None, "user_version", done as i64 + 1)?;
+        tx.pragma_update(None, "user_version", done + 1)?;
         tx.commit()?;
     }
     Ok(())

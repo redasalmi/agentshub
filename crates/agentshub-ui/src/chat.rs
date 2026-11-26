@@ -100,6 +100,10 @@ pub struct ChatSheet {
 }
 
 impl ChatSheet {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the chat's element tree: header, terminal, history and shell"
+    )]
     pub fn render(&self, window: &Window, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let id = self.id;
@@ -119,7 +123,7 @@ impl ChatSheet {
 
         // A spinner only earns its frames while the window is on screen.
         let spin = window.is_visible() && !self.hidden;
-        let on = self.on.clone();
+        let on = Rc::clone(&self.on);
         v_flex()
             .size_full()
             .overflow_hidden()
@@ -141,7 +145,7 @@ impl ChatSheet {
             })
             .when_some(self.message.clone(), |this, message| {
                 let tint = appearance::palette(cx).danger;
-                let restart = on.clone();
+                let restart = Rc::clone(&on);
                 this.child(
                     h_flex()
                         .flex_none()
@@ -183,7 +187,7 @@ impl ChatSheet {
                     .children(self.terminal.clone().map(|terminal| {
                         let focused =
                             self.shell.is_some() && terminal.focus_handle(cx).is_focused(window);
-                        let on = on.clone();
+                        let on = Rc::clone(&on);
                         div()
                             .relative()
                             .flex_1()
@@ -192,9 +196,9 @@ impl ChatSheet {
                             .pr_2()
                             .pt_3()
                             .when(focused, |this| this.child(focus_bar(cx)))
-                            .child(terminal.clone())
+                            .child(terminal)
                             .when(focused, |this| {
-                                this.child(div().id(("focused", id as u64)).on_click(
+                                this.child(div().id(("focused", id.cast_unsigned())).on_click(
                                     move |_, window, cx| {
                                         (on)(ChatIntent::ToggleShell, window, cx);
                                     },
@@ -209,8 +213,8 @@ impl ChatSheet {
                 self.shell.clone(),
                 self.shell_share,
                 self.active,
-                self.on.clone(),
-                self.save.clone(),
+                Rc::clone(&self.on),
+                Rc::clone(&self.save),
                 window,
                 cx,
             ))
@@ -234,7 +238,7 @@ pub fn over_shell(
     window: &Window,
     cx: &App,
 ) -> AnyElement {
-    let drag_on = on.clone();
+    let drag_on = Rc::clone(&on);
     v_flex()
         .flex_1()
         .min_h_0()
@@ -306,14 +310,14 @@ fn shell_panel(
                             .child(sidebar::path_line(&shell.cwd, cx)),
                     )
                     .child({
-                        let close = on.clone();
+                        let close = Rc::clone(&on);
                         Button::new("close-shell")
                             .ghost()
                             .xsmall()
                             .icon(IconName::Close)
                             .tooltip_with_action("Hide the shell", &ToggleShell, None)
                             .on_click(move |_, window, cx| {
-                                (close.clone())(ChatIntent::ToggleShell, window, cx);
+                                close(ChatIntent::ToggleShell, window, cx);
                             })
                     }),
             )
@@ -328,15 +332,15 @@ fn shell_panel(
                     .child(shell.view.clone()),
             )
             .child({
-                let drag_save = save.clone();
-                let double_on = on.clone();
-                let double_save = save.clone();
+                let drag_save = Rc::clone(&save);
+                let double_on = on;
+                let double_save = save;
                 resize_handle::<ResizeShell, ResizeShell>("shell-edge", Axis::Vertical)
                     .inside(HandleEdge::Leading)
                     .with_appearance(shell_edge_appearance(appearance::palette(cx).border_strong))
                     .on_drag(ResizeShell, move |drag, _, _, cx| {
                         cx.stop_propagation();
-                        let save = drag_save.clone();
+                        let save = Rc::clone(&drag_save);
                         cx.new(|cx| {
                             cx.on_release(move |_, cx| {
                                 (save)(cx);
@@ -346,12 +350,8 @@ fn shell_panel(
                         })
                     })
                     .on_double_click(move |_, window, cx| {
-                        (double_on.clone())(
-                            ChatIntent::ResizeShell(DEFAULT_SHELL_SHARE),
-                            window,
-                            cx,
-                        );
-                        (double_save.clone())(cx);
+                        double_on(ChatIntent::ResizeShell(DEFAULT_SHELL_SHARE), window, cx);
+                        double_save(cx);
                     })
             })
             .with_animation(
@@ -364,10 +364,14 @@ fn shell_panel(
 }
 
 impl ChatSheet {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the header's element tree and its buttons"
+    )]
     fn render_header(&self, spin: bool, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let focus = self.focus.clone();
-        let on = self.on.clone();
+        let on = Rc::clone(&self.on);
         let pinned = self.pinned;
         h_flex()
             .flex_none()
@@ -419,7 +423,7 @@ impl ChatSheet {
                             .flex_none()
                             .gap_1()
                             .when(self.earlier > 0, |this| {
-                                let on = on.clone();
+                                let on = Rc::clone(&on);
                                 this.child(
                                     Button::new("history")
                                         .ghost()
@@ -433,12 +437,12 @@ impl ChatSheet {
                                             None,
                                         )
                                         .on_click(move |_, window, cx| {
-                                            (on.clone())(ChatIntent::ToggleHistory, window, cx);
+                                            on(ChatIntent::ToggleHistory, window, cx);
                                         }),
                                 )
                             })
                             .child({
-                                let on = on.clone();
+                                let on = Rc::clone(&on);
                                 Button::new("shell")
                                     .ghost()
                                     .small()
@@ -451,7 +455,7 @@ impl ChatSheet {
                                         None,
                                     )
                                     .on_click(move |_, window, cx| {
-                                        (on.clone())(ChatIntent::ToggleShell, window, cx);
+                                        on(ChatIntent::ToggleShell, window, cx);
                                     })
                             })
                             .child(
@@ -665,10 +669,14 @@ pub struct EmptyState {
 }
 
 impl EmptyState {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree, read top to bottom as the layout"
+    )]
     pub fn render(&self, window: &Window, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let palette = appearance::palette(cx);
-        let on = self.on.clone();
+        let on = Rc::clone(&self.on);
         div()
             .id("empty")
             .size_full()
@@ -711,13 +719,13 @@ impl EmptyState {
                         )
                         .child(match (&self.selected, &self.agents) {
                             (Some(_), Some((project, agents))) if !agents.is_empty() => {
-                                let start = on.clone();
+                                let start = Rc::clone(&on);
                                 h_flex()
                                     .flex_wrap()
                                     .gap_2()
                                     .children(agents.iter().copied().enumerate().map(
                                         |(index, agent)| {
-                                            let start = start.clone();
+                                            let start = Rc::clone(&start);
                                             let project = *project;
                                             Button::new(("empty-agent", index as u64))
                                                 .map(|button| {
@@ -754,7 +762,7 @@ impl EmptyState {
                                         },
                                     ))
                                     .child({
-                                        let start = on.clone();
+                                        let start = Rc::clone(&on);
                                         Button::new("empty-new-chat")
                                             .ghost()
                                             .label("More options…")
@@ -765,7 +773,7 @@ impl EmptyState {
                                     .into_any_element()
                             }
                             (Some(_), _) => {
-                                let start = on.clone();
+                                let start = Rc::clone(&on);
                                 h_flex()
                                     .child(
                                         Button::new("empty-new-chat")
@@ -779,7 +787,7 @@ impl EmptyState {
                                     .into_any_element()
                             }
                             (None, _) => {
-                                let start = on.clone();
+                                let start = Rc::clone(&on);
                                 h_flex()
                                     .child(
                                         Button::new("empty-add-project")
@@ -819,10 +827,10 @@ impl EmptyState {
                                             ),
                                     )
                                     .children(self.recent.iter().map(|recent| {
-                                        let on = on.clone();
+                                        let on = Rc::clone(&on);
                                         let id = recent.id;
                                         h_flex()
-                                            .id(("recent", id as u64))
+                                            .id(("recent", id.cast_unsigned()))
                                             .px_2()
                                             .py(px(7.))
                                             .mx(px(-8.))
@@ -891,8 +899,8 @@ impl Toolbar {
             (needing, _) => Some(sidebar::badge(needing, true, false, cx)),
         };
         let menu = self.menu.clone();
-        let on = self.on.clone();
-        let search_on = on.clone();
+        let on = Rc::clone(&self.on);
+        let search_on = Rc::clone(&on);
 
         let search = Button::new("search")
             .outline()
@@ -944,7 +952,7 @@ impl Toolbar {
             .dropdown_caret(true)
             .tooltip_with_action("The running chats of every project", &ShowRunning, None);
 
-        let close_on = on.clone();
+        let close_on = Rc::clone(&on);
         let menu_on = on;
         TitleBar::new()
             .h(TITLE_BAR_HEIGHT)

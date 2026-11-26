@@ -291,7 +291,7 @@ fn show_settings(token: Option<String>, cx: &mut App) {
 /// Activates the window on Wayland with the token from the tray. GPUI has no
 /// API for it, and its own request, made without the user's click, is likely
 /// refused by compositors that prevent focus stealing.
-fn activate_with_token(window: &Window, token: String) -> anyhow::Result<()> {
+fn activate_with_token(window: &Window, token: String) -> Result<()> {
     use raw_window_handle::{
         HasDisplayHandle as _, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
     };

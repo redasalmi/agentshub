@@ -259,12 +259,12 @@ impl Workspace {
                 Some((_, shell)) => shell.view.focus_handle(cx).focus(window, cx),
                 None => self.focus_chat(window, cx),
             },
-            // The shell still shows and keeps the keyboard.
-            Some(_) => {}
             // The shown chat went, its terminal and header with it, and the
             // keyboard with them.
             None if chat_focused && self.active.is_none() => self.focus_chat(window, cx),
-            None => {}
+            // The shell still shows and keeps the keyboard, or the keyboard
+            // was elsewhere.
+            Some(_) | None => {}
         }
     }
 

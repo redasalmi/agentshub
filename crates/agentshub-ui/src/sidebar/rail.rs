@@ -10,7 +10,7 @@ pub fn rail(window_width: Pixels, cx: &App) -> (bool, Pixels) {
     fit_rail(
         settings.project_names,
         px(settings.rail_width),
-        super::rail_room(window_width),
+        rail_room(window_width),
     )
 }
 

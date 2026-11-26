@@ -51,7 +51,7 @@ impl Clone for Pick {
 #[derive(Clone)]
 pub enum Lead {
     Tone(Tone),
-    Icon(gpui_kit::assets::IconName),
+    Icon(assets::IconName),
 }
 
 pub struct Entry {
@@ -130,7 +130,7 @@ impl Sections {
                 .unzip();
             (groups, Rc::new(picks))
         });
-        (groups.clone(), picks.clone())
+        (groups.clone(), Rc::clone(picks))
     }
 }
 
@@ -159,7 +159,7 @@ pub fn open(
             state.update(cx, |state, cx| state.focus(window, cx));
         }
         let (groups, picks) = shown.built(window);
-        let on_pick = on_pick.clone();
+        let on_pick = Rc::clone(&on_pick);
         // The filter only passes what has the query in it, and a message can
         // match without having it verbatim. Keeping the query that is typed
         // now, the last results stay until the next ones replace them.
@@ -167,10 +167,10 @@ pub fn open(
         let (messages, message_picks) = group(
             "Messages".into(),
             found.borrow().iter(),
-            Some(query),
+            Some(&query),
             window,
         );
-        let (found, searching, search) = (found.clone(), searching.clone(), search.clone());
+        let (found, searching, search) = (Rc::clone(&found), Rc::clone(&searching), search.clone());
         let command = groups
             .into_iter()
             .chain((!message_picks.is_empty()).then_some(messages))
@@ -187,7 +187,7 @@ pub fn open(
                         window.refresh();
                         return;
                     }
-                    let (found, search) = (found.clone(), search.clone());
+                    let (found, search) = (Rc::clone(&found), Rc::clone(&search));
                     // Replacing the task cancels the search it was waiting on.
                     searching.set(Some(window.spawn(cx, async move |cx| {
                         cx.background_executor().timer(SEARCH_DELAY).await;
@@ -248,7 +248,7 @@ pub fn open(
 fn group<'a>(
     heading: SharedString,
     entries: impl Iterator<Item = &'a Entry>,
-    query: Option<SharedString>,
+    query: Option<&SharedString>,
     window: &Window,
 ) -> (CommandGroup, Vec<Pick>) {
     let mut group = CommandGroup::new().label(heading);
@@ -260,7 +260,7 @@ fn group<'a>(
         };
         let mut keywords = entry.keywords.clone();
         keywords.extend(entry.meta.clone());
-        keywords.extend(query.clone());
+        keywords.extend(query.cloned());
         group = group.item(
             CommandItem::new()
                 .label(entry.label.clone())
