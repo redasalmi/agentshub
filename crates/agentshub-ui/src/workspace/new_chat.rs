@@ -121,6 +121,22 @@ impl Workspace {
         let created = checkout.created();
         self.checkouts.retain(|checkout| !checkout.is_taken());
         self.checkouts.push(checkout);
+        // Copying a large project takes seconds, with nothing else to show
+        // that the chat is coming.
+        let copying = SharedString::from(uuid::Uuid::new_v4().to_string());
+        window.push_notification(
+            Notification::new()
+                .id1::<CopyingProject>(copying.clone())
+                .message(format!(
+                    "Copying {} into a new worktree for the chat…",
+                    project.file_name().map_or_else(
+                        || project.display().to_string(),
+                        |name| { name.to_string_lossy().into_owned() }
+                    )
+                ))
+                .autohide(false),
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
             // Shutdown takes it instead if the app quits first. It can't
             // between here and the chat being added, which is one step.
@@ -129,31 +145,34 @@ impl Workspace {
             };
             let created =
                 created.map(|created| (created.worktree, unreadable_message(&created.unreadable)));
-            let added = this.update_in(cx, |this, window, cx| match &created {
-                // All the chats were closed meanwhile, this one with them.
-                Ok((worktree, _)) if this.lifecycle.closed_all() != closed_all => {
-                    this.remove_worktree(worktree, &project, None, cx)
-                }
-                Err(_) if this.lifecycle.closed_all() != closed_all => {}
-                Ok((worktree, unreadable)) => {
-                    if let Some(message) = unreadable {
-                        window.push_notification(message.clone(), cx);
+            let added = this.update_in(cx, |this, window, cx| {
+                window.remove_notification1::<CopyingProject>(copying, cx);
+                match &created {
+                    // All the chats were closed meanwhile, this one with them.
+                    Ok((worktree, _)) if this.lifecycle.closed_all() != closed_all => {
+                        this.remove_worktree(worktree, &project, None, cx)
                     }
-                    this.add_chat(
-                        project_id,
-                        agent,
-                        &project,
-                        Some(worktree),
-                        title.clone(),
-                        Asked {
-                            navigations,
-                            closed_all,
-                        },
-                        cx,
-                    )
-                }
-                Err(err) => {
-                    window.push_notification(format!("Couldn't create a worktree: {err:#}"), cx)
+                    Err(_) if this.lifecycle.closed_all() != closed_all => {}
+                    Ok((worktree, unreadable)) => {
+                        if let Some(message) = unreadable {
+                            window.push_notification(message.clone(), cx);
+                        }
+                        this.add_chat(
+                            project_id,
+                            agent,
+                            &project,
+                            Some(worktree),
+                            title.clone(),
+                            Asked {
+                                navigations,
+                                closed_all,
+                            },
+                            cx,
+                        )
+                    }
+                    Err(err) => {
+                        window.push_notification(format!("Couldn't create a worktree: {err:#}"), cx)
+                    }
                 }
             });
             // Without a window to start it in, no chat runs in the worktree.
@@ -435,3 +454,6 @@ fn unreadable_message(unreadable: &[PathBuf]) -> Option<String> {
         "The worktree doesn't have what you can't read in the project: {list}."
     ))
 }
+
+/// Tells apart the notice that a project is being copied into a worktree.
+struct CopyingProject;
