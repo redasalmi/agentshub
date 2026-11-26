@@ -1,6 +1,6 @@
 [package]
 name = "agentshub-ui"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 rust-version = "1.91"
 publish = false
@@ -13,9 +13,9 @@ wayland-client = { version = "0.31", features = ["system"] }
 raw-window-handle = "0.6"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io"] }
 notify = "8"
-agentshub-platform = { path = "../agentshub-platform", version = "0.17.0" }
-agentshub-app = { path = "../agentshub-app", version = "0.17.0" }
-agentshub-core = { path = "../agentshub-core", version = "0.17.0" }
+agentshub-platform = { path = "../agentshub-platform", version = "0.18.0" }
+agentshub-app = { path = "../agentshub-app", version = "0.18.0" }
+agentshub-core = { path = "../agentshub-core", version = "0.18.0" }
 anyhow = "1"
 fontdb = "0.23"
 gpui-kit = "0.8.0"
