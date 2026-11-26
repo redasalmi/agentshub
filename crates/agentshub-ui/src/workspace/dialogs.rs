@@ -344,8 +344,9 @@ impl Workspace {
                                             .text_color(theme.muted_foreground)
                                             .child(
                                                 "The agent works on a branch of its own, in a \
-                                             checkout of the project that other chats don't \
-                                             touch.",
+                                             copy of the project as it is now, with its \
+                                             uncommitted changes and ignored files like .env. \
+                                             Other chats don't touch it.",
                                             ),
                                     ),
                             )

@@ -48,6 +48,12 @@ another config folder in the settings, start a second chat, relaunch and check
 each chat resumed in its own folder, with the CLI's variable unset for the
 default one.
 
+`scenarios/worktree.sh`: seed a project with uncommitted changes, an
+untracked file, `.env` and `node_modules`, start a chat in a worktree, check
+the CLI runs in it and that it matches the project path for path (kind, mode,
+size, modification time, link target, contents and git status), and run
+commands in its project shell.
+
 `scenarios/rendering.sh`: has the fake Claude draw what fonts alone get wrong
 (its block logo, check marks, boxes, a usage bar, braille, Powerline, emoji and
 text attributes) and shoots it at the default size and zoomed in. Compare the

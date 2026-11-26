@@ -1,7 +1,7 @@
 //! Git worktrees that chats run in, so agents working in the same project
 //! don't edit each other's files. Agents Hub makes them with git itself, which
-//! works the same for every agent, and keeps them in its data folder, out of
-//! the project.
+//! works the same for every agent, copies the project's working tree in as it
+//! is (see `mirror`), and keeps them in its data folder, out of the project.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, bail};
 use smol::future::FutureExt as _;
 
+mod mirror;
 mod remove;
 
 pub use remove::{Removal, remove};
@@ -116,7 +117,7 @@ struct Git {
 
 impl Checkout {
     /// Starts making a worktree of `project`'s repository on a new branch
-    /// from its current commit.
+    /// from its current commit, holding what its working tree holds.
     pub fn start(project: &Path) -> Self {
         Self::start_in(project, worktrees_dir())
     }
@@ -254,19 +255,32 @@ fn create_in(project: &Path, dir: &Path, state: &Mutex<Git>) -> anyhow::Result<W
         .arg(&path)
         .arg("HEAD");
     let (status, stderr) = run_checkout(command, state)?;
-    if !status.success() {
-        let why = stderr.trim().to_string();
+    let failed = if status.success() {
+        let skip = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        mirror::mirror(&repo.root, &path, &skip, &|| lock(state).stopped)
+            .err()
+            .map(|err| {
+                (
+                    format!("Couldn't copy the project into the worktree {name}"),
+                    format!("{err:#}"),
+                )
+            })
+    } else {
+        Some((
+            format!("git couldn't create the worktree {name}"),
+            stderr.trim().to_string(),
+        ))
+    };
+    if let Some((what, why)) = failed {
         // Git can fail after making the branch and the checkout, as when a
-        // post-checkout hook fails or it is stopped, and leaves them behind.
-        // No chat would refer to them, so they go again.
+        // post-checkout hook fails or it is stopped, and leaves them behind,
+        // as a copy that fails does. No chat would refer to them, so they go
+        // again.
         let left = discard(&repo.root, &path, &branch);
         if left.is_empty() {
-            bail!("git couldn't create the worktree {name}: {why}");
+            bail!("{what}: {why}");
         }
-        bail!(
-            "git couldn't create the worktree {name}, and {}: {why}",
-            left.join(" and ")
-        );
+        bail!("{what}, and {}: {why}", left.join(" and "));
     }
     Ok(Worktree {
         folder: path.join(&repo.prefix),
@@ -377,7 +391,7 @@ pub(super) fn git(dir: &Path) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, File};
 
     use super::*;
 
@@ -705,6 +719,184 @@ mod tests {
         assert!(!checkout.is_taken());
         abandon(vec![checkout]);
         assert_nothing_left(&root, &dir);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// What a folder holds, but for its `.git`: each path, with its kind,
+    /// mode and, for a file, its bytes and modification time.
+    #[cfg(unix)]
+    fn tree(root: &Path) -> std::collections::BTreeMap<PathBuf, String> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn walk(root: &Path, dir: &Path, into: &mut std::collections::BTreeMap<PathBuf, String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                if relative == Path::new(".git") {
+                    continue;
+                }
+                let meta = fs::symlink_metadata(&path).unwrap();
+                let mode = meta.permissions().mode() & 0o7777;
+                let what = if meta.is_symlink() {
+                    format!("link -> {}", fs::read_link(&path).unwrap().display())
+                } else if meta.is_dir() {
+                    walk(root, &path, into);
+                    format!("dir {mode:o}")
+                } else {
+                    format!(
+                        "file {mode:o} {:?} {:?}",
+                        meta.modified().unwrap(),
+                        fs::read(&path).unwrap()
+                    )
+                };
+                into.insert(relative, what);
+            }
+        }
+        let mut tree = std::collections::BTreeMap::new();
+        walk(root, root, &mut tree);
+        tree
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copies_the_working_tree_as_it_is() {
+        use std::os::unix::fs::symlink;
+
+        let (base, root) = setup();
+        fs::write(root.join(".gitignore"), "/.env\nnode_modules/\n").unwrap();
+        fs::write(root.join("app/gone.rs"), "gone").unwrap();
+        fs::write(root.join("app/kept.rs"), "kept").unwrap();
+        fs::write(root.join("run.sh"), "#!/bin/sh\n").unwrap();
+        chmod(&root.join("run.sh"), 0o755);
+        symlink("app/main.rs", root.join("link")).unwrap();
+        run(&root, &["add", "."]);
+        run(&root, &["commit", "-q", "-m", "more"]);
+
+        // Changes nobody committed, of every kind.
+        fs::write(root.join("app/main.rs"), "fn main() { changed() }").unwrap();
+        fs::remove_file(root.join("app/gone.rs")).unwrap();
+        fs::write(root.join("app/staged.rs"), "staged").unwrap();
+        run(&root, &["add", "app/staged.rs"]);
+        fs::remove_file(root.join("link")).unwrap();
+        fs::write(root.join("link"), "a file now").unwrap();
+        fs::write(root.join("notes.md"), "untracked").unwrap();
+        fs::create_dir(root.join("empty")).unwrap();
+        // What git ignores.
+        fs::write(root.join(".env"), "TOKEN=1").unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "module.exports = 1").unwrap();
+        chmod(&root.join("node_modules/pkg/index.js"), 0o755);
+        symlink("../pkg/index.js", root.join("node_modules/.bin/tool")).unwrap();
+        fs::write(root.join("node_modules/pkg/readonly"), "r").unwrap();
+        chmod(&root.join("node_modules/pkg/readonly"), 0o444);
+        let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        File::options()
+            .write(true)
+            .open(root.join("app/kept.rs"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        // A submodule's or another worktree's tie to its repository.
+        fs::create_dir_all(root.join("vendor/sub")).unwrap();
+        fs::write(root.join("vendor/sub/.git"), "gitdir: /elsewhere").unwrap();
+        fs::write(root.join("vendor/sub/lib.rs"), "lib").unwrap();
+
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default()).unwrap();
+
+        let mut expected = tree(&root);
+        expected.remove(Path::new("vendor/sub/.git"));
+        assert_eq!(tree(&worktree.root), expected);
+        assert_eq!(rev(&worktree.root, "HEAD"), rev(&root, "HEAD"));
+        let output = git(&worktree.root)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        let status = String::from_utf8(output.stdout).unwrap();
+        for change in [
+            " M app/main.rs",
+            " D app/gone.rs",
+            " T link",
+            "?? app/staged.rs",
+            "?? notes.md",
+        ] {
+            assert!(
+                status.lines().any(|line| line == change),
+                "{change} in {status}"
+            );
+        }
+        assert!(
+            !status.contains("node_modules") && !status.contains(".env"),
+            "{status}"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_worktree_with_only_ignored_files_is_still_removed() {
+        let (base, root) = setup();
+        fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        run(&root, &["add", "."]);
+        run(&root, &["commit", "-q", "-m", "ignore"]);
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "").unwrap();
+        let worktree = create_in(&root, &base.join("worktrees"), &Mutex::default()).unwrap();
+        assert!(worktree.root.join("node_modules/pkg/index.js").exists());
+        assert_eq!(remove(&worktree, &root).unwrap(), Removal::Removed);
+        assert!(!worktree.root.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_repository_holding_the_worktrees_isnt_copied_into_them() {
+        let (base, root) = setup();
+        let dir = root.join("worktrees");
+        let worktree = create_in(&root, &dir, &Mutex::default()).unwrap();
+        assert!(worktree.root.join("app/main.rs").exists());
+        assert!(!worktree.root.join("worktrees").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaves_nothing_behind_when_a_file_cant_be_copied() {
+        let (base, root) = setup();
+        let secret = root.join("secret");
+        fs::write(&secret, "").unwrap();
+        chmod(&secret, 0o000);
+        // Root reads it anyway.
+        if File::open(&secret).is_ok() {
+            fs::remove_dir_all(base).unwrap();
+            return;
+        }
+        let dir = base.join("worktrees");
+        let err = format!(
+            "{:#}",
+            create_in(&root, &dir, &Mutex::default()).unwrap_err()
+        );
+        assert!(
+            err.contains("Couldn't copy") && err.contains("secret"),
+            "{err}"
+        );
+        assert!(!err.contains("left"), "{err}");
+        assert_nothing_left(&root, &dir);
+        chmod(&secret, 0o644);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn stops_copying_once_stopped() {
+        let (base, root) = setup();
+        let dst = base.join("copy");
+        fs::create_dir(&dst).unwrap();
+        let err = mirror::mirror(&root, &dst, &base.join("worktrees"), &|| true).unwrap_err();
+        assert_eq!(err.to_string(), "The worktree was abandoned.");
         fs::remove_dir_all(base).unwrap();
     }
 

@@ -10,6 +10,14 @@ When you start a chat in a project that uses git, the **Start a coding agent** w
 
 To have this box ticked for every new chat, turn on **Start chats in a git worktree** in [Settings](settings.md). You can still untick it for a single chat.
 
+## What the copy holds
+
+The copy starts as your project folder is at that moment, file for file: changes you haven't committed, new files, and the files git ignores, such as `.env`, `node_modules` or a build folder. The agent can run your tests and tools there straight away, without installing anything or asking you for settings.
+
+- The new branch starts from the commit you have checked out. Your uncommitted changes are in the copy as uncommitted changes, including ones you had staged.
+- On btrfs or XFS, the copy shares the files' contents with your project until one side changes them, so even a large `node_modules` takes almost no extra room. On other filesystems, everything is copied in full.
+- A submodule's files are copied, but not its link to its own repository, so git commands in it work on the chat's branch.
+
 ## Where your work ends up
 
 - The agent's changes are on a new branch whose name starts with `agentshub/`. You can look at that branch, merge it or throw it away with your usual git tools, as with any other branch.
@@ -20,5 +28,5 @@ To have this box ticked for every new chat, turn on **Start chats in a git workt
 
 Deleting the chat also removes its copy of the project, with two safety rules:
 
-- If the copy has changes that nobody committed, Agents Hub keeps it and tells you where it is, so nothing is lost.
+- If the copy has changes that nobody committed, Agents Hub keeps it and tells you where it is, so nothing is lost. That includes the uncommitted changes it was copied with. Ignored files, like `node_modules`, don't count.
 - The branch always stays, so committed work is never lost.
