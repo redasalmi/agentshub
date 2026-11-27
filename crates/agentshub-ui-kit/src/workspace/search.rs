@@ -329,7 +329,6 @@ impl Workspace {
                 }
                 self.layout.select_project(id, cx)
             }
-            pick @ Pick::Filter(_) => self.layout.pick(pick, cx),
             // Sent from where the keys would have sent it: closing the search
             // gave the focus back to where it was, as the shell, unless it was
             // outside the workspace.
@@ -343,6 +342,7 @@ impl Workspace {
                     window.dispatch_action(action, cx);
                 }
             }
+            pick => self.layout.pick(pick, cx),
         }
     }
 }
