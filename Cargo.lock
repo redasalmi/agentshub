@@ -170,6 +170,7 @@ dependencies = [
 name = "agentshub-runtime"
 version = "0.19.1"
 dependencies = [
+ "agentshub-app",
  "agentshub-core",
  "anyhow",
  "gpui-kit",

@@ -6,6 +6,7 @@ rust-version = "1.91"
 publish = false
 
 [dependencies]
+agentshub-app = { path = "../agentshub-app", version = "0.19.1" }
 agentshub-core = { path = "../agentshub-core", version = "0.19.1" }
 anyhow = "1"
 gpui-kit = "0.8.0"
