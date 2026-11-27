@@ -15,7 +15,6 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use agentshub_app::settings::Settings;
-use agentshub_core::agent::Agent;
 use agentshub_core::status::{Need, Status};
 use agentshub_core::store::{Chat, Project};
 
@@ -30,14 +29,14 @@ mod status;
 mod text;
 mod widgets;
 
-pub use agentshub_core::format::age;
+pub use agentshub_core::format::{activity, age};
 use rail::{key_number, project_mark};
 pub use rail::{names_width, rail};
 
 pub use status::{badge, dot, live_dot};
 use status::{name_of, popping_dot};
 use text::summary;
-pub use text::{activity, home_relative, marks, path_line, subtitle};
+pub use text::{home_relative, marks, path_line, subtitle};
 use widgets::section;
 pub use widgets::{group_heading, heading};
 

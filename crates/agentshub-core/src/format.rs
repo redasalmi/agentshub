@@ -1,5 +1,7 @@
 //! Small formatting helpers shared by the app's views.
 
+use crate::agent::Agent;
+use crate::status::{Need, Status};
 use crate::store;
 
 /// How long ago something happened, given in seconds since the Unix epoch,
@@ -46,6 +48,24 @@ pub fn duration(time: Duration) -> String {
         0..60 => format!("{seconds}s"),
         60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
         _ => format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
+pub fn activity(agent: Agent, running: Option<Option<Status>>) -> String {
+    let name = agent.display_name();
+    match running {
+        None => name.to_string(),
+        Some(None) => format!("{name} is running"),
+        Some(Some(Status::Idle)) => format!("{name} is idle"),
+        Some(Some(Status::Working)) => format!("{name} is working"),
+        Some(Some(Status::Blocked(Some(Need::Permission)))) => {
+            format!("{name} needs your permission")
+        }
+        Some(Some(Status::Blocked(Some(Need::Question)))) => format!("{name} has a question"),
+        Some(Some(Status::Blocked(Some(Need::Auth)))) => format!("{name} needs you to sign in"),
+        Some(Some(Status::Blocked(None))) => format!("{name} is waiting for you"),
+        Some(Some(Status::Done)) => format!("{name} is done"),
+        Some(Some(Status::Error)) => format!("{name} stopped on an error"),
     }
 }
 

@@ -91,24 +91,6 @@ pub fn home_relative(path: &Path) -> String {
     }
 }
 
-pub fn activity(agent: Agent, running: Option<Option<Status>>) -> String {
-    let name = agent.display_name();
-    match running {
-        None => name.to_string(),
-        Some(None) => format!("{name} is running"),
-        Some(Some(Status::Idle)) => format!("{name} is idle"),
-        Some(Some(Status::Working)) => format!("{name} is working"),
-        Some(Some(Status::Blocked(Some(Need::Permission)))) => {
-            format!("{name} needs your permission")
-        }
-        Some(Some(Status::Blocked(Some(Need::Question)))) => format!("{name} has a question"),
-        Some(Some(Status::Blocked(Some(Need::Auth)))) => format!("{name} needs you to sign in"),
-        Some(Some(Status::Blocked(None))) => format!("{name} is waiting for you"),
-        Some(Some(Status::Done)) => format!("{name} is done"),
-        Some(Some(Status::Error)) => format!("{name} stopped on an error"),
-    }
-}
-
 /// How many agents need the user, work, sit idle, or haven't said.
 pub(super) fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String {
     let (mut working, mut need_you, mut idle, mut unknown) = (0, 0, 0, 0);
