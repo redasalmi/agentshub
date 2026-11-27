@@ -11,6 +11,7 @@ use agentshub_ui_kit::{Frontend, frontend};
 use layout::TriageLayout;
 
 pub mod groups;
+mod header;
 pub mod layout;
 mod list;
 

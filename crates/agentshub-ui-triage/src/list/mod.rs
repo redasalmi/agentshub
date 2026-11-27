@@ -136,7 +136,7 @@ impl TriageList {
     }
 
     /// What chat `chat`'s agent is doing, `None` when it doesn't run.
-    fn running(&self, chat: i64) -> Option<Option<Status>> {
+    pub(crate) fn running(&self, chat: i64) -> Option<Option<Status>> {
         self.running.get(&chat).copied()
     }
 
@@ -353,7 +353,7 @@ fn emit(
 }
 
 /// A project's mark, `size` wide, in its color.
-fn project_mark(mark: SharedString, tint: Tint, size: Pixels, cx: &App) -> Div {
+pub(crate) fn project_mark(mark: SharedString, tint: Tint, size: Pixels, cx: &App) -> Div {
     div()
         .size(size)
         .flex_none()

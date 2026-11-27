@@ -10,15 +10,21 @@ use gpui_kit::component::{ActiveTheme as _, Selectable, StyledExt as _, h_flex, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use agentshub_core::store::Project;
 use agentshub_runtime::Runtime;
 use agentshub_ui_kit::layout::{Body, Commands, Held, LayoutView, NavEvent, Parts, ShownChat};
+use agentshub_ui_kit::marks::marks;
 use agentshub_ui_kit::palette::Pick;
+use agentshub_ui_kit::status::Tone;
+use agentshub_ui_kit::theme::{self as appearance, Tint};
 use agentshub_ui_kit::workspace::Workspace;
 
+use crate::header::Header;
 use crate::list::{SIDEBAR_WIDTH, TriageList};
 
-/// The title bar's height, which the window is dragged by.
-const TITLE_BAR_HEIGHT: Pixels = px(48.);
+/// The title bar's height: the shown chat's header, which the window is
+/// dragged by.
+const TITLE_BAR_HEIGHT: Pixels = px(60.);
 
 /// Where the running chats' menu opens from: a corner of the title bar,
 /// which takes no room.
@@ -70,11 +76,11 @@ impl TriageLayout {
         }
     }
 
-    /// The title bar over the chat: what it shows, the window's controls,
-    /// and the running chats' menu while it is open.
+    /// The title bar over the chat: `content`, the window's controls, and
+    /// the running chats' menu while it is open.
     fn render_title_bar(
         &self,
-        title: Option<SharedString>,
+        content: AnyElement,
         menu: Option<Entity<PopupMenu>>,
         cx: &App,
     ) -> AnyElement {
@@ -102,15 +108,7 @@ impl TriageLayout {
                     .inset_0()
                     .pr_2()
                     .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(15.))
-                            .font_semibold()
-                            .children(title),
-                    )
+                    .child(content)
                     // The running chats' menu opens from the corner, as no
                     // button of the header opens it.
                     .child(
@@ -137,40 +135,117 @@ impl TriageLayout {
             .into_any_element()
     }
 
-    /// The shown chat's body, which tracks the keyboard for the workspace.
-    fn render_chat(shown: &ShownChat, window: &Window, cx: &App) -> AnyElement {
+    /// The shown chat: its header in the title bar over its body. They track
+    /// the keyboard for the workspace together.
+    fn render_chat(
+        &self,
+        shown: &ShownChat,
+        menu: Option<Entity<PopupMenu>>,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
+        let header = self
+            .header(shown, window, cx)
+            .map_or_else(|| Empty.into_any_element(), |header| header.render(cx));
         v_flex()
             .size_full()
             .overflow_hidden()
             .track_focus(&shown.focus)
+            .child(self.render_title_bar(header, menu, cx))
             .child(shown.body.render(window, cx))
             .into_any_element()
     }
 
-    /// What the title bar says: the shown chat's title, else the selected
-    /// project's name.
-    fn title(&self, body: &Body, cx: &App) -> Option<SharedString> {
+    /// What the shown chat's header shows, while the runtime has the chat.
+    fn header(&self, shown: &ShownChat, window: &Window, cx: &App) -> Option<Header> {
         let runtime = self.runtime.read(cx);
-        let chats = || runtime.projects().iter().flat_map(|project| &project.chats);
-        match body {
-            Body::Settings(_) => None,
-            Body::Chat(shown) => Some(
-                chats()
-                    .find(|chat| chat.id == shown.body.id)
-                    .and_then(|chat| chat.title.clone())
-                    .unwrap_or_else(|| "New chat".into())
-                    .into(),
-            ),
+        let list = self.list.read(cx);
+        let id = shown.body.id;
+        let chat = runtime.chat(id)?;
+        let project = runtime
+            .projects()
+            .iter()
+            .find(|project| project.chats.iter().any(|chat| chat.id == id));
+        let entry = project.and_then(|project| project.chats.iter().find(|chat| chat.id == id));
+        let running = list.running(id);
+        Some(Header {
+            title: title_of(runtime, id).into(),
+            pinned: entry.is_some_and(|entry| entry.pinned),
+            project: project.and_then(|project| place(runtime, project, cx)),
+            agent: chat.agent,
+            branch: entry
+                .and_then(|entry| entry.worktree.as_ref())
+                .map(|worktree| worktree.branch().into()),
+            cwd: chat.cwd.to_path_buf(),
+            tone: Tone::of(running),
+            turn: chat.turn,
+            running: chat.running,
+            spin: window.is_visible() && !runtime.hidden(),
+            earlier: shown.earlier,
+            history_open: shown.history_open,
+            shell: shown.body.shell.is_some(),
+            editors: agentshub_ui_kit::editor::editor_choices(cx),
+            focus: shown.focus.clone(),
+            on: Rc::clone(&shown.body.on),
+        })
+    }
+
+    /// What the title bar says while no chat shows: the selected project's
+    /// name, over the empty state.
+    fn render_title(&self, body: &Body, cx: &App) -> AnyElement {
+        let name = match body {
             Body::Empty(_) => {
                 let selected = self.list.read(cx).selected_project();
-                runtime
+                self.runtime
+                    .read(cx)
                     .projects()
                     .iter()
                     .find(|project| Some(project.id) == selected)
-                    .map(|project| project.name.clone().into())
+                    .map(|project| SharedString::from(project.name.clone()))
             }
-        }
+            Body::Settings(_) | Body::Chat(_) => None,
+        };
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(px(15.))
+            .font_semibold()
+            .children(name)
+            .into_any_element()
     }
+}
+
+/// Project `project`'s name, its mark as the list's filter shows it, and
+/// the mark's color, unless it is archived.
+fn place(
+    runtime: &Runtime,
+    project: &Project,
+    cx: &App,
+) -> Option<(SharedString, SharedString, Tint)> {
+    let listed: Vec<&Project> = runtime
+        .projects()
+        .iter()
+        .filter(|project| project.archived_at.is_none())
+        .collect();
+    let at = listed.iter().position(|each| each.id == project.id)?;
+    let mark = marks(listed.iter().map(|project| project.name.as_str())).swap_remove(at);
+    Some((
+        project.name.clone().into(),
+        mark.into(),
+        appearance::project_tint(project.id, cx),
+    ))
+}
+
+/// Chat `id`'s title, as the list shows it.
+fn title_of(runtime: &Runtime, id: i64) -> String {
+    runtime
+        .projects()
+        .iter()
+        .flat_map(|project| &project.chats)
+        .find(|chat| chat.id == id)
+        .and_then(|chat| chat.title.clone())
+        .unwrap_or_else(|| "New chat".into())
 }
 
 impl LayoutView for TriageLayout {
@@ -238,15 +313,25 @@ impl LayoutView for TriageLayout {
 
     fn render(&self, parts: Parts, window: &mut Window, cx: &mut App) -> AnyElement {
         let room = window.viewport_size().width - SIDEBAR_WIDTH;
-        let title = self.title(&parts.body, cx);
-        let body = match parts.body {
-            Body::Settings(view) => view
-                .update(cx, |view, cx| view.render(room, window, cx))
-                .into_any_element(),
-            Body::Chat(shown) => Self::render_chat(&shown, window, cx),
-            Body::Empty(empty) => empty,
+        let menu = parts.running_menu;
+        let main = match parts.body {
+            Body::Chat(shown) => self.render_chat(&shown, menu, window, cx),
+            body => {
+                let title = self.render_title(&body, cx);
+                let body = match body {
+                    Body::Settings(view) => view
+                        .update(cx, |view, cx| view.render(room, window, cx))
+                        .into_any_element(),
+                    Body::Empty(empty) => empty,
+                    Body::Chat(_) => Empty.into_any_element(),
+                };
+                v_flex()
+                    .size_full()
+                    .child(self.render_title_bar(title, menu, cx))
+                    .child(v_flex().flex_1().min_h_0().child(body))
+                    .into_any_element()
+            }
         };
-        let title_bar = self.render_title_bar(title, parts.running_menu, cx);
         h_flex()
             .size_full()
             .child(
@@ -269,8 +354,7 @@ impl LayoutView for TriageLayout {
                     .min_w_0()
                     .h_full()
                     .bg(cx.theme().background)
-                    .child(title_bar)
-                    .child(v_flex().flex_1().min_h_0().child(body)),
+                    .child(main),
             )
             .into_any_element()
     }
