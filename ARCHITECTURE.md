@@ -5,8 +5,9 @@ enforced by the Cargo workspace (see `Cargo.toml`) and by
 `scripts/check-arch.sh`.
 
 ```
-bin ──▶ ui ──▶ runtime ──▶ app ──▶ core
-          └──▶ platform
+bin ──▶ ui ──▶ ui-kit ──▶ runtime ──▶ app ──▶ core
+          │      └──▶ platform
+          └──▶ runtime
 ```
 
 - **core** — domain and backend. No `gpui_kit`, `Window`, `Entity`, `Context`
@@ -22,8 +23,10 @@ bin ──▶ ui ──▶ runtime ──▶ app ──▶ core
   element trees, no `Window`. It takes intents, tells the UI what changed
   through events, and reaches systemd only through the `Scope` port the
   binary installs.
-- **ui** — the GPUI frontend: themes, sidebar, search palette, settings,
-  history, terminal view, chat sheet, toolbar, footer, empty state, and the
+- **ui-kit** — what the layouts share: the theme, terminal view, history,
+  status glyphs and headings. It names no layout.
+- **ui** — the GPUI frontend: sidebar, search palette, settings,
+  chat sheet, toolbar, footer, empty state, and the
   workspace, which lays them out and moves the keyboard between them. Views
   read runtime and app state and send intents; the tray is wired to the
   window here.

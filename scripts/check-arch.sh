@@ -27,6 +27,8 @@ scan crates/agentshub-core/src 'gpui_kit|gpui::|\bWindow\b|\bEntity<|\bContext<'
 # ui renders what the runtime holds; it does not persist, run processes or
 # touch the filesystem.
 scan crates/agentshub-ui/src '\bStore\b|rusqlite|std::fs|std::process|portable_pty|notify::|agentshub_core::(lifecycle|reports|sessions|worktree|process|transcript)'
+# ui-kit is what the layouts share; it knows no layout.
+scan crates/agentshub-ui-kit/src '\bStore\b|rusqlite|std::fs|std::process|portable_pty|notify::|agentshub_core::(lifecycle|reports|sessions|worktree|process|transcript)|agentshub_ui_classic|agentshub_ui_triage|agentshub_ui::'
 # runtime sits below the UI.
 scan crates/agentshub-runtime/src 'agentshub_ui|crate::ui'
 # platform is an adapter layer.
