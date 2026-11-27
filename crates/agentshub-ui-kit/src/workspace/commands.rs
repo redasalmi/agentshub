@@ -234,7 +234,7 @@ impl Workspace {
     /// keyboard on from what had it if that went with them.
     pub(super) fn apply_closing(&mut self, intent: Intent, window: &mut Window, cx: &mut App) {
         // Settings in front of the chat keep the keyboard whatever closes,
-        // as does the sidebar beside it.
+        // as does the layout's list beside it.
         let chat_focused = self.runtime.read(cx).active().is_some()
             && !self.settings_shown
             && self.chat_focus.contains_focused(window, cx);

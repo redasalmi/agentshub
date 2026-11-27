@@ -46,7 +46,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The sidebar doesn't list a chat just added yet.
+        // The layout's list doesn't show a chat just added yet.
         let listed = self.runtime.read(cx).saved_projects();
         let asked = self.runtime.read(cx).asked();
         cx.spawn_in(window, async move |this, cx| {

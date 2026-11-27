@@ -68,6 +68,8 @@ pub fn init(cx: &mut App) {
     crate::actions::bind_keys(cx);
 }
 
+/// The window's content: the shown chat, the dialogs, search and settings,
+/// around the layout that lists the projects and chats.
 pub struct Workspace {
     /// Lists the projects and chats around the shown chat.
     layout: Box<dyn LayoutView>,

@@ -3,11 +3,11 @@
 use super::*;
 
 impl Workspace {
+    /// The workspace on `runtime`, in the layout `layout` builds for it.
     #[expect(
         clippy::too_many_lines,
         reason = "creates every part of the workspace and the tasks that feed it"
     )]
-    /// The workspace on `runtime`, in the layout `layout` builds for it.
     pub fn new(
         runtime: Entity<Runtime>,
         layout: impl FnOnce(WeakEntity<Self>, &mut Window, &mut Context<Self>) -> Box<dyn LayoutView>,

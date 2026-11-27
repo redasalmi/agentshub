@@ -96,7 +96,7 @@ impl Workspace {
         self.cover_terminals(cx);
         self.layout.refresh(cx);
         // Showing a chat, even the one already shown, brings its project back
-        // into the rail's selection, so the chat list and New Chat follow it.
+        // into the layout's selection, so the chat list and New Chat follow it.
         self.layout.reveal(id, cx);
         self.set_focused(focused, cx);
         cx.notify();

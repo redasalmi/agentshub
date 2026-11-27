@@ -34,7 +34,7 @@ impl Workspace {
         .detach();
     }
 
-    /// Adds the folders among paths dropped on the sidebar as projects, and
+    /// Adds the folders among paths dropped on the window as projects, and
     /// says so when none of them is a folder.
     pub(super) fn add_dropped(
         &mut self,
@@ -183,7 +183,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The sidebar doesn't list a chat just added yet.
+        // The layout's list doesn't show a chat just added yet.
         let listed = self.runtime.read(cx).saved_projects();
         let asked = self.runtime.read(cx).asked();
         cx.spawn_in(window, async move |this, cx| {
