@@ -1,4 +1,4 @@
-//! Headings and path lines shared by the layouts.
+//! Headings, path lines and number keys shared by the layouts.
 
 use std::path::Path;
 
@@ -9,6 +9,7 @@ use gpui_kit::*;
 use agentshub_core::format::home_relative;
 
 use crate::status::Tone;
+use crate::theme as appearance;
 
 /// A heading of the running list, in the color of what its chats need.
 pub fn group_heading(label: &'static str, count: usize, tone: Tone, cx: &App) -> impl IntoElement {
@@ -61,4 +62,20 @@ pub fn path_line(path: &Path, cx: &App) -> Stateful<Div> {
         .text_color(theme.muted_foreground)
         .tooltip(move |window, cx| Tooltip::new(whole.clone()).build(window, cx))
         .child(shown)
+}
+
+/// The number that opens the `index`th chat or project with its modifier.
+pub fn key_number(index: usize, cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .flex_none()
+        .px_1p5()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(appearance::palette(cx).border_strong)
+        .bg(theme.background)
+        .text_xs()
+        .font_family(theme.mono_font_family.clone())
+        .text_color(theme.foreground)
+        .child((index + 1).to_string())
 }

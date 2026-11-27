@@ -33,22 +33,6 @@ pub fn names_width(window_width: Pixels, cx: &App) -> Pixels {
     rail(window_width, cx).1 - RAIL_WIDTH
 }
 
-/// The number that opens the `index`th chat or project with its modifier.
-pub(super) fn key_number(index: usize, cx: &App) -> Div {
-    let theme = cx.theme();
-    div()
-        .flex_none()
-        .px_1p5()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(appearance::palette(cx).border_strong)
-        .bg(theme.background)
-        .text_xs()
-        .font_family(theme.mono_font_family.clone())
-        .text_color(theme.foreground)
-        .child((index + 1).to_string())
-}
-
 /// A project's mark, drawn in its color.
 pub(super) fn project_mark(mark: SharedString, tint: Tint, cx: &App) -> Div {
     div()

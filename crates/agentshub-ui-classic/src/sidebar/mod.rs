@@ -19,9 +19,10 @@ use agentshub_core::store::{Chat, Project};
 
 use agentshub_ui_kit::actions::{NUMBERED, NewChat};
 use agentshub_ui_kit::layout::{Held, NavEvent, running_chats};
+use agentshub_ui_kit::marks::marks;
 use agentshub_ui_kit::status::{Filter, POP, Tone, badge, dot, subtitle};
 use agentshub_ui_kit::theme::{self as appearance, Tint};
-use agentshub_ui_kit::widgets::{heading, path_line};
+use agentshub_ui_kit::widgets::{heading, key_number, path_line};
 
 mod list_view;
 mod rail;
@@ -31,11 +32,10 @@ mod text;
 mod widgets;
 
 pub use agentshub_core::format::{activity, age, home_relative};
-use rail::{key_number, project_mark};
+use rail::project_mark;
 pub use rail::{names_width, rail};
 
 use status::{name_of, popping_dot};
-pub use text::marks;
 use text::summary;
 use widgets::section;
 
@@ -595,9 +595,9 @@ impl Sidebar {
 mod tests {
     use gpui_kit::px;
 
+    use super::RAIL_WIDTH;
     use super::rail::fit_rail;
-    use super::text::{initials, summary};
-    use super::{RAIL_WIDTH, marks};
+    use super::text::summary;
     use agentshub_core::status::Status;
 
     #[test]
@@ -619,15 +619,6 @@ mod tests {
     }
 
     #[test]
-    fn names_projects_with_two_letters() {
-        assert_eq!(initials("agentshub"), "ag");
-        assert_eq!(initials("simple-base"), "sb");
-        assert_eq!(initials("My_Blog"), "mb");
-        assert_eq!(initials("x"), "x");
-        assert_eq!(initials("--"), "?");
-    }
-
-    #[test]
     fn fits_the_rail_in_the_window() {
         // Room enough: as the user wants it, within its limits.
         assert_eq!(fit_rail(true, px(300.), px(1000.)), (true, px(300.)));
@@ -638,16 +629,5 @@ mod tests {
         // Too narrow for the names, it folds.
         assert_eq!(fit_rail(true, px(300.), px(100.)), (false, RAIL_WIDTH));
         assert_eq!(fit_rail(false, px(300.), px(1000.)), (false, RAIL_WIDTH));
-    }
-
-    #[test]
-    fn tells_projects_with_the_same_initials_apart() {
-        assert_eq!(marks(["test", "terraform", "frontend"]), ["te", "tr", "fr"]);
-        // A project added twice from different folders.
-        assert_eq!(marks(["notes", "notes"]), ["no", "nt"]);
-        // Out of pairs, it takes three letters.
-        assert_eq!(marks(["ab", "ac", "abc"]), ["ab", "ac", "abc"]);
-        // Out of letters, it keeps its initials.
-        assert_eq!(marks(["ab", "a-b"]), ["ab", "ab"]);
     }
 }
