@@ -56,6 +56,9 @@ the CLI runs in it and that it matches the project path for path (kind, mode,
 size, modification time, link target, contents and git status), and run
 commands in its project shell.
 
+`scenarios/runtime.sh`: start a Codex chat, close it from its row's menu, and
+check a key typed then reaches no CLI and nothing panicked.
+
 `scenarios/rendering.sh`: has the fake Claude draw what fonts alone get wrong
 (its block logo, check marks, boxes, a usage bar, braille, Powerline, emoji and
 text attributes) and shoots it at the default size and zoomed in. Compare the
