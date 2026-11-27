@@ -54,33 +54,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Finds the agents the selected project can start, for the buttons that
-    /// start them while no chat is open.
+    /// Has the runtime find the agents the selected project can start, for
+    /// the buttons that start them while no chat is open.
     pub(super) fn look_up_installed(&mut self, cx: &mut Context<Self>) {
-        let Some((id, path)) = self
-            .sidebar
-            .read(cx)
-            .selected()
-            .map(|project| (project.id, project.path.clone()))
-        else {
-            self.installed = None;
-            return;
-        };
-        self._installed_lookup = Some(cx.spawn(async move |this, cx| {
-            let agents = cx
-                .background_spawn(async move { Agent::installed(&path) })
-                .await;
-            this.update(cx, |this, cx| {
-                if let Some((project, sections)) = &this.palette_start
-                    && *project == id
-                {
-                    sections.set(PALETTE_START, start_entries(id, &agents), cx);
-                }
-                this.installed = Some((id, agents));
-                cx.notify();
-            })
-            .ok();
-        }));
+        if let Some(id) = self.sidebar.read(cx).selected().map(|project| project.id) {
+            self.apply(Intent::LookUpInstalled(id), cx);
+        }
     }
 
     /// Only the shown chat's CLI and project shell build frames, and neither

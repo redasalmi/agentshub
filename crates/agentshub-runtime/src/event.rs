@@ -30,4 +30,7 @@ pub enum RuntimeEvent {
     /// the ones the user does, with `Intent::Suspend`, and gives back the
     /// keyboard they had.
     ClosingAfterLookup(Vec<i64>),
+    /// The agents project `id` can start were looked up (see
+    /// `Runtime::installed`).
+    InstalledChanged(i64),
 }

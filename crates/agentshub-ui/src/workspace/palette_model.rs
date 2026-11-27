@@ -31,7 +31,11 @@ impl Workspace {
     )]
     pub(super) fn palette_lists(&self, cx: &App) -> PaletteLists {
         let sidebar = self.sidebar.read(cx);
-        let installed = self.installed.clone();
+        let installed = self
+            .runtime
+            .read(cx)
+            .installed()
+            .map(|(id, agents)| (id, agents.to_vec()));
         let mut chats = Vec::new();
         let mut archived = Vec::new();
         let mut places = HashMap::new();

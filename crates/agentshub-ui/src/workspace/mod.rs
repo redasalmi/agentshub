@@ -99,10 +99,8 @@ pub struct Workspace {
     /// Shows the sidebar's shortcut numbers once their modifier has been
     /// held a moment on its own.
     reveal_numbers: Option<Task<()>>,
-    /// The agents the selected project can start, as last looked up off the
-    /// UI thread, and the lookup under way.
-    installed: Option<(i64, Vec<Agent>)>,
-    _installed_lookup: Option<Task<()>>,
+    /// The New Chat dialog's lookup under way, which opens the dialog once
+    /// done.
     _new_chat_lookup: Option<Task<()>>,
     /// The search box last opened, with the project whose agents it offers
     /// to start, which fill in once they have been looked up.

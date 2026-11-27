@@ -241,11 +241,11 @@ impl Workspace {
     /// dialog's order.
     fn empty_agents(&self, cx: &App) -> Option<(i64, Vec<Agent>)> {
         let project = self.sidebar.read(cx).selected()?;
-        let (id, agents) = self.installed.as_ref()?;
-        if *id != project.id {
+        let (id, agents) = self.runtime.read(cx).installed()?;
+        if id != project.id {
             return None;
         }
-        Some((project.id, agents.clone()))
+        Some((project.id, agents.to_vec()))
     }
 
     /// Starts the `n`th agent the empty state offers, counting from one, on

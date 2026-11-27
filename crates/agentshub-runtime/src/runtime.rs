@@ -5,6 +5,7 @@ use std::fs;
 use agentshub_app::bootstrap::Opened;
 use agentshub_app::catalog::Catalog;
 use agentshub_app::settings::Settings;
+use agentshub_core::agent::Agent;
 use agentshub_core::lifecycle::Lifecycle;
 use agentshub_core::store::{Change, Imported, Project, Store};
 use gpui_kit::{Context, EventEmitter, SharedString, Task};
@@ -39,6 +40,10 @@ pub struct Runtime {
     pub(crate) colors: Option<Colors>,
     /// How many times the window closed (see `Intent::WindowClosed`).
     pub(crate) window_closes: u64,
+    /// The agents a project can start, as last looked up off the foreground
+    /// thread, and the lookup under way.
+    pub(crate) installed: Option<(i64, Vec<Agent>)>,
+    pub(crate) installed_lookup: Option<Task<()>>,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
     /// Why the database can't be used: it didn't open, or another Agents Hub
@@ -72,6 +77,8 @@ impl Runtime {
             turn_tick: None,
             colors: None,
             window_closes: 0,
+            installed: None,
+            installed_lookup: None,
             _lock: lock,
             broken: broken.map(SharedString::from),
             startup: Some((settings, imported)),
@@ -110,6 +117,7 @@ impl Runtime {
             Intent::Suspend(id) => self.suspend(id, cx),
             Intent::SetFocused(focused) => self.set_focused(focused, cx),
             Intent::WindowClosed => self.window_closes += 1,
+            Intent::LookUpInstalled(project) => self.look_up_installed(project, cx),
         }
     }
 

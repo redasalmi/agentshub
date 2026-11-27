@@ -85,6 +85,7 @@ impl Workspace {
             RuntimeEvent::ActiveChanged(active) => this.active_changed(*active, cx),
             RuntimeEvent::TurnTick => cx.notify(),
             RuntimeEvent::ClosingAfterLookup(ids) => this.close_after_lookup(ids.clone(), cx),
+            RuntimeEvent::InstalledChanged(id) => this.installed_changed(*id, cx),
         });
 
         let window_closed = {
@@ -135,8 +136,6 @@ impl Workspace {
             panes: HashMap::new(),
             _sidebar_events: sidebar_events,
             reveal_numbers: None,
-            installed: None,
-            _installed_lookup: None,
             _new_chat_lookup: None,
             palette_start: None,
             _theme: theme,

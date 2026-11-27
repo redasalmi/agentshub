@@ -3,6 +3,24 @@
 use super::*;
 
 impl Workspace {
+    /// Offers the agents project `id` can start, now that they have been
+    /// looked up, in the search box if it was opened for that project.
+    pub(super) fn installed_changed(&mut self, id: i64, cx: &mut Context<Self>) {
+        let entries = self
+            .runtime
+            .read(cx)
+            .installed()
+            .filter(|(installed, _)| *installed == id)
+            .map(|(_, agents)| start_entries(id, agents));
+        if let Some((project, sections)) = &self.palette_start
+            && *project == id
+            && let Some(entries) = entries
+        {
+            sections.set(PALETTE_START, entries, cx);
+        }
+        cx.notify();
+    }
+
     /// Starts `agent` in a new chat of project `project_id` without asking
     /// anything first. With no checkbox to untick, the chat gets a worktree as
     /// the settings say.

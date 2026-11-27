@@ -24,4 +24,6 @@ pub enum Intent {
     /// waiting for: a chat whose last session is being read, or whose stopped
     /// CLI is being reaped, doesn't start once that's done.
     WindowClosed,
+    /// Looks up the agents a project can start (see `Runtime::installed`).
+    LookUpInstalled(i64),
 }
