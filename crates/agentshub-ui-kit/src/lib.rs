@@ -1,6 +1,7 @@
-//! What the layouts of the app share: the theme, the terminal view, the
-//! history and the status glyphs.
+//! What the layouts of the app share: the actions and their shortcuts, the
+//! theme, the terminal view, the history and the status glyphs.
 
+pub mod actions;
 pub mod appearance;
 pub mod history;
 pub mod status;

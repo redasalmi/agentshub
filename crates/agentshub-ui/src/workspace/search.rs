@@ -11,16 +11,17 @@ use crate::palette::{self, Entry, Lead, Pick};
 use agentshub_app::settings::{DEFAULT_TERMINAL_FONT_SIZE, Settings, ThemeFamily};
 use agentshub_core::store::Change;
 use agentshub_runtime::Intent;
+use agentshub_ui_kit::actions::{
+    AddProject, ArchiveChat, ArchiveProject, CloseAllChats, CloseIdleChats, DeleteChat,
+    ExportDatabase, ImportDatabase, NextNeedingYou, OpenInEditor, RenameChat, ShowArchived,
+    ShowRunning, ShowShortcuts, ToggleHistory, TogglePin, ToggleProjectNames, ToggleSettings,
+    ToggleShell, ToggleTheme, UseTheme,
+};
 use agentshub_ui_kit::status::Filter;
 use agentshub_ui_kit::terminal_view;
 
 use super::palette_model::PaletteLists;
-use super::{
-    AddProject, ArchiveChat, ArchiveProject, CloseAllChats, CloseIdleChats, DeleteChat,
-    ExportDatabase, ImportDatabase, NextNeedingYou, OpenInEditor, PALETTE_START, RenameChat,
-    ShowArchived, ShowRunning, ShowShortcuts, ToggleHistory, TogglePin, ToggleProjectNames,
-    ToggleSettings, ToggleShell, ToggleTheme, UseTheme, Workspace,
-};
+use super::{PALETTE_START, Workspace};
 
 impl Workspace {
     /// Opens the search modal over the chats of every project, the agents

@@ -23,28 +23,15 @@ use agentshub_core::agent::Agent;
 use agentshub_core::editors::{self, Editor, Found};
 use agentshub_core::format::{Turn, capitalized, duration};
 
-use crate::settings::ShowShortcuts;
+use agentshub_ui_kit::actions::{
+    ArchiveChat, DeleteChat, NextNeedingYou, OpenInEditor, OpenSearch, RenameChat, ShowRunning,
+    ShowShortcuts, ToggleHistory, TogglePin, ToggleShell,
+};
 use agentshub_ui_kit::history::History;
 use agentshub_ui_kit::status::{Tone, badge, dot, live_dot};
 use agentshub_ui_kit::terminal_view::TerminalView;
 use agentshub_ui_kit::theme as appearance;
 use agentshub_ui_kit::widgets::{heading, path_line};
-
-actions!(
-    chat,
-    [
-        OpenSearch,
-        NextNeedingYou,
-        ShowRunning,
-        ToggleHistory,
-        ToggleShell,
-        OpenInEditor,
-        RenameChat,
-        TogglePin,
-        DeleteChat,
-        ArchiveChat,
-    ]
-);
 
 /// How much of a window the earlier sessions take at most.
 pub const HISTORY_SHARE: f32 = 0.45;

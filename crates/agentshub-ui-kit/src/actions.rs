@@ -1,17 +1,8 @@
-//! The workspace's actions and the shortcuts that reach them.
+//! The app's actions and the shortcuts that reach them.
 
 use gpui_kit::*;
 
-use crate::sidebar::NUMBERED;
 use agentshub_app::settings::ThemeFamily;
-
-pub use crate::chat::{
-    ArchiveChat, DeleteChat, NextNeedingYou, OpenSearch, RenameChat, ShowRunning, ToggleHistory,
-    TogglePin,
-};
-pub use crate::chat::{OpenInEditor, ToggleShell};
-pub use crate::settings::{ShowShortcuts, ToggleSettings};
-pub use crate::sidebar::NewChat;
 
 actions!(
     workspace,
@@ -28,6 +19,26 @@ actions!(
     ]
 );
 
+actions!(
+    chat,
+    [
+        OpenSearch,
+        NextNeedingYou,
+        ShowRunning,
+        ToggleHistory,
+        ToggleShell,
+        OpenInEditor,
+        RenameChat,
+        TogglePin,
+        DeleteChat,
+        ArchiveChat,
+    ]
+);
+
+actions!(settings, [ToggleSettings, ShowShortcuts]);
+
+actions!(sidebar, [NewChat]);
+
 /// Puts the app in a family of themes.
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = workspace, no_json)]
@@ -43,11 +54,14 @@ pub struct OpenChatAt(pub usize);
 #[action(namespace = workspace, no_json)]
 pub struct SelectProjectAt(pub usize);
 
+/// How many chats and projects have a shortcut of their own.
+pub const NUMBERED: usize = 9;
+
 // The shortcuts are bound without a context, so they reach the workspace
 // before a focused terminal sends them to its CLI. They hold Ctrl and Shift
 // together, or Alt or Ctrl with a digit, which terminal programs leave alone,
 // so the CLIs keep the plain Ctrl keys.
-pub(super) fn init(cx: &mut App) {
+pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-shift-k", OpenSearch, None),
         KeyBinding::new("ctrl-shift-n", NewChat, None),

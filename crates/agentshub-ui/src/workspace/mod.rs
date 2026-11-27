@@ -35,13 +35,18 @@ use agentshub_core::status::Status;
 use agentshub_core::store::{self, Change};
 use agentshub_runtime::terminal::Terminal;
 use agentshub_runtime::{Intent, Runtime, RuntimeEvent};
+use agentshub_ui_kit::actions::{
+    AddProject, ArchiveChat, ArchiveProject, CloseAllChats, CloseIdleChats, DeleteChat,
+    ExportDatabase, ImportDatabase, NewChat, NextNeedingYou, OpenChatAt, OpenInEditor, OpenSearch,
+    RenameChat, SelectProjectAt, ShowArchived, ShowRunning, ShowShortcuts, ToggleHistory,
+    TogglePin, ToggleProjectNames, ToggleSettings, ToggleShell, ToggleTheme, UseTheme,
+};
 use agentshub_ui_kit::appearance;
 use agentshub_ui_kit::history::History;
 use agentshub_ui_kit::status::{Tone, dot};
 use agentshub_ui_kit::terminal_view::{self, TerminalView};
 use agentshub_ui_kit::widgets::{group_heading, path_line};
 
-mod actions;
 mod catalog;
 mod chat_view;
 mod chats;
@@ -63,7 +68,6 @@ mod startup;
 mod status;
 mod terminals;
 
-pub use actions::*;
 pub(crate) use format::plural;
 
 /// How many of the chats last worked in show while no chat is open.
@@ -75,7 +79,7 @@ const REVEAL_NUMBERS_AFTER: Duration = Duration::from_millis(400);
 
 /// Binds the shortcuts that reach the workspace.
 pub fn init(cx: &mut App) {
-    actions::init(cx);
+    agentshub_ui_kit::actions::bind_keys(cx);
 }
 
 pub struct Workspace {

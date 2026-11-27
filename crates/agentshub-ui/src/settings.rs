@@ -21,9 +21,8 @@ use agentshub_core::editors::Editor;
 
 use crate::chat::{SetEditor, editor_choices, editor_icon, editor_menu};
 use crate::palette;
+use agentshub_ui_kit::actions::{ShowShortcuts, ToggleSettings};
 use agentshub_ui_kit::theme as appearance;
-
-actions!(settings, [ToggleSettings, ShowShortcuts]);
 
 /// They work while an agent has the keyboard, so they use the workspace's
 /// focus, which TerminalView leaves alone.

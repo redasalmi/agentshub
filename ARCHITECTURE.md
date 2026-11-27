@@ -23,8 +23,9 @@ bin ──▶ ui ──▶ ui-kit ──▶ runtime ──▶ app ──▶ core
   element trees, no `Window`. It takes intents, tells the UI what changed
   through events, and reaches systemd only through the `Scope` port the
   binary installs.
-- **ui-kit** — what the layouts share: the theme, terminal view, history,
-  status glyphs and headings. It names no layout.
+- **ui-kit** — what the layouts share: the actions and their shortcuts, the
+  theme, terminal view, history, status glyphs and headings. It names no
+  layout.
 - **ui** — the GPUI frontend: sidebar, search palette, settings,
   chat sheet, toolbar, footer, empty state, and the
   workspace, which lays them out and moves the keyboard between them. Views

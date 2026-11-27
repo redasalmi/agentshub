@@ -18,11 +18,10 @@ use agentshub_app::settings::Settings;
 use agentshub_core::status::Status;
 use agentshub_core::store::{Chat, Project};
 
+use agentshub_ui_kit::actions::{NUMBERED, NewChat};
 use agentshub_ui_kit::status::{Filter, POP, Tone, badge, dot};
 use agentshub_ui_kit::theme::{self as appearance, Tint};
 use agentshub_ui_kit::widgets::{heading, path_line};
-
-actions!(sidebar, [NewChat]);
 
 mod list_view;
 mod rail;
@@ -85,9 +84,6 @@ const JOIN: Duration = Duration::from_millis(220);
 const LEAVE: Duration = Duration::from_millis(180);
 /// At least as tall as a chat's row, which grows from nothing to this.
 const CHAT_ROW_HEIGHT: Pixels = px(60.);
-
-/// How many chats and projects have a shortcut of their own.
-pub const NUMBERED: usize = 9;
 
 #[derive(Clone)]
 pub enum SidebarEvent {
