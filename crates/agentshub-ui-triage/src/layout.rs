@@ -19,7 +19,7 @@ use agentshub_ui_kit::status::Tone;
 use agentshub_ui_kit::theme::{self as appearance, Tint};
 use agentshub_ui_kit::workspace::Workspace;
 
-use crate::header::Header;
+use crate::header::{Banner, Header};
 use crate::list::{SIDEBAR_WIDTH, TriageList};
 
 /// The title bar's height: the shown chat's header, which the window is
@@ -135,8 +135,9 @@ impl TriageLayout {
             .into_any_element()
     }
 
-    /// The shown chat: its header in the title bar over its body. They track
-    /// the keyboard for the workspace together.
+    /// The shown chat: its header in the title bar, the banner while it
+    /// needs the user, and its body. They track the keyboard for the
+    /// workspace together.
     fn render_chat(
         &self,
         shown: &ShownChat,
@@ -144,20 +145,28 @@ impl TriageLayout {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        let header = self
-            .header(shown, window, cx)
-            .map_or_else(|| Empty.into_any_element(), |header| header.render(cx));
+        let (header, banner) = match self.header(shown, window, cx) {
+            Some((header, banner)) => (header.render(cx), banner.map(|banner| banner.render(cx))),
+            None => (Empty.into_any_element(), None),
+        };
         v_flex()
             .size_full()
             .overflow_hidden()
             .track_focus(&shown.focus)
             .child(self.render_title_bar(header, menu, cx))
+            .children(banner)
             .child(shown.body.render(window, cx))
             .into_any_element()
     }
 
-    /// What the shown chat's header shows, while the runtime has the chat.
-    fn header(&self, shown: &ShownChat, window: &Window, cx: &App) -> Option<Header> {
+    /// What the shown chat's header and banner show, while the runtime has
+    /// the chat.
+    fn header(
+        &self,
+        shown: &ShownChat,
+        window: &Window,
+        cx: &App,
+    ) -> Option<(Header, Option<Banner>)> {
         let runtime = self.runtime.read(cx);
         let list = self.list.read(cx);
         let id = shown.body.id;
@@ -168,7 +177,11 @@ impl TriageLayout {
             .find(|project| project.chats.iter().any(|chat| chat.id == id));
         let entry = project.and_then(|project| project.chats.iter().find(|chat| chat.id == id));
         let running = list.running(id);
-        Some(Header {
+        let next = list
+            .next_needing_you(Some(id))
+            .filter(|next| *next != id)
+            .map(|next| SharedString::from(title_of(runtime, next)));
+        let header = Header {
             title: title_of(runtime, id).into(),
             pinned: entry.is_some_and(|entry| entry.pinned),
             project: project.and_then(|project| place(runtime, project, cx)),
@@ -187,7 +200,9 @@ impl TriageLayout {
             editors: agentshub_ui_kit::editor::editor_choices(cx),
             focus: shown.focus.clone(),
             on: Rc::clone(&shown.body.on),
-        })
+        };
+        let banner = Banner::new(chat.agent, running, next, shown.focus.clone());
+        Some((header, banner))
     }
 
     /// What the title bar says while no chat shows: the selected project's
