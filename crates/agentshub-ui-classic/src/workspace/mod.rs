@@ -175,6 +175,3 @@ struct ChatPane {
     view: Option<Entity<TerminalView>>,
     history: Entity<History>,
 }
-
-#[cfg(test)]
-mod tests;

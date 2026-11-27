@@ -1,6 +1,7 @@
 //! The chat sheet's remaining chrome: toolbar, footer and empty state.
 
-use crate::chat::{ChatIntent, ChatSheet};
+use crate::chat::ChatSheet;
+use agentshub_ui_kit::chat_body::{ChatBody, ChatIntent, Shell};
 use agentshub_ui_kit::settings::SHORTCUTS_WORK_ANYWHERE;
 
 use super::*;
@@ -23,9 +24,7 @@ impl Workspace {
             .unwrap_or_else(|| ("New chat".into(), false));
         let history = pane.history.read(cx);
         let (earlier, history_open) = (history.count(), history.is_open());
-        let shell = self
-            .shown_shell(cx)
-            .map(|(cwd, view)| crate::chat::Shell { cwd, view });
+        let shell = self.shown_shell(cx).map(|(cwd, view)| Shell { cwd, view });
         let on = {
             let this = cx.weak_entity();
             let id = chat.id;
@@ -46,7 +45,6 @@ impl Workspace {
             })
         };
         ChatSheet {
-            id: chat.id,
             title: title.into(),
             pinned,
             agent: chat.agent,
@@ -54,20 +52,23 @@ impl Workspace {
             tone: Tone::of(self.sidebar.read(cx).running(chat.id)),
             turn: chat.turn,
             running: chat.running,
-            notice: chat.notice.cloned(),
-            message: chat.message.cloned(),
-            history: pane.history.clone(),
-            terminal: pane.view.clone(),
-            shell,
-            shell_share: cx.global::<Settings>().shell_share,
             hidden: runtime.hidden(),
-            active: runtime.active().is_some(),
             earlier,
             history_open,
             editors: agentshub_ui_kit::editor::editor_choices(cx),
             focus: self.chat_focus.clone(),
-            on,
-            save,
+            body: ChatBody {
+                id: chat.id,
+                notice: chat.notice.cloned(),
+                message: chat.message.cloned(),
+                history: pane.history.clone(),
+                terminal: pane.view.clone(),
+                shell,
+                shell_share: cx.global::<Settings>().shell_share,
+                active: runtime.active().is_some(),
+                on,
+                save,
+            },
         }
         .render(window, cx)
     }
@@ -78,9 +79,7 @@ impl Workspace {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let shell = self
-            .shown_shell(cx)
-            .map(|(cwd, view)| crate::chat::Shell { cwd, view });
+        let shell = self.shown_shell(cx).map(|(cwd, view)| Shell { cwd, view });
         let on = {
             let this = cx.weak_entity();
             Rc::new(
@@ -99,7 +98,7 @@ impl Workspace {
                 }
             })
         };
-        crate::chat::over_shell(
+        agentshub_ui_kit::chat_body::over_shell(
             above,
             px(0.),
             shell,

@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod appearance;
+pub mod chat_body;
 pub mod dialogs;
 pub mod editor;
 pub mod frontend;
