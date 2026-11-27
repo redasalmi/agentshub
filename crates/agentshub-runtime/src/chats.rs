@@ -431,8 +431,7 @@ impl Runtime {
 
     /// Starts a chat's CLI, resuming `session` if given. The chat stays hidden
     /// until it is activated.
-    #[doc(hidden)]
-    pub fn start_chat(
+    pub(crate) fn start_chat(
         &mut self,
         id: i64,
         agent: Agent,
@@ -814,8 +813,7 @@ impl Runtime {
     }
 
     /// Shows chat `id`, which takes back what was said about it.
-    #[doc(hidden)]
-    pub fn activate(&mut self, id: i64, cx: &mut Context<Self>) {
+    pub(crate) fn activate(&mut self, id: i64, cx: &mut Context<Self>) {
         if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) {
             chat.unseen = false;
         }

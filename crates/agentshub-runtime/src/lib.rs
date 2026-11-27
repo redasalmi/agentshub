@@ -12,6 +12,7 @@ mod sessions;
 pub use chats::{ChatState, IdleCheck, take_and_remove};
 pub use event::RuntimeEvent;
 pub use intent::Intent;
+pub use new_chat::Asked;
 pub use runtime::Runtime;
 
 #[cfg(test)]

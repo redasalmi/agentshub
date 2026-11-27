@@ -86,6 +86,16 @@ impl Workspace {
             RuntimeEvent::TurnTick => cx.notify(),
             RuntimeEvent::ClosingAfterLookup(ids) => this.close_after_lookup(ids.clone(), cx),
             RuntimeEvent::InstalledChanged(id) => this.installed_changed(*id, cx),
+            RuntimeEvent::CopyingProject { id, project } => {
+                this.copying_project(id.clone(), project, cx)
+            }
+            RuntimeEvent::CopiedProject(id) => this.copied_project(id.clone(), cx),
+            RuntimeEvent::SelectProject(id) => this
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.select(*id, cx)),
+            RuntimeEvent::DeletingNewChat { chat, worktree } => {
+                this.delete_chat(*chat, worktree.clone(), cx)
+            }
         });
 
         let window_closed = {
@@ -140,7 +150,6 @@ impl Workspace {
             palette_start: None,
             _theme: theme,
             _focus_lost: focus_lost,
-            checkouts: Vec::new(),
             shells: HashMap::new(),
             settings_shown: false,
             running_menu: None,

@@ -169,7 +169,8 @@ impl Workspace {
             scope::stop_all();
             scope::wait_stopped();
         }
-        worktree::abandon(std::mem::take(&mut self.checkouts));
+        self.runtime
+            .update(cx, |runtime, _| runtime.abandon_checkouts());
         // The worktrees of deleted chats, whose tasks won't run anymore. One
         // being removed already is waited for.
         for job in self

@@ -12,6 +12,7 @@ use crate::sidebar::Filter;
 use crate::terminal_view;
 use agentshub_app::settings::{DEFAULT_TERMINAL_FONT_SIZE, Settings, ThemeFamily};
 use agentshub_core::store::Change;
+use agentshub_runtime::Intent;
 
 use super::palette_model::PaletteLists;
 use super::{
@@ -333,7 +334,13 @@ impl Workspace {
     fn run_pick(&mut self, pick: Pick, window: &mut Window, cx: &mut Context<Self>) {
         match pick {
             Pick::OpenChat(id) => self.open_chat(id, window, cx),
-            Pick::StartAgent(project_id, agent) => self.start_agent(project_id, agent, window, cx),
+            Pick::StartAgent(project_id, agent) => self.apply(
+                Intent::StartAgent {
+                    project: project_id,
+                    agent,
+                },
+                cx,
+            ),
             Pick::SelectProject(id) => {
                 let archived = self
                     .sidebar

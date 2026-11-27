@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::base::InteractiveElementExt as _;
@@ -38,7 +37,7 @@ use agentshub_app::settings::{
 use agentshub_core::agent::Agent;
 use agentshub_core::status::Status;
 use agentshub_core::store::{self, Change};
-use agentshub_core::worktree::{self, Worktree};
+use agentshub_core::worktree::Worktree;
 #[cfg(target_os = "linux")]
 use agentshub_platform::scope;
 use agentshub_runtime::terminal::{self, Exited, Pty, Terminal};
@@ -70,7 +69,7 @@ mod terminals;
 pub use actions::*;
 pub(crate) use format::plural;
 
-use agentshub_core::lifecycle::{Added, Deleted, Saved, Saving};
+use agentshub_core::lifecycle::Deleted;
 
 /// How many of the chats last worked in show while no chat is open.
 const RECENT_CHATS: usize = 5;
@@ -107,10 +106,6 @@ pub struct Workspace {
     palette_start: Option<(i64, palette::Sections)>,
     _theme: Subscription,
     _focus_lost: Subscription,
-    /// The worktrees being checked out for new chats. Each is taken by its
-    /// chat once git is done, or by shutdown, so none is left without a chat
-    /// to remove it.
-    checkouts: Vec<worktree::Checkout>,
     /// The projects' shells, by folder, for quick commands next to their
     /// chats. Nothing about them is saved, and they run until they exit or
     /// the app quits.
@@ -154,14 +149,6 @@ impl Render for ResizeRail {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Empty
     }
-}
-
-/// When the user asked for a new chat, which what finishes later, git's
-/// answers and the checkout of the chat's worktree, is checked against.
-#[derive(Clone, Copy, PartialEq)]
-struct Asked {
-    navigations: u64,
-    closed_all: u64,
 }
 
 /// Where the agents to start are among the search box's sections.
@@ -209,16 +196,6 @@ struct ChatPane {
     /// The view of its terminal, unless its CLI didn't start.
     view: Option<Entity<TerminalView>>,
     history: Entity<History>,
-}
-
-/// A chat being added, with what starting it needs once it is.
-#[derive(Clone)]
-struct PendingChat {
-    project_id: i64,
-    agent: Agent,
-    project: PathBuf,
-    saving: Saving,
-    asked: Asked,
 }
 
 #[cfg(test)]

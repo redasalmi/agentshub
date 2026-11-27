@@ -48,7 +48,7 @@ impl Workspace {
     ) {
         // The sidebar doesn't list a chat just added yet.
         let listed = self.runtime.read(cx).store().projects();
-        let asked = self.asked(cx);
+        let asked = self.runtime.read(cx).asked();
         cx.spawn_in(window, async move |this, cx| {
             // The worktree Agents Hub made for the chat, and its project's
             // folder.
@@ -76,7 +76,7 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 // The user may have shown something else meanwhile, or opened
                 // another dialog, which the question would be out of place in.
-                if this.asked(cx) != asked || window.has_active_dialog(cx) {
+                if this.runtime.read(cx).asked() != asked || window.has_active_dialog(cx) {
                     return;
                 }
                 let this = cx.entity().downgrade();
@@ -145,6 +145,37 @@ impl Workspace {
             }
         }
         self.refresh(cx);
+    }
+
+    /// Stops the shells running in the worktree a chat ran in, and has the
+    /// runtime remove it once they and its CLI, if it had one, have been
+    /// reaped.
+    fn remove_worktree(
+        &mut self,
+        worktree: &Worktree,
+        project: &Path,
+        reaped: Option<smol::channel::Receiver<()>>,
+        cx: &mut Context<Self>,
+    ) {
+        let inside: Vec<PathBuf> = self
+            .shells
+            .keys()
+            .filter(|cwd| cwd.starts_with(&worktree.root))
+            .cloned()
+            .collect();
+        let mut waits: Vec<_> = reaped.into_iter().collect();
+        for cwd in &inside {
+            if let Some(shell) = self.shells.remove(cwd) {
+                waits.push(shell.terminal.read(cx).shutdown());
+            }
+        }
+        if !inside.is_empty() {
+            self.sync_terminals(cx);
+            cx.notify();
+        }
+        self.runtime.update(cx, |runtime, cx| {
+            runtime.remove_worktree(worktree, project, waits, cx)
+        });
     }
 
     /// Archives a chat, closing it first, and asks first if its agent is in

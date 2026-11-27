@@ -155,9 +155,7 @@ impl Workspace {
         // shutdown still removes what they make if the app quits first.
         self.runtime
             .update(cx, |runtime, _| runtime.lifecycle_mut().close_all());
-        for checkout in &self.checkouts {
-            checkout.cancel();
-        }
+        self.runtime.read(cx).cancel_checkouts();
         let ids = self
             .runtime
             .read(cx)

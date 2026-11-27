@@ -253,7 +253,7 @@ impl Workspace {
     pub(super) fn empty_key(
         &mut self,
         event: &KeyDownEvent,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.runtime.read(cx).active().is_some()
@@ -269,7 +269,13 @@ impl Workspace {
             && let Some(agent) = n.checked_sub(1).and_then(|n| agents.get(n))
         {
             cx.stop_propagation();
-            self.start_agent(project, *agent, window, cx);
+            self.apply(
+                Intent::StartAgent {
+                    project,
+                    agent: *agent,
+                },
+                cx,
+            );
         }
     }
 
@@ -338,7 +344,7 @@ impl Workspace {
     ) {
         match intent {
             crate::chat::EmptyIntent::StartAgent(project, agent) => {
-                self.start_agent(project, agent, window, cx)
+                self.apply(Intent::StartAgent { project, agent }, cx)
             }
             crate::chat::EmptyIntent::NewChat => self.new_chat_here(&NewChat, window, cx),
             crate::chat::EmptyIntent::AddProject => self.add_project(window, cx),

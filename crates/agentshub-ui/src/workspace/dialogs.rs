@@ -76,38 +76,24 @@ impl Workspace {
         else {
             return;
         };
-        let path = project.path.clone();
-        let asked = self.ask_for_chat(cx);
-        let store = self.runtime.read(cx).store().clone();
+        let (asked, lookup) = self
+            .runtime
+            .update(cx, |runtime, cx| runtime.ask_for_new_chat(&project, cx));
         self._new_chat_lookup = Some(cx.spawn_in(window, async move |this, cx| {
-            // Only the agents whose CLI is installed can start. Chats of the
-            // others stay as they are. A chat can have a worktree of its own
-            // when the project is in a git repository.
-            let (agents, in_git) = cx
-                .background_spawn(async move {
-                    let agents = Agent::installed(&path);
-                    let in_git = if agents.is_empty() {
-                        Ok(false)
-                    } else {
-                        worktree::repo(&path).map(|repo| repo.is_some())
-                    };
-                    (agents, in_git)
-                })
-                .await;
-            let current = store.project_path(project.id).await;
+            let found = lookup.await;
             this.update_in(cx, |this, window, cx| {
                 // The user may have asked for something else meanwhile, opened
                 // another dialog, or removed the project and had its id given
                 // to another.
-                if this.asked(cx) != asked
-                    || window.has_active_dialog(cx)
-                    || !matches!(current, Ok(Some(path)) if path == project.path)
-                {
+                if this.runtime.read(cx).asked() != asked || window.has_active_dialog(cx) {
                     return;
                 }
-                match in_git {
-                    Ok(in_git) => this.show_new_chat_dialog(project, agents, in_git, window, cx),
-                    Err(err) => window.push_notification(format!("{err:#}"), cx),
+                match found {
+                    Some(Ok((agents, in_git))) => {
+                        this.show_new_chat_dialog(project, agents, in_git, window, cx)
+                    }
+                    Some(Err(err)) => window.push_notification(format!("{err:#}"), cx),
+                    None => {}
                 }
             })
             .ok();
@@ -126,7 +112,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let project_id = project.id;
+        let store::Project {
+            id: project_id,
+            path: project_path,
+            ..
+        } = project;
         let agents = Rc::new(agents);
         let none_installed = agents.is_empty();
         // Whether the chat gets a worktree starts as the settings say.
@@ -137,7 +127,6 @@ impl Workspace {
         // Left empty, the chat is titled after its agent's sessions.
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Chat name (optional)"));
         let picker = cx.focus_handle().tab_stop(true);
-        let project_path = project.path.clone();
         let start = Rc::new({
             let (title, use_worktree) = (title.clone(), Rc::clone(&use_worktree));
             let workspace = cx.weak_entity();
@@ -147,15 +136,13 @@ impl Workspace {
                 let worktree = use_worktree.get();
                 workspace
                     .update(cx, |this, cx| {
-                        let asked = this.ask_for_chat(cx);
-                        this.new_chat(
-                            project_id,
-                            agent,
-                            &project.path,
-                            worktree,
-                            title,
-                            asked,
-                            window,
+                        this.apply(
+                            Intent::NewChat {
+                                project: project_id,
+                                agent,
+                                title: Some(title).filter(|title| !title.is_empty()),
+                                worktree,
+                            },
                             cx,
                         )
                     })

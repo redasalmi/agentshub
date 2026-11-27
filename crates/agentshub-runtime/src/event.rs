@@ -1,5 +1,10 @@
 //! What the runtime tells the window about.
 
+use std::path::PathBuf;
+
+use agentshub_core::worktree::Worktree;
+use gpui_kit::SharedString;
+
 /// Something the runtime changed, or has to tell the user, for the window to
 /// show.
 pub enum RuntimeEvent {
@@ -33,4 +38,21 @@ pub enum RuntimeEvent {
     /// The agents project `id` can start were looked up (see
     /// `Runtime::installed`).
     InstalledChanged(i64),
+    /// `project` is being copied into a new worktree for a new chat, which
+    /// takes seconds for a large one, with nothing else to show that the chat
+    /// is coming. The window says so until `CopiedProject` with the same
+    /// `id`.
+    CopyingProject { id: SharedString, project: PathBuf },
+    /// The copy `CopyingProject` told about with this id is done.
+    CopiedProject(SharedString),
+    /// A new chat is shown in project `id`, which the sidebar selects: it
+    /// doesn't list the chat yet, so it can't find its project by itself.
+    SelectProject(i64),
+    /// A chat added for a new chat can't stay: its project is being removed,
+    /// or its CLI couldn't start. The window deletes it, with its `worktree`,
+    /// as it deletes the ones the user does.
+    DeletingNewChat {
+        chat: i64,
+        worktree: Option<(Worktree, PathBuf)>,
+    },
 }

@@ -275,7 +275,7 @@ impl Workspace {
     ) {
         // The sidebar doesn't list a chat just added yet.
         let listed = self.runtime.read(cx).store().projects();
-        let asked = self.asked(cx);
+        let asked = self.runtime.read(cx).asked();
         cx.spawn_in(window, async move |this, cx| {
             let has_worktrees = listed
                 .await
@@ -296,7 +296,7 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 // The user may have shown something else meanwhile, or opened
                 // another dialog, which the question would be out of place in.
-                if this.asked(cx) != asked || window.has_active_dialog(cx) {
+                if this.runtime.read(cx).asked() != asked || window.has_active_dialog(cx) {
                     return;
                 }
                 let this = cx.entity().downgrade();

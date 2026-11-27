@@ -8,6 +8,7 @@ use agentshub_app::settings::Settings;
 use agentshub_core::agent::Agent;
 use agentshub_core::lifecycle::Lifecycle;
 use agentshub_core::store::{Change, Imported, Project, Store};
+use agentshub_core::worktree;
 use gpui_kit::{Context, EventEmitter, SharedString, Task};
 
 use crate::chats::ChatRuntime;
@@ -40,6 +41,10 @@ pub struct Runtime {
     pub(crate) colors: Option<Colors>,
     /// How many times the window closed (see `Intent::WindowClosed`).
     pub(crate) window_closes: u64,
+    /// The worktrees being checked out for new chats. Each is taken by its
+    /// chat once git is done, or by shutdown, so none is left without a chat
+    /// to remove it.
+    pub(crate) checkouts: Vec<worktree::Checkout>,
     /// The agents a project can start, as last looked up off the foreground
     /// thread, and the lookup under way.
     pub(crate) installed: Option<(i64, Vec<Agent>)>,
@@ -77,6 +82,7 @@ impl Runtime {
             turn_tick: None,
             colors: None,
             window_closes: 0,
+            checkouts: Vec::new(),
             installed: None,
             installed_lookup: None,
             _lock: lock,
@@ -117,6 +123,13 @@ impl Runtime {
             Intent::Suspend(id) => self.suspend(id, cx),
             Intent::SetFocused(focused) => self.set_focused(focused, cx),
             Intent::WindowClosed => self.window_closes += 1,
+            Intent::NewChat {
+                project,
+                agent,
+                title,
+                worktree,
+            } => self.start_new_chat(project, agent, title, worktree, cx),
+            Intent::StartAgent { project, agent } => self.start_agent(project, agent, cx),
             Intent::LookUpInstalled(project) => self.look_up_installed(project, cx),
         }
     }
