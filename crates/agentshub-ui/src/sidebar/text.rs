@@ -82,15 +82,6 @@ pub fn path_line(path: &Path, cx: &App) -> Stateful<Div> {
         .child(shown)
 }
 
-/// `path`, starting with `~` when it is in the home folder.
-pub fn home_relative(path: &Path) -> String {
-    match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_owned)) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    }
-}
-
 /// How many agents need the user, work, sit idle, or haven't said.
 pub(super) fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String {
     let (mut working, mut need_you, mut idle, mut unknown) = (0, 0, 0, 0);

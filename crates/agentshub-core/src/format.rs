@@ -1,5 +1,7 @@
 //! Small formatting helpers shared by the app's views.
 
+use std::path::Path;
+
 use crate::agent::Agent;
 use crate::status::{Need, Status};
 use crate::store;
@@ -82,5 +84,14 @@ pub fn plural(count: usize, noun: &str) -> String {
     match count {
         1 => format!("1 {noun}"),
         count => format!("{count} {noun}s"),
+    }
+}
+
+/// `path`, starting with `~` when it is in the home folder.
+pub fn home_relative(path: &Path) -> String {
+    match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_owned)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }

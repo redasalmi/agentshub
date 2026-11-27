@@ -29,14 +29,14 @@ mod status;
 mod text;
 mod widgets;
 
-pub use agentshub_core::format::{activity, age};
+pub use agentshub_core::format::{activity, age, home_relative};
 use rail::{key_number, project_mark};
 pub use rail::{names_width, rail};
 
 pub use status::{badge, dot, live_dot};
 use status::{name_of, popping_dot};
 use text::summary;
-pub use text::{home_relative, marks, path_line, subtitle};
+pub use text::{marks, path_line, subtitle};
 use widgets::section;
 pub use widgets::{group_heading, heading};
 
