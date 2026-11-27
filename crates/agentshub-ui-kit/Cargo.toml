@@ -1,15 +1,15 @@
 [package]
 name = "agentshub-ui-kit"
-version = "0.19.1"
+version = "0.20.0"
 edition = "2024"
 rust-version = "1.91"
 publish = false
 
 [dependencies]
-agentshub-app = { path = "../agentshub-app", version = "0.19.1" }
-agentshub-core = { path = "../agentshub-core", version = "0.19.1" }
-agentshub-platform = { path = "../agentshub-platform", version = "0.19.1" }
-agentshub-runtime = { path = "../agentshub-runtime", version = "0.19.1" }
+agentshub-app = { path = "../agentshub-app", version = "0.20.0" }
+agentshub-core = { path = "../agentshub-core", version = "0.20.0" }
+agentshub-platform = { path = "../agentshub-platform", version = "0.20.0" }
+agentshub-runtime = { path = "../agentshub-runtime", version = "0.20.0" }
 anyhow = "1"
 fontdb = "0.23"
 gpui-kit = "0.8.0"

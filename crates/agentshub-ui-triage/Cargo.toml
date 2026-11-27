@@ -1,14 +1,14 @@
 [package]
 name = "agentshub-ui-triage"
-version = "0.19.1"
+version = "0.20.0"
 edition = "2024"
 rust-version = "1.91"
 publish = false
 
 [dependencies]
-agentshub-core = { path = "../agentshub-core", version = "0.19.1" }
-agentshub-runtime = { path = "../agentshub-runtime", version = "0.19.1" }
-agentshub-ui-kit = { path = "../agentshub-ui-kit", version = "0.19.1" }
+agentshub-core = { path = "../agentshub-core", version = "0.20.0" }
+agentshub-runtime = { path = "../agentshub-runtime", version = "0.20.0" }
+agentshub-ui-kit = { path = "../agentshub-ui-kit", version = "0.20.0" }
 gpui-kit = "0.8.0"
 
 [lints]
