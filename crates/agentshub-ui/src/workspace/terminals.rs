@@ -16,11 +16,11 @@ impl Workspace {
     ) -> bool {
         let report = uuid::Uuid::new_v4().to_string();
         let colors = appearance::terminal_colors(cx);
-        let mut all_args = self.reports.args(agent);
+        let mut all_args = self.runtime.read(cx).reports().args(agent);
         if let Some(session) = session {
             all_args.extend(agent.resume_args(&session.agent_id, &session.transcript_path));
         }
-        let report_path = self.reports.path(&report);
+        let report_path = self.runtime.read(cx).reports().path(&report);
         let env = [(reports::ENV, report_path.as_os_str())];
         let terminal = match Pty::spawn(agent.program(), &all_args, &env, cwd, colors) {
             Ok(pty) => {
@@ -227,7 +227,8 @@ impl Workspace {
             .update(cx, |history, cx| history.refresh(None, &[], cx));
         self.sync_sidebar(cx);
         cx.notify();
-        self.read_last_session(id, session, cx);
+        self.runtime
+            .update(cx, |runtime, cx| runtime.read_last_session(id, session, cx));
     }
 
     /// Closes a chat whose CLI the user quit, and reads its last session.
@@ -239,7 +240,9 @@ impl Workspace {
             .and_then(|chat| chat.session);
         match self.stop_chat(id, cx) {
             Some(reaped) => self.track_stopping(id, reaped, session, cx),
-            None => self.read_last_session(id, session, cx),
+            None => self
+                .runtime
+                .update(cx, |runtime, cx| runtime.read_last_session(id, session, cx)),
         }
     }
 
@@ -372,7 +375,7 @@ impl Workspace {
         self.runtime.update(cx, |runtime, _| {
             runtime.lifecycle_mut().stop(id, reaped.clone(), session)
         });
-        let last = self.last_session(id, cx);
+        let last = self.runtime.read(cx).last_session(id);
         cx.spawn(async move |this, cx| {
             let session = last.await.or(session);
             this.update(cx, |this, cx| {
@@ -384,12 +387,182 @@ impl Workspace {
             // What the CLI writes as it exits is part of the session.
             reaped.recv().await.ok();
             this.update(cx, |this, cx| {
-                this.runtime
-                    .update(cx, |runtime, _| runtime.lifecycle_mut().reaped(id, &reaped));
-                this.read_sessions(session.into_iter().collect(), false, cx)
-                    .detach();
+                this.runtime.update(cx, |runtime, cx| {
+                    runtime.lifecycle_mut().reaped(id, &reaped);
+                    runtime
+                        .read_sessions(session.into_iter().collect(), false, cx)
+                        .detach();
+                });
             })
             .ok();
+        })
+        .detach();
+    }
+
+    /// Records the sessions in the reports queued for the terminal with
+    /// report name `report`.
+    pub(super) fn read_reports(&mut self, report: &str, cx: &mut Context<Self>) {
+        let Some((id, agent)) = self
+            .chats
+            .iter()
+            .find(|chat| chat.report == report)
+            .map(|chat| (chat.id, chat.agent))
+        else {
+            return;
+        };
+        let sessions = self
+            .runtime
+            .update(cx, |runtime, _| runtime.read_reports(agent, report));
+        self.record_sessions(id, sessions, cx);
+    }
+
+    /// Records the sessions a chat's CLI went into, in order (see
+    /// `Runtime::record_sessions`), and moves the chat into the last of them.
+    pub(super) fn record_sessions(
+        &mut self,
+        chat_id: i64,
+        sessions: Vec<(String, PathBuf, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == chat_id) else {
+            return;
+        };
+        let Some((agent_id, path, _)) = sessions.last() else {
+            return;
+        };
+        chat.transcript = Some(path.clone());
+        // Sessions are recorded in the order they're asked for, so once the
+        // last ones are, so are those before.
+        let (done, receiver) = smol::channel::bounded::<()>(1);
+        let recording = Recording {
+            done: receiver,
+            session: Rc::default(),
+            agent_id: agent_id.clone(),
+        };
+        chat.recording = Some(recording.clone());
+        let (agent, report) = (chat.agent, chat.report.clone());
+        let recorded = self.runtime.update(cx, |runtime, cx| {
+            runtime.record_sessions(chat_id, agent, sessions, cx)
+        });
+        cx.spawn(async move |this, cx| {
+            let session = recorded.await;
+            this.update(cx, |this, cx| {
+                let Some(session) = session else {
+                    return;
+                };
+                recording.session.set(Some(session));
+                // A newer terminal of the chat's is in a session of its own,
+                // and sessions its CLI reported since are newer than these.
+                if let Some(chat) = this.chats.iter_mut().find(|chat| {
+                    chat.id == chat_id
+                        && chat.report == report
+                        && chat
+                            .recording
+                            .as_ref()
+                            .is_some_and(|last| Rc::ptr_eq(&last.session, &recording.session))
+                }) {
+                    chat.session = Some(session);
+                }
+                // Reports arrive in bursts, and each one used to reload the
+                // sidebar.
+                this.refresh(cx);
+            })
+            .ok();
+            drop(done);
+        })
+        .detach();
+    }
+
+    /// Reads the session chat `id`'s CLI is in now, and gives it (see
+    /// `Runtime::read_current`).
+    pub(super) fn read_current(
+        &mut self,
+        id: i64,
+        touch: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<i64>> {
+        let Some(chat) = self.chats.iter().find(|chat| chat.id == id) else {
+            return Task::ready(None);
+        };
+        let (recording, current) = (chat.recording.clone(), chat.session);
+        self.runtime.update(cx, |runtime, cx| {
+            runtime.read_current(recording, current, touch, cx)
+        })
+    }
+
+    /// Codex writes its session files as it goes, so the sessions of its
+    /// terminals are looked for whenever those change.
+    pub(super) fn find_codex_sessions(&mut self, cx: &mut Context<Self>) {
+        let lookup = self.runtime.update(cx, |runtime, cx| {
+            let chats = self.chats.iter_mut().filter_map(|chat| {
+                if chat.agent != Agent::Codex {
+                    return None;
+                }
+                let pid = chat.pane.terminal.as_ref()?.terminal.read(cx).pid();
+                if !pid.may_be_running() {
+                    return None;
+                }
+                Some((chat.id, chat.report.clone(), pid, &mut chat.codex))
+            });
+            runtime.find_codex_sessions(chats)
+        });
+        let Some((lookup, found)) = lookup else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let found = found.await;
+            let Ok(closing) = this.update(cx, |this, cx| {
+                for (id, report, path, agent_id) in found {
+                    // A chat with this id now is another chat, or the same
+                    // one with a newer terminal: either way the result is
+                    // about a process that has gone. The same goes for a
+                    // lookup that a newer one has already replaced.
+                    let current = this
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == id && chat.report == report)
+                        .is_some_and(|chat| {
+                            chat.codex.looked_up_by(lookup)
+                                && chat.transcript.as_ref() != Some(&path)
+                        });
+                    if !current {
+                        continue;
+                    }
+                    this.record_sessions(id, vec![(agent_id, path, None)], cx);
+                }
+                let mut closing = Vec::new();
+                for chat in &mut this.chats {
+                    if chat.codex.looked_up(lookup) {
+                        closing.push(chat.id);
+                    }
+                }
+                closing
+            }) else {
+                return;
+            };
+            if closing.is_empty() {
+                return;
+            }
+            // One closed while its CLI was exiting may not be reaped yet, so
+            // its session is read once it is, and nothing else runs in that
+            // session until then. The shown chat takes the keyboard with it,
+            // which only its window can give back.
+            let Ok(window) = this.read_with(cx, |this, _| this.window) else {
+                return;
+            };
+            let closed = window.update(cx, |_, window, cx| {
+                this.update(cx, |this, cx| this.close_chats(closing.clone(), window, cx))
+            });
+            // Closed to the tray, the window has no keyboard to give back, and
+            // opening it again focuses the shown chat.
+            if !matches!(closed, Ok(Ok(()))) {
+                this.update(cx, |this, cx| {
+                    for id in closing {
+                        this.suspend(id, cx);
+                    }
+                })
+                .ok();
+            }
         })
         .detach();
     }

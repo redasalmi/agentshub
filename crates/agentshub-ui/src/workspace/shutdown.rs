@@ -98,7 +98,7 @@ impl Workspace {
         // wrote last is read here: the sessions in their queued reports, the
         // ones they were in, and the reads still under way. The sessions they
         // left before were read when they left them.
-        let mut sessions = self.reading.clone();
+        let mut sessions = self.runtime.read(cx).reading().to_vec();
         sessions.extend(
             self.runtime
                 .read(cx)
@@ -118,11 +118,11 @@ impl Workspace {
                     .stopping()
                     .map(|(id, ..)| id),
             )
-            .chain(self.reading_last.iter().copied())
+            .chain(self.runtime.read(cx).reading_last().iter().copied())
             .filter(|id| !removed.contains(id))
             .collect();
         for id in chats {
-            sessions.extend(smol::block_on(self.last_session(id, cx)));
+            sessions.extend(smol::block_on(self.runtime.read(cx).last_session(id)));
         }
         // A chat being opened reads its last session on a thread of its own,
         // which isn't in `reading`, so it is read again here, the way
@@ -200,14 +200,17 @@ impl Workspace {
             }
         }
         for chat in self.chats.iter().filter(|chat| !removed.contains(&chat.id)) {
-            if let Err(err) = import_chat(
-                &store,
-                &mut self.reports,
-                chat.id,
-                chat.agent,
-                &chat.report,
-                chat.session.into_iter().collect(),
-            ) {
+            let imported = self.runtime.update(cx, |runtime, _| {
+                import_chat(
+                    &store,
+                    runtime.reports_mut(),
+                    chat.id,
+                    chat.agent,
+                    &chat.report,
+                    chat.session.into_iter().collect(),
+                )
+            });
+            if let Err(err) = imported {
                 eprintln!("can't import chat {} on shutdown: {err}", chat.id);
             }
         }
@@ -220,6 +223,6 @@ impl Workspace {
         }
         // The sessions recorded here left others, which the store reads.
         store.wait_for_writes();
-        self.reports.remove();
+        self.runtime.read(cx).reports().remove();
     }
 }

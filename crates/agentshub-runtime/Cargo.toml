@@ -12,6 +12,7 @@ anyhow = "1"
 gpui-kit = "0.8.0"
 jiff = "0.2.38"
 libghostty-vt = "0.2.2"
+notify = "8"
 portable-pty = "0.9"
 smol = "2"
 

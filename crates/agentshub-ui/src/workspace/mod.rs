@@ -20,7 +20,6 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use notify::RecursiveMode;
 
 use crate::appearance;
 use crate::history::History;
@@ -37,7 +36,7 @@ use agentshub_app::settings::{
     Settings, ThemeFamily,
 };
 use agentshub_core::agent::Agent;
-use agentshub_core::reports::{self, Reports};
+use agentshub_core::reports;
 use agentshub_core::sessions;
 use agentshub_core::status::Status;
 use agentshub_core::store::{self, Change};
@@ -45,13 +44,12 @@ use agentshub_core::worktree::{self, Worktree};
 #[cfg(target_os = "linux")]
 use agentshub_platform::scope;
 use agentshub_runtime::terminal::{self, Exited, Pty, StatusChanged, Terminal};
-use agentshub_runtime::{Intent, Runtime, RuntimeEvent, reported_sessions};
+use agentshub_runtime::{Intent, Recording, Runtime, RuntimeEvent};
 
 mod actions;
 mod catalog;
 mod chat_view;
 mod chats;
-mod codex;
 mod commands;
 mod dialogs;
 mod editor;
@@ -65,7 +63,6 @@ mod preferences;
 mod projects;
 mod render;
 mod search;
-mod session;
 mod shell;
 mod shutdown;
 mod startup;
@@ -112,14 +109,7 @@ pub struct Workspace {
     chats: Vec<Chat>,
     /// The chat that is shown.
     active: Option<i64>,
-    reports: Reports,
-    codex_watcher: Option<notify::RecommendedWatcher>,
-    /// What the watcher looks at: Codex's session folder, or while it doesn't
-    /// exist yet, the closest folder above it.
-    codex_watch: Option<(PathBuf, RecursiveMode)>,
     _sidebar_events: Subscription,
-    _report_events: Task<()>,
-    _codex_events: Task<()>,
     /// Brings the shown chat's turn up to date while it's under way.
     turn_tick: Option<Task<()>>,
     /// Shows the sidebar's shortcut numbers once their modifier has been
@@ -135,14 +125,6 @@ pub struct Workspace {
     palette_start: Option<(i64, palette::Sections)>,
     _theme: Subscription,
     _focus_lost: Subscription,
-    /// The sessions whose transcript is being read, which shutdown reads
-    /// itself since it can't wait for them. A session is in it once per read
-    /// under way, so it stays until the last of them is done.
-    reading: Vec<i64>,
-    /// The chats whose last session is to be read once the sessions asked to
-    /// be recorded are, which shutdown reads itself instead. A chat is in it
-    /// once per read.
-    reading_last: Vec<i64>,
     /// The worktrees being checked out for new chats. Each is taken by its
     /// chat once git is done, or by shutdown, so none is left without a chat
     /// to remove it.
@@ -247,20 +229,6 @@ struct Shell {
     /// switching projects leaves the panel as it was in each of them.
     shown: bool,
     _exited: Subscription,
-}
-
-/// Sessions a chat's CLI went into, as one report or lookup found them.
-#[derive(Clone)]
-struct Recording {
-    /// Closes once they're recorded, as are those asked for before.
-    done: smol::channel::Receiver<()>,
-    /// The last of them, once recorded. A newer recording can finish first,
-    /// so what the chat's CLI was in when this was asked for is this, not the
-    /// chat's `session`.
-    session: Rc<Cell<Option<i64>>>,
-    /// The agent's id for that session, which is the chat's before it's
-    /// recorded.
-    agent_id: String,
 }
 
 /// A chat's backend state: what its CLI is doing and which session it is in.

@@ -10,7 +10,7 @@ mod sessions;
 pub use event::RuntimeEvent;
 pub use intent::Intent;
 pub use runtime::Runtime;
-pub use sessions::{import_chat, reported_sessions};
+pub use sessions::{Recording, import_chat};
 
 #[cfg(test)]
 mod tests;

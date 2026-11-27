@@ -9,17 +9,20 @@ use agentshub_core::lifecycle::Lifecycle;
 use agentshub_core::store::{Change, Imported, Project, Store};
 use gpui_kit::{Context, EventEmitter, SharedString};
 
+use crate::sessions::Following;
 use crate::{Intent, RuntimeEvent};
 
 /// What runs behind the window, and outlives it: the database, the projects
 /// and chats as shown, and the chats on their way in or out.
 pub struct Runtime {
-    store: Store,
+    pub(crate) store: Store,
     /// The projects and chats, including the changes not saved yet.
     catalog: Catalog,
     /// The chats on their way in or out, the ones being deleted, and which
     /// of them may take the view.
-    lifecycle: Lifecycle,
+    pub(crate) lifecycle: Lifecycle,
+    /// The sessions the CLIs report, and the ones Codex's files show.
+    pub(crate) following: Following,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
     /// Why the database can't be used: it didn't open, or another Agents Hub
@@ -33,7 +36,7 @@ pub struct Runtime {
 impl EventEmitter<RuntimeEvent> for Runtime {}
 
 impl Runtime {
-    pub fn new(opened: Opened, _cx: &mut Context<Self>) -> Self {
+    pub fn new(opened: Opened, cx: &mut Context<Self>) -> Self {
         let Opened {
             store,
             lock,
@@ -42,14 +45,17 @@ impl Runtime {
             projects,
             broken,
         } = opened;
-        Self {
+        let mut runtime = Self {
             store,
             catalog: Catalog::new(projects),
             lifecycle: Lifecycle::default(),
+            following: Following::new(cx),
             _lock: lock,
             broken: broken.map(SharedString::from),
             startup: Some((settings, imported)),
-        }
+        };
+        runtime.update_codex_watch();
+        runtime
     }
 
     /// The settings startup read and the database import it finished, if
