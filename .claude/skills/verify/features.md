@@ -35,4 +35,5 @@ its top.
 | Agent output | Box lines, blocks and braille meet without seams; check marks, symbols and emoji draw (emoji in one color where the system's color emoji are COLRv1) | rendering |
 | Agent exits | "<Agent> exited. Its terminal output is kept below." under the header, with Restart agent, which resumes the same session; Triage lists the chat under Needs you | triage |
 | Layout | The `layout` setting opens Classic, or Triage when it is `triage`, again after a relaunch | triage |
+| Layout setting | Later saves the layout for the next start; Restart now restarts into it where the window was; agents stop and resume when their chat is opened | layout |
 | Triage filter | The list shows the picked project's chats, or every project's; no CLI starts or stops | triage |

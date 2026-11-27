@@ -53,6 +53,37 @@ app_start() {
 	sleep 1.5
 }
 
+# The copy the app started when it restarted itself: this run's binary, with
+# this run's environment, that isn't recorded yet.
+relaunched_app() {
+	local environ pid
+	for environ in $(grep -lzxF "AHV_WORK=$AHV_WORK" /proc/[0-9]*/environ 2>/dev/null); do
+		pid=${environ#/proc/}
+		pid=${pid%/environ}
+		grep -qxF "$pid" "$AHV_WORK/app.pids" 2>/dev/null && continue
+		case $(readlink "/proc/$pid/exe" 2>/dev/null) in
+		"$AHV_BIN")
+			echo "$pid"
+			return 0
+			;;
+		esac
+	done
+	return 1
+}
+
+# Once the app has restarted itself and the first copy exited, waits for the
+# second copy's window and records it as app_start does.
+app_relaunched() {
+	wait_until 20 "the relaunched app" relaunched_app
+	APP_PID=$(relaunched_app)
+	echo "$APP_PID" >>"$AHV_WORK/app.pids"
+	log "app relaunched pid=$APP_PID"
+	WIN=""
+	wait_until 30 "the relaunched window" find_window
+	xdotool windowactivate --sync "$WIN" 2>/dev/null || true
+	sleep 1.5
+}
+
 # Stops the test copy by its PID, never by name.
 app_stop() {
 	app_running || return 0

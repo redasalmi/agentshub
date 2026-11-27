@@ -8,7 +8,7 @@ repo=$(git -C "$here" rev-parse --show-toplevel)
 scenario=$(realpath "${1:?usage: run.sh SCENARIO [OUT_DIR]}")
 bin=$(realpath -m "${AGENTSHUB_BIN:-$repo/target/debug/agentshub}")
 [ -x "$bin" ] || { echo "no binary at $bin: run cargo build first" >&2; exit 2; }
-for tool in kwin_wayland Xwayland dbus-run-session xdotool spectacle sqlite3 jq; do
+for tool in kwin_wayland Xwayland dbus-run-session xdotool xprop spectacle sqlite3 jq; do
 	command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 2; }
 done
 

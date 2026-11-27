@@ -32,10 +32,11 @@ argument for the output folder, which must be new or empty.
 
 After the run, `run.sh` fails if anything it started is still running and
 kills it. It only looks at what the run started: the apps by the PIDs
-`app_start` recorded, while each is still the binary under test, the fake
-CLIs by the run's own temp dir, and the bus, KWin and Xwayland by that temp
-dir in their environment. It never matches by process name or binary path,
-which would also match the installed copy or another run.
+`app_start` and `app_relaunched` recorded, while each is still the binary
+under test, the fake CLIs by the run's own temp dir, and the bus, KWin and
+Xwayland by that temp dir in their environment. It never matches by process
+name or binary path, which would also match the installed copy or another
+run.
 
 ## Scenarios
 
@@ -87,6 +88,15 @@ and restarts it from the notice under the header, checking it resumed its
 session, then quits and relaunches into
 Triage.
 
+`scenarios/layout.sh`: with a Claude chat running in Classic, picks Triage in
+the settings and chooses Later, checks the saved layout, that the window is
+still Classic and the agent still runs, and picks Classic again; then moves
+and resizes the window, restarts into Triage from the dialog and checks the
+agent stopped, the window came back where it was, the saved bounds were
+cleared, and the chat resumes its session when opened; an ordinary launch
+then opens centred, and a maximized window restarted into Classic from the
+setting's note comes back maximized.
+
 To cover a change, add a scenario next to it or a step to an existing one. A
 scenario is bash sourced with `set -e` after `scripts/lib.sh`:
 
@@ -95,6 +105,7 @@ scenario is bash sourced with `set -e` after `scripts/lib.sh`:
 | `seed_project DIR` | Creates a git repo and adds it as a project (app stopped) |
 | `seed_editor ID [SVG]` | Installs a fake editor as desktop entry `ID`, logging `ID\|cwd\|args` to `$EDITOR_LOG` |
 | `app_start` / `app_stop` | Launches on Xwayland and waits for the window / SIGTERMs by PID |
+| `app_relaunched` | Once the app restarted itself and the first copy exited, waits for the new copy's window and records its PID |
 | `key ctrl+shift+n` | xdotool key names; pauses after |
 | `type_text "..."` | Types into the focused window |
 | `click X Y` | Moves, pauses 0.3s, clicks (the screen is 1280x800) |
