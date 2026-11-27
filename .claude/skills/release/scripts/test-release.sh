@@ -40,6 +40,10 @@ fixture() {
 #!/usr/bin/env bash
 if [ "\$1" = update ]; then exec "$real_cargo" "\$@"; fi
 echo "\$1" >>"\$CALLS"
+if [ "\$1" = build ] && [ -n "\${RACE_CLONE:-}" ]; then
+	git -C "\$RACE_CLONE" commit -q --allow-empty -m race
+	git -C "\$RACE_CLONE" push -q origin HEAD:main
+fi
 [ "\$1" != "\${CARGO_FAIL:-}" ]
 EOF
 	cat >"$root/bin/gh" <<'EOF'
@@ -129,7 +133,7 @@ guard_behind_origin() {
 	git clone -q "$remote" "$root/other"
 	git -C "$root/other" commit -q --allow-empty -m other
 	git -C "$root/other" push -q origin HEAD:main
-	refuses "guard: behind origin" "release: main differs from origin/main" 9.9.9
+	refuses "guard: behind origin" "release: main is behind origin/main" 9.9.9
 }
 
 guard_remote_tag() {
@@ -166,6 +170,30 @@ failing_check() {
 	check "failing check stops before commit" "$ok"
 }
 
+main_ahead_of_origin() {
+	fixture
+	git -C "$work" commit -q --allow-empty -m "feat: merged feature"
+	run 9.9.9
+	local ok=0
+	[ "$status" = 0 ] || ok=1
+	[ "$(head_of "$remote" main)" = "$(head_of "$work" main)" ] || ok=1
+	git -C "$remote" log --format=%s main | grep -x "feat: merged feature" >/dev/null || ok=1
+	[ "$ok" = 0 ] || printf 'got: %s (exit %s)\n' "$last" "$status"
+	check "main ahead of origin is released" "$ok"
+}
+
+refused_push() {
+	fixture
+	git clone -q "$remote" "$root/other"
+	RACE_CLONE="$root/other" run 9.9.9
+	local ok=0
+	[ "$status" != 0 ] || ok=1
+	case $last in "release: the push was refused"*) ;; *) ok=1 ;; esac
+	! git -C "$remote" rev-parse -q --verify refs/tags/v9.9.9 >/dev/null || ok=1
+	[ "$ok" = 0 ] || printf 'got: %s (exit %s)\n' "$last" "$status"
+	check "a refused push publishes no tag" "$ok"
+}
+
 waits_for_run() {
 	fixture
 	GH_EMPTY_RUNS=2 RELEASE_WORKFLOW_WAIT=10 run 9.9.9
@@ -177,7 +205,8 @@ waits_for_run() {
 }
 
 for case in happy_path guard_dirty_tree guard_not_on_main guard_behind_origin \
-	guard_remote_tag guard_not_greater guard_bad_version failing_check waits_for_run; do
+	guard_remote_tag guard_not_greater guard_bad_version failing_check main_ahead_of_origin \
+	refused_push waits_for_run; do
 	(
 		passed=0 failed=0
 		"$case"

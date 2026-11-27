@@ -18,8 +18,8 @@ version and the release notes.
 - On a feature branch, fast-forward it into `main`:
   `git switch main && git merge --ff-only <branch>`. If it can't be
   fast-forwarded, stop and ask; never merge or rebase on your own.
-- `main` must equal `origin/main`. If it doesn't, stop and say how they
-  differ.
+- `main` must not be behind `origin/main` (`git merge-base --is-ancestor
+  origin/main main`). If it is, stop and say how they differ.
 
 ## 2. Pick the version
 
@@ -72,6 +72,8 @@ of that. Its last line says how it went:
 - `released vX.Y.Z: <url>`: go on to step 6.
 - `release: stopped at <check>; nothing was committed or pushed`: report the
   failing check with its output. The version bump stays in the working tree.
+- `release: the push was refused…`: someone pushed to `main` meanwhile. Nothing
+  was released; the release commit and tag are only local. Report it and ask.
 - `release: the release workflow failed: <url>`: the tag is pushed. Report
   the run's link and leave the tag alone.
 - Any other `release:` or `usage:` line: report it as it is.

@@ -3,7 +3,7 @@
 # commits, tags and pushes, and waits for the release workflow to publish.
 # Nothing is committed or pushed unless every check passes.
 #
-# Usage: release.sh X.Y.Z, on a clean main that matches origin/main.
+# Usage: release.sh X.Y.Z, on a clean main that is not behind origin/main.
 set -euo pipefail
 
 die() {
@@ -22,7 +22,7 @@ cd "$(git rev-parse --show-toplevel)"
 [ "$(git branch --show-current)" = main ] || die "not on main"
 [ -z "$(git status --porcelain)" ] || die "uncommitted changes"
 git fetch -q origin
-[ "$(git rev-parse main)" = "$(git rev-parse origin/main)" ] || die "main differs from origin/main"
+git merge-base --is-ancestor origin/main main || die "main is behind origin/main"
 if git rev-parse -q --verify "refs/tags/$tag" >/dev/null ||
 	[ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
 	die "tag $tag already exists"
@@ -64,7 +64,8 @@ step smoke smoke
 
 git commit -q -m "chore: $version release" -- Cargo.lock "${manifests[@]}"
 git tag "$tag"
-git push -q origin main "$tag"
+git push --atomic -q origin main "$tag" ||
+	die "the push was refused, so nothing was released; the release commit and $tag are only local"
 
 wait_for=${RELEASE_WORKFLOW_WAIT:-60}
 waited=0
