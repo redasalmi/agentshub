@@ -44,6 +44,8 @@ pub struct Recent {
 pub struct EmptyState {
     /// The name of the selected project, if there is one.
     pub selected: Option<SharedString>,
+    /// Whether there is a project to start a chat in, selected or not.
+    pub projects: bool,
     /// The agents the selected project can start, once they have been looked
     /// up, with the project's id.
     pub agents: Option<(i64, Vec<Agent>)>,
@@ -81,9 +83,10 @@ impl EmptyState {
                             v_flex()
                                 .gap_2()
                                 .child(div().font_family(appearance::DISPLAY).text_3xl().child(
-                                    match &self.selected {
-                                        Some(_) => "Start an agent",
-                                        None => "Add a project to begin",
+                                    if self.projects {
+                                        "Start an agent"
+                                    } else {
+                                        "Add a project to begin"
                                     },
                                 ))
                                 .child(
@@ -96,6 +99,10 @@ impl EmptyState {
                                                 "In {name}. Agents keep running while you look at \
                                                      another chat."
                                             ),
+                                            None if self.projects => "Pick the project in New \
+                                                     chat. Agents keep running while you look at \
+                                                     another chat."
+                                                .to_string(),
                                             None => "A project is a folder you work in. Add one, \
                                                      then start Claude Code, Codex or Pi there."
                                                 .to_string(),
@@ -157,7 +164,7 @@ impl EmptyState {
                                     })
                                     .into_any_element()
                             }
-                            (Some(_), _) => {
+                            _ if self.projects => {
                                 let start = Rc::clone(&on);
                                 h_flex()
                                     .child(
@@ -171,7 +178,7 @@ impl EmptyState {
                                     )
                                     .into_any_element()
                             }
-                            (None, _) => {
+                            _ => {
                                 let start = Rc::clone(&on);
                                 h_flex()
                                     .child(

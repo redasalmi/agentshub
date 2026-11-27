@@ -44,7 +44,7 @@ pub(crate) struct TriageList {
     /// The chat that is shown.
     active: Option<i64>,
     /// The project the runtime has selected, which "All projects" leaves as
-    /// it was.
+    /// it was. None until the user picks a project or a chat.
     selected: Option<i64>,
     /// The project whose chats the list shows, or `None` for every project's.
     filter: Option<i64>,
@@ -112,8 +112,7 @@ impl TriageList {
             let selected = self
                 .active
                 .and_then(|id| self.project_of(id))
-                .filter(|id| self.is_listed(*id))
-                .or_else(|| self.listed().next().map(|project| project.id));
+                .filter(|id| self.is_listed(*id));
             if selected != self.selected {
                 self.selected = selected;
                 cx.emit(NavEvent::Selected);

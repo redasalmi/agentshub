@@ -200,6 +200,10 @@ impl Workspace {
                 .map(|project| project.name.clone().into())
         });
         let agents = self.empty_agents(cx);
+        let projects = runtime
+            .projects()
+            .iter()
+            .any(|project| project.archived_at.is_none());
         let recent: Vec<_> = {
             let running = crate::layout::running(runtime);
             let mut recent: Vec<_> = runtime
@@ -241,6 +245,7 @@ impl Workspace {
         };
         EmptyState {
             selected,
+            projects,
             agents,
             recent,
             on,
