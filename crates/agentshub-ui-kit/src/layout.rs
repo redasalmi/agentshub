@@ -26,6 +26,11 @@ pub trait LayoutView {
     }
     /// The project new chats, the shell and the empty state are for.
     fn selected_project(&self, cx: &App) -> Option<i64>;
+    /// The project the new chat dialog starts on, when its shortcut opens
+    /// it.
+    fn new_chat_project(&self, cx: &App) -> Option<i64> {
+        self.selected_project(cx)
+    }
     /// Makes project `project` the selected one, telling the workspace with
     /// `NavEvent::Selected` if it wasn't.
     fn select_project(&self, project: i64, cx: &mut App);

@@ -84,15 +84,15 @@ impl Workspace {
         self.open_palette(true, window, cx);
     }
 
-    /// Starts an agent in the selected project, or asks for a project when
-    /// there's none.
+    /// Starts an agent in the project the layout starts new chats in, or asks
+    /// for a project when there's none.
     pub(super) fn new_chat_here(
         &mut self,
         _: &NewChat,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.layout.selected_project(cx) {
+        match self.layout.new_chat_project(cx) {
             Some(id) => self.open_new_chat_dialog(id, window, cx),
             None => self.add_project(window, cx),
         }
