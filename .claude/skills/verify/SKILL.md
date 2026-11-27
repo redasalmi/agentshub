@@ -58,8 +58,10 @@ commands in its project shell.
 
 `scenarios/runtime.sh`: start a Codex chat, close it from its row's menu, and
 check the keyboard is back with the workspace by starting Claude from the New
-Chat dialog; then start a chat in a worktree of a project with a large
-untracked file, quit while it is checked out, and check no CLI and no
+Chat dialog; pin that chat from the search box, archive it with Ctrl+Shift+A
+and take it back with Undo, archive it again and bring it back from the
+sidebar's archived chats; then start a chat in a worktree of a project with a
+large untracked file, quit while it is checked out, and check no CLI and no
 worktree is left.
 
 `scenarios/rendering.sh`: has the fake Claude draw what fonts alone get wrong
