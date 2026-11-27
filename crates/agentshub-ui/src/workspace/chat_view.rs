@@ -1,7 +1,7 @@
 //! The chat sheet's remaining chrome: toolbar, footer and empty state.
 
 use crate::chat::{ChatIntent, ChatSheet};
-use crate::settings::SHORTCUTS_WORK_ANYWHERE;
+use agentshub_ui_kit::settings::SHORTCUTS_WORK_ANYWHERE;
 
 use super::render::render_shortcuts;
 use super::*;
