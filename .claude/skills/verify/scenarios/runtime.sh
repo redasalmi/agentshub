@@ -1,6 +1,7 @@
-# Closes a Codex chat from the sidebar and types after it.
-# Covers: closing a chat hands the keyboard back to the workspace, so keys
-# reach neither the closed CLI nor a terminal that is gone.
+# Closes a Codex chat from the sidebar and starts another chat from the
+# keyboard, then quits while a new chat's worktree is checked out.
+# Covers: closing a chat hands the keyboard back to the workspace, and
+# quitting during a checkout leaves no CLI and no worktree behind.
 
 project="$AHV_WORK/project"
 seed_project "$project"
@@ -22,15 +23,39 @@ sleep 0.4
 click 346 245
 wait_until 10 "codex to exit" codex_exited
 
-type_text "x"
-key Return
-if cli_got_input codex x; then
-	fail "codex got a key typed after its chat closed"
-fi
+# Only the workspace's shortcut opens the dialog, whose number key starts
+# Claude, so the keyboard came back to the workspace.
+key ctrl+shift+n
+shot new-chat-after-close
+key 1
+wait_until 15 "fake claude to start from the keyboard" cli_started claude
 if grep -q panicked "$AHV_OUT/app.log"; then
 	fail "the app panicked"
 fi
-shot closed-codex
+shot claude-after-close
 
 app_stop
 assert_clis_gone
+
+# Quit during checkout: the untracked file makes copying the project take a
+# moment.
+big="$AHV_WORK/big"
+seed_project "$big"
+git -C "$big" -c user.name=verify -c user.email=verify@example.com \
+	commit -q --allow-empty -m init
+head -c 20000000 /dev/urandom >"$big/big.bin"
+claudes=$(cli_count claude)
+
+app_start
+key ctrl+1
+key ctrl+shift+n
+key Tab
+key Tab
+key space
+shot worktree-ticked
+xdotool key --clearmodifiers Return
+app_stop
+assert_clis_gone
+[ -d "$XDG_DATA_HOME/agentshub/worktrees/big" ] || fail "no checkout started"
+assert_eq "$(cli_count claude)" "$claudes" "the Claude chats started"
+assert_eq "$(git -C "$big" worktree list | wc -l)" 1 "the worktrees left after quitting during a checkout"
