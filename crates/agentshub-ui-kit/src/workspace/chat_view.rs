@@ -1,12 +1,12 @@
 //! The shown chat's body, the empty state and the shortcut list, built from
 //! what the workspace holds.
 
-use agentshub_ui_kit::chat_body::{ChatBody, ChatIntent, Shell};
-use agentshub_ui_kit::empty::{EmptyIntent, EmptyState, Recent};
-use agentshub_ui_kit::settings::SHORTCUTS_WORK_ANYWHERE;
+use crate::chat_body::{ChatBody, ChatIntent, Shell};
+use crate::empty::{EmptyIntent, EmptyState, Recent};
+use crate::settings::SHORTCUTS_WORK_ANYWHERE;
 
 use super::*;
-use agentshub_ui_kit::shortcuts::render_shortcuts;
+use crate::shortcuts::render_shortcuts;
 
 impl Workspace {
     /// What the workspace holds of chat `id`, which shows, unless it has
@@ -82,7 +82,7 @@ impl Workspace {
                 }
             })
         };
-        agentshub_ui_kit::chat_body::over_shell(
+        crate::chat_body::over_shell(
             above,
             px(0.),
             shell,
@@ -201,7 +201,7 @@ impl Workspace {
         });
         let agents = self.empty_agents(cx);
         let recent: Vec<_> = {
-            let running = agentshub_ui_kit::layout::running(runtime);
+            let running = crate::layout::running(runtime);
             let mut recent: Vec<_> = runtime
                 .projects()
                 .iter()
@@ -223,7 +223,7 @@ impl Workspace {
                     Recent {
                         id: chat.id,
                         title: chat.title.clone().unwrap_or_else(|| "New chat".into()),
-                        about: sidebar::subtitle(chat, tone, Some(&project.name)),
+                        about: subtitle(chat, tone, Some(&project.name)),
                         tone,
                     }
                 })

@@ -6,9 +6,9 @@ use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::component::IconName;
 use gpui_kit::*;
 
-use crate::sidebar::{self, home_relative};
-use agentshub_ui_kit::palette::{Entry, Lead, Pick};
-use agentshub_ui_kit::status::Tone;
+use crate::palette::{Entry, Lead, Pick};
+use crate::status::Tone;
+use agentshub_core::format::{age, home_relative};
 
 use super::{Workspace, start_entries};
 
@@ -31,7 +31,7 @@ impl Workspace {
         reason = "one walk over the projects fills every list"
     )]
     pub(super) fn palette_lists(&self, cx: &App) -> PaletteLists {
-        let running = agentshub_ui_kit::layout::running(self.runtime.read(cx));
+        let running = crate::layout::running(self.runtime.read(cx));
         let installed = self
             .runtime
             .read(cx)
@@ -55,7 +55,7 @@ impl Workspace {
                             .meta(format!(
                                 "{} · archived {} · {}",
                                 chat.agent.label(),
-                                sidebar::age(at),
+                                age(at),
                                 project.name
                             ))
                             .keywords([chat.agent.display_name(), "archived"]),
@@ -64,7 +64,7 @@ impl Workspace {
                 }
                 let tone = Tone::of(running.get(&chat.id).copied());
                 let doing = match tone {
-                    Tone::Saved => sidebar::age(chat.updated_at),
+                    Tone::Saved => age(chat.updated_at),
                     tone => tone.label().to_string(),
                 };
                 let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
@@ -116,7 +116,7 @@ impl Workspace {
                     )
                     .meta(format!(
                         "archived {} · {}",
-                        sidebar::age(at),
+                        age(at),
                         home_relative(&project.path)
                     ))
                     .keywords(["project", "archived"]),

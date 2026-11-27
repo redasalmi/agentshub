@@ -1,7 +1,7 @@
 //! The dialogs for renaming a chat and starting a new one.
 
 use super::*;
-use agentshub_ui_kit::dialogs::{self, NewChatArgs};
+use crate::dialogs::{self, NewChatArgs};
 
 impl Workspace {
     pub(super) fn open_rename_dialog(

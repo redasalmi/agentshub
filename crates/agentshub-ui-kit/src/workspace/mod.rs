@@ -12,31 +12,30 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::layout::ClassicLayout;
-use crate::sidebar::{self, home_relative};
-use agentshub_app::alerts;
-use agentshub_app::settings::{
-    Appearance, DEFAULT_TERMINAL_FONT_SIZE, Motion, Settings, ThemeFamily, Value,
-};
-use agentshub_core::agent::Agent;
-use agentshub_core::status::Status;
-use agentshub_core::store::{self, Change};
-use agentshub_runtime::terminal::Terminal;
-use agentshub_runtime::{Intent, Runtime, RuntimeEvent};
-use agentshub_ui_kit::actions::{
+use crate::actions::{
     AddProject, ArchiveChat, ArchiveProject, CloseAllChats, CloseIdleChats, DeleteChat,
     ExportDatabase, ImportDatabase, NewChat, NextNeedingYou, OpenChatAt, OpenInEditor, OpenSearch,
     RenameChat, SelectProjectAt, ShowArchived, ShowRunning, ShowShortcuts, ToggleHistory,
     TogglePin, ToggleProjectNames, ToggleSettings, ToggleShell, ToggleTheme, UseTheme,
 };
-use agentshub_ui_kit::appearance;
-use agentshub_ui_kit::history::History;
-use agentshub_ui_kit::layout::{Body, Held, LayoutView, NavEvent, Parts, ShownChat};
-use agentshub_ui_kit::palette::{self, Entry, Lead, Pick};
-use agentshub_ui_kit::settings::{SettingsIntent, SettingsView};
-use agentshub_ui_kit::status::{Tone, dot};
-use agentshub_ui_kit::terminal_view::{self, TerminalView};
-use agentshub_ui_kit::widgets::group_heading;
+use crate::appearance;
+use crate::history::History;
+use crate::layout::{Body, Held, LayoutView, NavEvent, Parts, ShownChat};
+use crate::palette::{self, Entry, Lead, Pick};
+use crate::settings::{SettingsIntent, SettingsView};
+use crate::status::{Tone, dot, subtitle};
+use crate::terminal_view::{self, TerminalView};
+use crate::widgets::group_heading;
+use agentshub_app::alerts;
+use agentshub_app::settings::{
+    Appearance, DEFAULT_TERMINAL_FONT_SIZE, Motion, Settings, ThemeFamily, Value,
+};
+use agentshub_core::agent::Agent;
+use agentshub_core::format::home_relative;
+use agentshub_core::status::Status;
+use agentshub_core::store::{self, Change};
+use agentshub_runtime::terminal::Terminal;
+use agentshub_runtime::{Intent, Runtime, RuntimeEvent};
 
 mod chat_view;
 mod chats;
@@ -66,7 +65,7 @@ const REVEAL_NUMBERS_AFTER: Duration = Duration::from_millis(400);
 
 /// Binds the shortcuts that reach the workspace.
 pub fn init(cx: &mut App) {
-    agentshub_ui_kit::actions::bind_keys(cx);
+    crate::actions::bind_keys(cx);
 }
 
 pub struct Workspace {

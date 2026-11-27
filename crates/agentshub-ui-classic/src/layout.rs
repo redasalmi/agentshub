@@ -14,12 +14,12 @@ use crate::chat::{ChatSheet, Footer, Toolbar};
 use crate::sidebar::{
     self, MAX_SIDEBAR_WIDTH, MIN_MAIN_WIDTH, MIN_SIDEBAR_WIDTH, Sidebar, SidebarEvent, rail_room,
 };
-use crate::workspace::Workspace;
 use agentshub_app::settings::{DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, Settings};
 use agentshub_runtime::{Intent, Runtime};
 use agentshub_ui_kit::layout::{Body, Held, LayoutView, NavEvent, Parts, ShownChat};
 use agentshub_ui_kit::palette::{Entry, Lead, Pick};
 use agentshub_ui_kit::status::{Filter, Tone};
+use agentshub_ui_kit::workspace::Workspace;
 
 /// The Classic layout, which lists the selected project's chats in the
 /// sidebar.

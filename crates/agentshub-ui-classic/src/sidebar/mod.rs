@@ -19,7 +19,7 @@ use agentshub_core::store::{Chat, Project};
 
 use agentshub_ui_kit::actions::{NUMBERED, NewChat};
 use agentshub_ui_kit::layout::{Held, NavEvent, running_chats};
-use agentshub_ui_kit::status::{Filter, POP, Tone, badge, dot};
+use agentshub_ui_kit::status::{Filter, POP, Tone, badge, dot, subtitle};
 use agentshub_ui_kit::theme::{self as appearance, Tint};
 use agentshub_ui_kit::widgets::{heading, path_line};
 
@@ -35,8 +35,8 @@ use rail::{key_number, project_mark};
 pub use rail::{names_width, rail};
 
 use status::{name_of, popping_dot};
+pub use text::marks;
 use text::summary;
-pub use text::{marks, subtitle};
 use widgets::section;
 
 /// How often the ages of the chats are brought up to date.

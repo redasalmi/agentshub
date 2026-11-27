@@ -1,7 +1,7 @@
 //! Adding, removing and archiving projects, and the database file behind them.
 
 use super::*;
-use agentshub_ui_kit::dialogs::{self, Confirm, Import};
+use crate::dialogs::{self, Confirm, Import};
 
 impl Workspace {
     pub(super) fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {

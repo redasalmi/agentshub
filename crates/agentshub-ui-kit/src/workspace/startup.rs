@@ -7,7 +7,13 @@ impl Workspace {
         clippy::too_many_lines,
         reason = "creates every part of the workspace and the tasks that feed it"
     )]
-    pub fn new(runtime: Entity<Runtime>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// The workspace on `runtime`, in the layout `layout` builds for it.
+    pub fn new(
+        runtime: Entity<Runtime>,
+        layout: impl FnOnce(WeakEntity<Self>, &mut Window, &mut Context<Self>) -> Box<dyn LayoutView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (settings, imported) = runtime.update(cx, |runtime, _| runtime.take_startup());
         // Said once the window is up, since its notifications aren't yet.
         if let Some(imported) = imported {
@@ -31,12 +37,7 @@ impl Workspace {
 
         cx.set_global(settings);
         appearance::apply_motion(cx);
-        let layout: Box<dyn LayoutView> = Box::new(ClassicLayout::new(
-            runtime.clone(),
-            cx.weak_entity(),
-            window,
-            cx,
-        ));
+        let layout = layout(cx.weak_entity(), window, cx);
 
         let runtime_events = cx.subscribe(&runtime, |this, _, event, cx| match event {
             RuntimeEvent::CatalogChanged => {

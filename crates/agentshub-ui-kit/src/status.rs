@@ -5,7 +5,9 @@ use std::time::Duration;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _};
 use gpui_kit::*;
 
+use agentshub_core::format::age;
 use agentshub_core::status::{Need, Status};
+use agentshub_core::store::Chat;
 
 use crate::theme::{self as appearance, Tint};
 
@@ -273,6 +275,16 @@ pub fn status_glyph(tone: Tone, animate: bool, pop: Option<u64>, cx: &App) -> Di
             theme.danger_foreground,
             IconName::Close,
         )),
+    }
+}
+
+/// What a chat's row says under its title: what its agent does, where the
+/// chat is (`project`, else its agent) and when it was last worked in.
+pub fn subtitle(chat: &Chat, tone: Tone, project: Option<&str>) -> String {
+    let source = project.unwrap_or(chat.agent.label());
+    match tone {
+        Tone::Saved => format!("{source} · {}", age(chat.updated_at)),
+        tone => format!("{} · {source} · {}", tone.label(), age(chat.updated_at)),
     }
 }
 

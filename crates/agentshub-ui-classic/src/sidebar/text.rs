@@ -2,14 +2,6 @@
 
 use super::*;
 
-pub fn subtitle(chat: &Chat, tone: Tone, project: Option<&str>) -> String {
-    let source = project.unwrap_or(chat.agent.label());
-    match tone {
-        Tone::Saved => format!("{source} · {}", age(chat.updated_at)),
-        tone => format!("{} · {source} · {}", tone.label(), age(chat.updated_at)),
-    }
-}
-
 pub fn marks<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut taken = HashSet::new();
     names

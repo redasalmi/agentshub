@@ -1,7 +1,7 @@
 //! Closing, deleting and archiving chats and projects.
 
 use super::*;
-use agentshub_ui_kit::dialogs::{self, Confirm};
+use crate::dialogs::{self, Confirm};
 
 impl Workspace {
     /// Closes a running chat, asking first if its agent is in the middle of

@@ -7,17 +7,17 @@ use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::component::{ActiveTheme as _, IconName};
 use gpui_kit::*;
 
-use agentshub_app::settings::{DEFAULT_TERMINAL_FONT_SIZE, Settings, ThemeFamily};
-use agentshub_core::store::Change;
-use agentshub_runtime::Intent;
-use agentshub_ui_kit::actions::{
+use crate::actions::{
     AddProject, ArchiveChat, ArchiveProject, CloseAllChats, CloseIdleChats, DeleteChat,
     ExportDatabase, ImportDatabase, NextNeedingYou, OpenInEditor, RenameChat, ShowArchived,
     ShowRunning, ShowShortcuts, ToggleHistory, TogglePin, ToggleProjectNames, ToggleSettings,
     ToggleShell, ToggleTheme, UseTheme,
 };
-use agentshub_ui_kit::palette::{self, Entry, Lead, Pick};
-use agentshub_ui_kit::terminal_view;
+use crate::palette::{self, Entry, Lead, Pick};
+use crate::terminal_view;
+use agentshub_app::settings::{DEFAULT_TERMINAL_FONT_SIZE, Settings, ThemeFamily};
+use agentshub_core::store::Change;
+use agentshub_runtime::Intent;
 
 use super::palette_model::PaletteLists;
 use super::{PALETTE_START, Workspace};
@@ -85,7 +85,7 @@ impl Workspace {
                 IconName::SquareTerminal,
                 Box::new(ToggleShell),
             ));
-            if let Some((current, _)) = agentshub_ui_kit::editor::editor_choices(cx) {
+            if let Some((current, _)) = crate::editor::editor_choices(cx) {
                 commands.push(
                     Entry::new(
                         format!("Open this chat's folder in {}", current.editor.name()),

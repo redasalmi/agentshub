@@ -34,12 +34,7 @@ impl Workspace {
 
     /// Saves the family of themes and puts the theme in it.
     /// Names the projects in the sidebar's rail, or shows only their marks.
-    pub(crate) fn show_project_names(
-        &mut self,
-        show: bool,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn show_project_names(&mut self, show: bool, _: &mut Window, cx: &mut Context<Self>) {
         let saved = Settings::set_project_names(show, cx);
         self.save_setting(saved, cx);
         self.layout.refresh(cx);

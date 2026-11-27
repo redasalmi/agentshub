@@ -1,7 +1,8 @@
 //! What the layouts of the app share: the actions and their shortcuts, the
 //! theme, the terminal view, the history, the status glyphs, the chat body,
-//! the empty state, the interface the workspace reaches its layout through
-//! and the one the binary opens a layout through.
+//! the empty state, the workspace behind every layout, the interface the
+//! workspace reaches its layout through and the one the binary opens a layout
+//! through.
 
 pub mod actions;
 pub mod appearance;
@@ -19,5 +20,6 @@ pub mod status;
 pub mod terminal_view;
 pub mod theme;
 pub mod widgets;
+pub mod workspace;
 
 pub use frontend::Frontend;

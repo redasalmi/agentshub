@@ -66,7 +66,7 @@ fn main() {
         init(cx);
         agentshub_app::editors::look_up(cx);
         agentshub_ui_kit::terminal_view::init(cx);
-        agentshub_ui_classic::workspace::init(cx);
+        agentshub_ui_kit::workspace::init(cx);
         // The tray decides whether closing the window quits.
         cx.set_quit_mode(QuitMode::Explicit);
         quit_on_sigterm(cx);

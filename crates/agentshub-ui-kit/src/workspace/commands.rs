@@ -336,12 +336,12 @@ impl Workspace {
     /// their agents need, the most urgent first.
     pub(super) fn open_running_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let runtime = self.runtime.read(cx);
-        let running = agentshub_ui_kit::layout::running(runtime);
-        let chats: Vec<_> = agentshub_ui_kit::layout::running_chats(runtime.projects(), &running)
+        let running = crate::layout::running(runtime);
+        let chats: Vec<_> = crate::layout::running_chats(runtime.projects(), &running)
             .into_iter()
             .map(|(project, chat, tone)| {
                 let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
-                let about = sidebar::subtitle(chat, tone, Some(&project.name));
+                let about = subtitle(chat, tone, Some(&project.name));
                 (
                     chat.id,
                     SharedString::from(title),
