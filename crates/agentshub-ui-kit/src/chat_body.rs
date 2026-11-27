@@ -60,15 +60,24 @@ pub struct Shell {
 /// What shows under a chat's header: its notices, the earlier sessions over
 /// its terminal, and the shell.
 pub struct ChatBody {
+    /// The chat's id, which tells its elements apart from another chat's.
     pub id: i64,
+    /// Something about the session to show above the terminal.
     pub notice: Option<SharedString>,
+    /// Why the CLI didn't start or how it exited, shown with a button that
+    /// restarts it.
     pub message: Option<SharedString>,
+    /// The chat's earlier sessions, over its terminal.
     pub history: Entity<History>,
+    /// The view of its terminal, unless its CLI didn't start.
     pub terminal: Option<Entity<TerminalView>>,
+    /// The project's shell, while it shows.
     pub shell: Option<Shell>,
+    /// How much of the window's height the shell takes.
     pub shell_share: f32,
     /// Whether the chat, rather than the settings, has the sheet.
     pub active: bool,
+    /// Asks the workspace for what the chat's controls do.
     pub on: On,
     /// Saves the shell's height once a drag ends.
     pub save: Save,

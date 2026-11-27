@@ -18,9 +18,12 @@ use crate::widgets::heading;
 /// What the empty state asks the workspace to do.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EmptyIntent {
+    /// Start that agent in a new chat of that project.
     StartAgent(i64, Agent),
+    /// Open the New Chat dialog for the selected project.
     NewChat,
     AddProject,
+    /// Go back to a chat last worked in.
     OpenChat(i64),
 }
 
@@ -30,15 +33,23 @@ type EmptyOn = Rc<dyn Fn(EmptyIntent, &mut Window, &mut App)>;
 pub struct Recent {
     pub id: i64,
     pub title: String,
+    /// What its agent is doing, or when it was last worked in, and its
+    /// project.
     pub about: String,
+    /// What its agent is doing, for its status dot.
     pub tone: Tone,
 }
 
 /// What shows while no chat is open.
 pub struct EmptyState {
+    /// The name of the selected project, if there is one.
     pub selected: Option<SharedString>,
+    /// The agents the selected project can start, once they have been looked
+    /// up, with the project's id.
     pub agents: Option<(i64, Vec<Agent>)>,
+    /// The chats last worked in, the last one first.
     pub recent: Vec<Recent>,
+    /// Asks the workspace for what the buttons and rows do.
     pub on: EmptyOn,
 }
 

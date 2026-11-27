@@ -1,4 +1,5 @@
-//! The chat sheet's remaining chrome: toolbar, footer and empty state.
+//! The shown chat's sheet, the toolbar, the footer, the empty state and the
+//! shortcut list, built from what the workspace holds.
 
 use crate::chat::ChatSheet;
 use agentshub_ui_kit::chat_body::{ChatBody, ChatIntent, Shell};
