@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use agentshub_app::catalog::Catalog;
@@ -6,12 +7,15 @@ use agentshub_core::agent::Agent;
 use agentshub_core::format::{Turn, duration};
 use agentshub_core::lifecycle::Lifecycle;
 use agentshub_core::reports::Reports;
+use agentshub_core::status::Status;
 use agentshub_core::store::{Change, Db, Store};
 use agentshub_core::transcript;
 use agentshub_core::worktree::{Removal, Worktree};
 use serde_json::json;
 
+use crate::ChatState;
 use crate::chats::take_and_remove;
+use crate::manage::pick_idle;
 use crate::runtime::apply_change;
 use crate::sessions::{import_chat, reported_sessions};
 
@@ -248,4 +252,26 @@ fn a_pending_worktree_removal_is_done_once() {
             .all(|job| take_and_remove(job).is_none())
     );
     fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn idle_chats_leave_out_busy_unseen_and_exited_ones() {
+    let chat = |id, status, unseen, running| ChatState {
+        id,
+        agent: Agent::Claude,
+        cwd: Path::new("/"),
+        status: Some(status),
+        turn: None,
+        unseen,
+        running,
+        message: None,
+        notice: None,
+    };
+    let states = [
+        chat(1, Status::Idle, false, true),
+        chat(2, Status::Working, false, true),
+        chat(3, Status::Done, true, true),
+        chat(4, Status::Idle, false, false),
+    ];
+    assert_eq!(pick_idle(&states), vec![1]);
 }

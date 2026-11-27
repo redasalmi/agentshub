@@ -19,6 +19,7 @@ use agentshub_core::status::Status;
 use agentshub_core::store::{self, Change};
 use agentshub_core::worktree::{self, Worktree};
 
+use crate::manage::pick_idle;
 use crate::sessions::{Recording, import_chat};
 use crate::terminal::{self, Colors, Exited, Pty, StatusChanged, Terminal};
 use crate::{Runtime, RuntimeEvent};
@@ -139,26 +140,23 @@ pub fn take_and_remove(
     agentshub_core::lifecycle::take_and_remove(job, worktree::remove)
 }
 
-/// Whether a chat's CLI can be stopped without losing anything the user
-/// would miss, shown or not: it's at rest, has nothing unseen, holds no
-/// draft, and can resume its session. `kept` says whether its transcript
-/// exists, and `last_prompt` is its session's (see `Store::last_prompt`).
-fn at_rest(
+/// Whether a chat's CLI, at rest by `pick_idle`, can be stopped without
+/// losing anything else the user would miss: it holds no draft, and can
+/// resume its session. `kept` says whether its transcript exists, and
+/// `last_prompt` is its session's (see `Store::last_prompt`).
+fn loses_nothing(
     chat: &ChatRuntime,
     kept: bool,
     last_prompt: &Result<(bool, Option<i64>)>,
     cx: &App,
 ) -> bool {
-    !chat.unseen
-        && matches!(chat.status, Some(Status::Idle | Status::Done))
-        && chat.terminal.as_ref().is_some_and(|terminal| {
-            !terminal.exited
-                && terminal
-                    .terminal
-                    .read(cx)
-                    .input()
-                    .sent(|| last_prompt.as_ref().ok().and_then(|(_, at)| *at))
-        })
+    chat.terminal.as_ref().is_some_and(|terminal| {
+        terminal
+            .terminal
+            .read(cx)
+            .input()
+            .sent(|| last_prompt.as_ref().ok().and_then(|(_, at)| *at))
+    })
         // Without its transcript, a session with a prompt can't be resumed,
         // and the CLI holds the only copy of it. Claude deletes transcripts
         // that went untouched for 30 days.
@@ -661,8 +659,8 @@ impl Runtime {
         reaped
     }
 
-    /// Reads what tells whether each open chat's CLI sits at rest with
-    /// nothing the user would miss (see `at_rest`), for `idle_chats`.
+    /// Reads what tells whether stopping each open chat's CLI loses nothing
+    /// the user would miss (see `loses_nothing`), for `idle_chats`.
     pub fn check_idle(&self) -> impl Future<Output = IdleCheck> + use<> {
         let asked: Vec<_> = self
             .chats
@@ -700,18 +698,23 @@ impl Runtime {
     pub fn idle_chats(&self, check: IdleCheck, cx: &App) -> Vec<i64> {
         // One that restarted, or went into another session, meanwhile isn't
         // what was read.
-        check
+        let read: Vec<_> = check
             .0
             .into_iter()
-            .filter(|(id, report, session, kept, last_prompt)| {
-                self.chats
-                    .iter()
-                    .find(|chat| {
-                        chat.id == *id && chat.report == *report && chat.session == *session
-                    })
-                    .is_some_and(|chat| at_rest(chat, *kept, last_prompt, cx))
+            .filter_map(|(id, report, session, kept, last_prompt)| {
+                let chat = self.chats.iter().find(|chat| {
+                    chat.id == id && chat.report == report && chat.session == session
+                })?;
+                Some((chat, kept, last_prompt))
             })
-            .map(|(id, ..)| id)
+            .collect();
+        let states: Vec<_> = read.iter().map(|(chat, ..)| chat.state()).collect();
+        let resting = pick_idle(&states);
+        read.into_iter()
+            .filter(|(chat, kept, last_prompt)| {
+                resting.contains(&chat.id) && loses_nothing(chat, *kept, last_prompt, cx)
+            })
+            .map(|(chat, ..)| chat.id)
             .collect()
     }
 

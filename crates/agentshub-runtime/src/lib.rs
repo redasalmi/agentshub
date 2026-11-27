@@ -5,6 +5,7 @@ pub mod terminal;
 mod chats;
 mod event;
 mod intent;
+mod manage;
 mod new_chat;
 mod runtime;
 mod sessions;
