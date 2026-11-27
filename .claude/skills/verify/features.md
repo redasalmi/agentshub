@@ -4,6 +4,10 @@ What a user can do and what should happen, to pick a scenario's steps and
 judge its screenshots. How to do each one (keys, clicks) is in `docs/`, mostly
 `docs/keyboard-shortcuts.md` and `docs/getting-started.md`; don't repeat it here.
 
+The rows hold for both layouts. Where one names the rail or the sidebar,
+Triage has its one list of every project's chats and the project filter at
+its top.
+
 | Feature | Expected | Scenario |
 | --- | --- | --- |
 | Empty start | "Add a project to begin" | |
@@ -17,8 +21,8 @@ judge its screenshots. How to do each one (keys, clicks) is in `docs/`, mostly
 | Chat title | Sidebar and header show the first prompt or the CLI's title | smoke |
 | Resume after restart | The chat resumes the same session (`--resume <id>`) | smoke |
 | Quit | No CLI left running | smoke |
-| Open chat by place, running chats, next chat needing you | That chat or list opens | |
-| Search | Finds chats, messages, projects, commands | |
+| Open chat by place, running chats, next chat needing you | That chat or list opens | triage (Alt+1) |
+| Search | Finds chats, messages, projects, commands | triage (chats) |
 | Settings, shortcut list | Open and close | |
 | Agent config folder | Saving a folder creates it; new chats of that agent run in it, older ones resume in theirs | config-folder |
 | Rename chat | Title editable and saved | |
@@ -29,3 +33,6 @@ judge its screenshots. How to do each one (keys, clicks) is in `docs/`, mostly
 | Copy, paste | Selection copied; clipboard pasted to the CLI | |
 | Font size | Terminal text grows and shrinks | rendering |
 | Agent output | Box lines, blocks and braille meet without seams; check marks, symbols and emoji draw (emoji in one color where the system's color emoji are COLRv1) | rendering |
+| Agent exits | "<Agent> exited. Its terminal output is kept below." under the header, with Restart agent, which resumes the same session | triage |
+| Layout | The `layout` setting opens Classic, or Triage when it is `triage`, again after a relaunch | triage |
+| Triage filter | The list shows the picked project's chats, or every project's; no CLI starts or stops | triage |

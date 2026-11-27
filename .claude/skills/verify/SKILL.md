@@ -77,6 +77,15 @@ launches in `editor.log`, the environment handed back to the editor and the
 saved setting, then picks Zed in the settings and checks nothing opened.
 Editors installed under `/usr/share` show in the menus too, after the fakes.
 
+`scenarios/triage.sh`: saves the Triage layout and opens it, starts Claude in
+the second project from the New Chat dialog's Project field and Codex in the
+first, filters the list to each project and back to all and checks no CLI
+started or stopped, opens chats with Alt+1 and the search and types to them,
+pins a chat from its card's menu, archives it with Ctrl+Shift+A and takes it
+back with Undo, kills an agent and restarts it from the notice under the
+header, checking it resumed its session, then quits and relaunches into
+Triage.
+
 To cover a change, add a scenario next to it or a step to an existing one. A
 scenario is bash sourced with `set -e` after `scripts/lib.sh`:
 
