@@ -21,6 +21,8 @@ use crate::status::Tone;
 pub trait LayoutView {
     /// The project new chats, the shell and the empty state are for.
     fn selected_project(&self, cx: &App) -> Option<i64>;
+    /// Makes project `project` the selected one, telling the workspace with
+    /// `NavEvent::Selected` if it wasn't.
     fn select_project(&self, project: i64, cx: &mut App);
     /// Selects the `index`th project, counting from zero, as Ctrl and a
     /// number do.
@@ -73,10 +75,12 @@ pub enum Held {
 /// What a layout asks the workspace to do.
 #[derive(Clone)]
 pub enum NavEvent {
+    /// Ask for a folder to add as a project.
     AddProject,
     /// Files and folders dropped on the layout from outside the app; the
     /// folders among them become projects.
     DropPaths(Vec<PathBuf>),
+    /// Remove a project, once the user agrees.
     RemoveProject(i64),
     /// Archive a project, with its chats.
     ArchiveProject(i64),
@@ -84,9 +88,11 @@ pub enum NavEvent {
     MoveProject(i64, i64),
     /// Start a chat in a project.
     NewChat(i64),
+    /// Show a chat, starting its CLI unless it runs.
     OpenChat(i64),
     /// Ask for a chat's new title, starting from its current one.
     RenameChat(i64, SharedString),
+    /// Pin a chat to the top of its list, or unpin it.
     PinChat(i64, bool),
     /// Another project was selected, or none.
     Selected,
@@ -94,15 +100,19 @@ pub enum NavEvent {
     MoveChat(i64, i64),
     /// Stop a running chat's agent, which opening the chat again resumes.
     CloseChat(i64),
+    /// Delete a chat, once the user agrees.
     DeleteChat(i64),
     /// Archive a chat, which leaves the list, stopping its agent.
     ArchiveChat(i64),
     /// Take a chat out of the archive, to the top of its list.
     RestoreChat(i64),
+    /// Show the settings in place of the chat.
     OpenSettings,
+    /// Open the search box.
     OpenSearch,
     /// Open the running chats' menu, or close it.
     RunningMenu(bool),
+    /// Close the window, remembering its bounds for when it opens again.
     CloseWindow,
 }
 
@@ -119,6 +129,7 @@ pub enum Body {
     /// The settings, which the layout draws as wide as the room it leaves
     /// them.
     Settings(Entity<SettingsView>),
+    /// The shown chat, which the layout draws its header over.
     Chat(Box<ShownChat>),
     /// What shows while no chat does: the empty state, over the shell.
     Empty(AnyElement),
