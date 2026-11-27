@@ -35,7 +35,9 @@ scan_filtered() {
 # core must build and test without the UI framework.
 scan crates/agentshub-core/src 'gpui_kit|gpui::|\bWindow\b|\bEntity<|\bContext<'
 # ui renders; it does not persist or run processes.
-scan_filtered crates/agentshub-ui/src 'crate::store|rusqlite|std::fs|std::process|Store' '/workspace/'
+scan_filtered crates/agentshub-ui/src 'crate::store|rusqlite|std::fs|std::process|portable_pty|Store' '/workspace/'
+# runtime sits below the UI.
+scan crates/agentshub-runtime/src 'agentshub_ui|crate::ui'
 # platform is an adapter layer.
 scan crates/agentshub-platform/src 'crate::ui|crate::app'
 
