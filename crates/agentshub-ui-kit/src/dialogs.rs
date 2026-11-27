@@ -313,7 +313,9 @@ pub fn rename(
 
 /// A question asked before doing something, in an alert.
 pub struct Confirm {
+    /// The question, as the alert's title.
     pub title: SharedString,
+    /// What going ahead does, under the title.
     pub description: SharedString,
     /// The label of the button that goes ahead.
     pub ok_text: SharedString,
@@ -350,6 +352,7 @@ pub fn confirm(
 pub struct Import {
     /// The database file picked.
     pub path: PathBuf,
+    /// Its projects with their chats, listed in the dialog.
     pub projects: Vec<store::Project>,
     /// Where the database it replaces is backed up, as shown.
     pub backup_dir: String,
