@@ -124,7 +124,13 @@ impl Workspace {
             ChatIntent::ToggleHistory => self.toggle_history(&ToggleHistory, window, cx),
             ChatIntent::ToggleShell => self.toggle_shell(&ToggleShell, window, cx),
             ChatIntent::ResizeShell(share) => self.resize_shell(share, cx),
-            ChatIntent::OpenEditor(editor) => self.open_chat_in(editor, id, cx),
+            ChatIntent::OpenEditor(editor) => self.apply(
+                Intent::OpenInEditor {
+                    chat: Some(id),
+                    editor: Some(editor),
+                },
+                cx,
+            ),
             ChatIntent::SetEditor(editor) => {
                 let saved = Settings::set_editor(editor, cx);
                 self.save_setting(saved, cx);

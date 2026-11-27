@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use agentshub_app::settings::Value;
 use agentshub_core::agent::Agent;
+use agentshub_core::editors::Editor;
 use agentshub_core::store::{Change, PendingImport};
 use agentshub_core::worktree::Worktree;
 
@@ -91,4 +92,10 @@ pub enum Intent {
     /// Shows the shell the panel is for, starting it if it isn't running, or
     /// hides it if it shows and nothing covers it (see `Runtime::shell`).
     ToggleShell,
+    /// Opens the folder a chat works in, the shown one without `chat`, in a
+    /// code editor, the default one without `editor`.
+    OpenInEditor {
+        chat: Option<i64>,
+        editor: Option<Editor>,
+    },
 }

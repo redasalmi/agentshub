@@ -1,15 +1,18 @@
-//! The projects' shells, which run beside their chats, and the terminals
-//! that build frames.
+//! The projects' shells, which run beside their chats, the terminals that
+//! build frames, and opening a chat's folder in a code editor.
 
 use std::path::{Path, PathBuf};
 
 use gpui_kit::{App, AppContext as _, Context, Entity, Subscription};
 
+use agentshub_app::editors::Installed;
+use agentshub_app::settings::Settings;
+use agentshub_core::editors::{self, Editor};
 use agentshub_core::lifecycle::Reaped;
 use agentshub_core::store::Project;
 use agentshub_core::worktree::Worktree;
 
-use crate::terminal::{Exited, Pty, Terminal};
+use crate::terminal::{self, Exited, Pty, Terminal};
 use crate::{Runtime, RuntimeEvent};
 
 /// A project's shell, for quick commands next to its chats. Nothing about it
@@ -241,4 +244,53 @@ impl Runtime {
             .map(|shell| shell.terminal.read(cx).shutdown())
             .collect()
     }
+
+    /// Opens the folder chat `chat` works in, or the shown chat's, with
+    /// `editor`, or the default one, and says so if it can't.
+    pub(crate) fn open_in_editor(
+        &self,
+        chat: Option<i64>,
+        editor: Option<Editor>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = chat.or(self.active) else {
+            return;
+        };
+        let Some(editor) = editor.or_else(|| default_editor(cx)) else {
+            cx.emit(RuntimeEvent::Notice(
+                "No code editor Agents Hub knows is installed".into(),
+            ));
+            return;
+        };
+        let Some(folder) = self.chat(id).map(|chat| chat.cwd.to_path_buf()) else {
+            return;
+        };
+        let Some(found) = cx
+            .try_global::<Installed>()
+            .and_then(|installed| installed.0.iter().find(|each| each.found.editor == editor))
+            .map(|each| each.found.clone())
+        else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_spawn(async move { editors::open(&found, &folder, terminal::adopt) })
+                .await;
+            if let Err(err) = opened {
+                eprintln!("can't open {}: {err}", editor.name());
+                let message = format!("Couldn't open {}: {err}", editor.name());
+                this.update(cx, |_, cx| cx.emit(RuntimeEvent::Notice(message)))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+}
+
+/// The editor chats open in: the one the settings name if it is installed,
+/// or the first installed one.
+fn default_editor(cx: &App) -> Option<Editor> {
+    let installed = &cx.try_global::<Installed>()?.0;
+    let found: Vec<_> = installed.iter().map(|each| each.found.clone()).collect();
+    Some(editors::pick(&found, cx.global::<Settings>().editor)?.editor)
 }

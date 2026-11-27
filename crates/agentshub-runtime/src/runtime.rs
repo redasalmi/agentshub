@@ -159,6 +159,7 @@ impl Runtime {
             Intent::ProjectSelected(project) => self.select_project(project, cx),
             Intent::SetCovered(covered) => self.set_covered(covered, cx),
             Intent::ToggleShell => self.toggle_shell(cx),
+            Intent::OpenInEditor { chat, editor } => self.open_in_editor(chat, editor, cx),
         }
     }
 
