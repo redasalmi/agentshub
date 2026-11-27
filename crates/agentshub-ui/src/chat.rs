@@ -37,6 +37,7 @@ actions!(
         ShowRunning,
         ToggleHistory,
         ToggleShell,
+        OpenInEditor,
         RenameChat,
         TogglePin,
         DeleteChat,
@@ -572,7 +573,7 @@ fn editor_button(current: &EditorChoice, all: Vec<EditorChoice>, on: On) -> impl
                 .small()
                 .child(editor_icon(current.icon.as_ref()))
                 .accessibility_label(open.clone())
-                .tooltip(open)
+                .tooltip_with_action(open, &OpenInEditor, None)
                 .on_click(move |_, window, cx| on(ChatIntent::OpenEditor(editor), window, cx)),
         )
         .menu_accessibility_label("Choose the default editor")

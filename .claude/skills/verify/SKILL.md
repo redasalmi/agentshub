@@ -63,7 +63,7 @@ shots with the same text in Ghostty.
 
 `scenarios/editor.sh`: installs a fake Zed (with an icon) and VS Code (without),
 opens the chat's folder from the header, picks VS Code in its menu and checks it
-only became the default, opens the folder again from the icon, checks both
+only became the default, opens the folder again from the icon and with Ctrl+Shift+E, checks the
 launches in `editor.log`, the environment handed back to the editor and the
 saved setting, then picks Zed in the settings and checks nothing opened.
 Editors installed under `/usr/share` show in the menus too, after the fakes.

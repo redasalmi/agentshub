@@ -5,11 +5,11 @@ use gpui_kit::*;
 use crate::sidebar::NUMBERED;
 use agentshub_app::settings::ThemeFamily;
 
-pub use crate::chat::ToggleShell;
 pub use crate::chat::{
     ArchiveChat, DeleteChat, NextNeedingYou, OpenSearch, RenameChat, ShowRunning, ToggleHistory,
     TogglePin,
 };
+pub use crate::chat::{OpenInEditor, ToggleShell};
 pub use crate::settings::{ShowShortcuts, ToggleSettings};
 pub use crate::sidebar::NewChat;
 
@@ -53,6 +53,7 @@ pub(super) fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-n", NewChat, None),
         KeyBinding::new("ctrl-`", ToggleShell, None),
         KeyBinding::new("ctrl-shift-h", ToggleHistory, None),
+        KeyBinding::new("ctrl-shift-e", OpenInEditor, None),
         KeyBinding::new("f2", RenameChat, None),
         KeyBinding::new("ctrl-shift-o", AddProject, None),
         KeyBinding::new("ctrl-,", ToggleSettings, None),

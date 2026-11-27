@@ -16,9 +16,9 @@ use agentshub_core::store::Change;
 use super::palette_model::PaletteLists;
 use super::{
     AddProject, ArchiveChat, ArchiveProject, CloseAllChats, CloseIdleChats, DeleteChat,
-    ExportDatabase, ImportDatabase, NextNeedingYou, PALETTE_START, RenameChat, ShowArchived,
-    ShowRunning, ShowShortcuts, ToggleHistory, TogglePin, ToggleProjectNames, ToggleSettings,
-    ToggleShell, ToggleTheme, UseTheme, Workspace,
+    ExportDatabase, ImportDatabase, NextNeedingYou, OpenInEditor, PALETTE_START, RenameChat,
+    ShowArchived, ShowRunning, ShowShortcuts, ToggleHistory, TogglePin, ToggleProjectNames,
+    ToggleSettings, ToggleShell, ToggleTheme, UseTheme, Workspace,
 };
 
 impl Workspace {
@@ -85,6 +85,16 @@ impl Workspace {
                 IconName::SquareTerminal,
                 Box::new(ToggleShell),
             ));
+            if let Some((current, _)) = crate::chat::editor_choices(cx) {
+                commands.push(
+                    Entry::new(
+                        format!("Open this chat's folder in {}", current.editor.name()),
+                        Lead::Icon(ExtraIcon::FolderCode),
+                        Pick::Run(Box::new(OpenInEditor)),
+                    )
+                    .keywords(["editor", "code"]),
+                );
+            }
             commands.push(run(
                 "Rename this chat",
                 IconName::Replace,

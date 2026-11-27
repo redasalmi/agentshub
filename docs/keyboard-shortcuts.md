@@ -30,6 +30,7 @@ These shortcuts work anywhere in the app, even while an agent has the keyboard, 
 | Shortcut | What it does |
 | --- | --- |
 | Ctrl+` | Show or hide the project's shell |
+| Ctrl+Shift+E | Open the chat's folder in your code editor |
 | Ctrl+Shift+H | Show or hide the earlier sessions |
 | Ctrl+Shift+C | Copy the selected text |
 | Ctrl+Shift+V | Paste |

@@ -6,6 +6,23 @@ use agentshub_core::editors::{self, Editor};
 use super::*;
 
 impl Workspace {
+    /// Opens the shown chat's folder in the default editor.
+    pub(super) fn open_in_editor(
+        &mut self,
+        _: &OpenInEditor,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.active else {
+            return;
+        };
+        let Some((current, _)) = crate::chat::editor_choices(cx) else {
+            self.say("No code editor Agents Hub knows is installed".into(), cx);
+            return;
+        };
+        self.open_chat_in(current.editor, id, cx);
+    }
+
     /// Opens the folder chat `id` works in with `editor`, and says so if it
     /// can't.
     pub(super) fn open_chat_in(&self, editor: Editor, id: i64, cx: &mut Context<Self>) {

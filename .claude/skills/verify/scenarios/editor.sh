@@ -35,6 +35,10 @@ grep -q '^code|' "$EDITOR_LOG" && fail "picking VS Code in the menu opened it"
 click 1120 86
 wait_until 5 "VS Code to open the project" grep -qxF "code|$project|$project" "$EDITOR_LOG"
 
+opened_code() { [ "$(grep -c '^code|' "$EDITOR_LOG")" = "$1" ]; }
+key ctrl+shift+e
+wait_until 5 "Ctrl+Shift+E to open VS Code again" opened_code 2
+
 key ctrl+comma
 xdotool mousemove 640 400
 for _ in 1 2 3 4 5; do xdotool click 5; sleep 0.1; done

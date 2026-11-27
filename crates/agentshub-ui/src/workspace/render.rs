@@ -32,6 +32,7 @@ impl Render for Workspace {
             .text_color(theme.foreground)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_shell))
+            .on_action(cx.listener(Self::open_in_editor))
             .on_action(cx.listener(Self::open_search))
             .on_action(cx.listener(Self::new_chat_here))
             .on_action(cx.listener(Self::add_project_action))
@@ -175,7 +176,7 @@ impl Render for Workspace {
 }
 
 pub(super) fn render_shortcuts(window: &Window, cx: &App) -> impl IntoElement {
-    let bound: [(&'static str, Box<dyn Action>); 12] = [
+    let bound: [(&'static str, Box<dyn Action>); 13] = [
         (
             "Search chats, messages, projects and commands",
             Box::new(OpenSearch),
@@ -190,6 +191,10 @@ pub(super) fn render_shortcuts(window: &Window, cx: &App) -> impl IntoElement {
         ),
         ("Start an agent in the selected project", Box::new(NewChat)),
         ("Show or hide the project's shell", Box::new(ToggleShell)),
+        (
+            "Open the chat's folder in your code editor",
+            Box::new(OpenInEditor),
+        ),
         ("Show or hide the earlier sessions", Box::new(ToggleHistory)),
         ("Rename the chat", Box::new(RenameChat)),
         ("Add a project", Box::new(AddProject)),
