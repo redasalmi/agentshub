@@ -611,7 +611,8 @@ impl Footer<'_> {
     pub fn render(&self, window: &Window, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let bound = |action: &dyn Action, label: &'static str| {
-            crate::palette::shortcut(action, window).map(|keys| key_hint(keys, label, cx))
+            agentshub_ui_kit::palette::shortcut(action, window)
+                .map(|keys| key_hint(keys, label, cx))
         };
         h_flex()
             .flex_none()
@@ -834,16 +835,16 @@ impl EmptyState {
                                             .pb_1()
                                             .child(heading("Recent", cx))
                                             .children(
-                                                crate::palette::shortcut(&OpenSearch, window).map(
-                                                    |keys| {
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(theme.muted_foreground)
-                                                            .child(format!(
-                                                                "{keys} to search them all"
-                                                            ))
-                                                    },
-                                                ),
+                                                agentshub_ui_kit::palette::shortcut(
+                                                    &OpenSearch,
+                                                    window,
+                                                )
+                                                .map(|keys| {
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(format!("{keys} to search them all"))
+                                                }),
                                             ),
                                     )
                                     .children(self.recent.iter().map(|recent| {
@@ -944,7 +945,7 @@ impl Toolbar {
                             .child("Search chats, messages, projects and commands"),
                     )
                     .children(
-                        crate::palette::shortcut(&OpenSearch, window)
+                        agentshub_ui_kit::palette::shortcut(&OpenSearch, window)
                             .filter(|_| self.width >= MIN_SEARCH_KEYS_WIDTH)
                             .map(|keys| {
                                 div()

@@ -7,7 +7,6 @@ use gpui_kit::assets::IconName as ExtraIcon;
 use gpui_kit::component::{ActiveTheme as _, IconName};
 use gpui_kit::*;
 
-use crate::palette::{self, Entry, Lead, Pick};
 use agentshub_app::settings::{DEFAULT_TERMINAL_FONT_SIZE, Settings, ThemeFamily};
 use agentshub_core::store::Change;
 use agentshub_runtime::Intent;
@@ -17,6 +16,7 @@ use agentshub_ui_kit::actions::{
     ShowRunning, ShowShortcuts, ToggleHistory, TogglePin, ToggleProjectNames, ToggleSettings,
     ToggleShell, ToggleTheme, UseTheme,
 };
+use agentshub_ui_kit::palette::{self, Entry, Lead, Pick};
 use agentshub_ui_kit::status::Filter;
 use agentshub_ui_kit::terminal_view;
 

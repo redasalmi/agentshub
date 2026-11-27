@@ -5,6 +5,7 @@ pub mod actions;
 pub mod appearance;
 pub mod editor;
 pub mod history;
+pub mod palette;
 pub mod status;
 pub mod terminal_view;
 pub mod theme;

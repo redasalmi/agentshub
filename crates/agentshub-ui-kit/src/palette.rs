@@ -12,8 +12,8 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::status::{Filter, Tone, dot};
 use agentshub_core::agent::Agent;
-use agentshub_ui_kit::status::{Filter, Tone, dot};
 
 const WIDTH: Pixels = px(640.);
 const MARGIN_TOP: Pixels = px(96.);

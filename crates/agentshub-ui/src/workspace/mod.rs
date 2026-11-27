@@ -19,7 +19,6 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::palette::{self, Entry, Lead, Pick};
 use crate::settings::{SettingsIntent, SettingsView};
 use crate::sidebar::{
     self, Held, MAX_SIDEBAR_WIDTH, MIN_MAIN_WIDTH, MIN_SIDEBAR_WIDTH, Sidebar, SidebarEvent,
@@ -43,6 +42,7 @@ use agentshub_ui_kit::actions::{
 };
 use agentshub_ui_kit::appearance;
 use agentshub_ui_kit::history::History;
+use agentshub_ui_kit::palette::{self, Entry, Lead, Pick};
 use agentshub_ui_kit::status::{Tone, dot};
 use agentshub_ui_kit::terminal_view::{self, TerminalView};
 use agentshub_ui_kit::widgets::{group_heading, path_line};
