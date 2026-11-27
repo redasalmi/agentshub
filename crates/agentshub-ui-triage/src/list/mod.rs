@@ -269,7 +269,7 @@ impl TriageList {
         next_of(&needing, after)
     }
 
-    /// How many of project §project§'s chats need the user and how many are
+    /// How many of project `project`'s chats need the user and how many are
     /// open, and whether one of them works.
     fn counts(&self, project: &Project) -> (usize, usize, bool) {
         let running: Vec<Option<Status>> = project
