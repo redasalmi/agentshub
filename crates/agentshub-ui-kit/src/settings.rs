@@ -55,11 +55,17 @@ type On = Rc<dyn Fn(SettingsIntent, &mut Window, &mut App)>;
 /// The settings view; the workspace owns what its intents change.
 pub struct SettingsView {
     on: On,
+    /// Whether the layout note's Restart now was clicked, which the app quits
+    /// after.
+    restarting: bool,
 }
 
 impl SettingsView {
     pub fn new(on: On) -> Self {
-        Self { on }
+        Self {
+            on,
+            restarting: false,
+        }
     }
 
     pub fn render(
@@ -512,7 +518,10 @@ fn render_layout_row(
                         .small()
                         .label("Restart now")
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.send(SettingsIntent::RestartForLayout, window, cx)
+                            if !this.restarting {
+                                this.restarting = true;
+                                this.send(SettingsIntent::RestartForLayout, window, cx);
+                            }
                         })),
                 ),
         )
