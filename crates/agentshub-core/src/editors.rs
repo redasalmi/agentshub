@@ -65,12 +65,12 @@ impl Editor {
     pub fn desktop_ids(self) -> &'static [&'static str] {
         match self {
             Self::Zed => &["dev.zed.Zed", "zed"],
-            Self::VsCode => &["code", "com.visualstudio.code"],
-            Self::VsCodium => &["codium", "com.vscodium.codium"],
+            Self::VsCode => &["code", "com.visualstudio.code", "code_code"],
+            Self::VsCodium => &["codium", "com.vscodium.codium", "codium_codium"],
             Self::Cursor => &["cursor"],
-            Self::SublimeText => &["sublime_text", "com.sublimetext.three"],
-            Self::Emacs => &["emacs", "org.gnu.emacs"],
-            Self::Kate => &["org.kde.kate"],
+            Self::SublimeText => &["sublime_text", "com.sublimetext.three", "sublime-text_subl"],
+            Self::Emacs => &["emacs", "org.gnu.emacs", "emacs_emacs"],
+            Self::Kate => &["org.kde.kate", "kate_kate"],
         }
     }
 }
@@ -242,7 +242,7 @@ pub struct Dirs {
 }
 
 impl Dirs {
-    /// The XDG data folders, with Flatpak's exports even when the session
+    /// The XDG data folders, with Flatpak's and Snap's even when the session
     /// doesn't list them.
     pub fn from_env() -> Self {
         let set = |name| env::var_os(name).filter(|value| !value.is_empty());
@@ -254,12 +254,13 @@ impl Dirs {
         let mut data_dirs: Vec<PathBuf> = env::split_paths(&listed)
             .filter(|dir| !dir.as_os_str().is_empty())
             .collect();
-        for flatpak in [
+        for packaged in [
             data_home.join("flatpak/exports/share"),
             PathBuf::from("/var/lib/flatpak/exports/share"),
+            PathBuf::from("/var/lib/snapd/desktop"),
         ] {
-            if !data_dirs.contains(&flatpak) {
-                data_dirs.push(flatpak);
+            if !data_dirs.contains(&packaged) {
+                data_dirs.push(packaged);
             }
         }
         Self {
@@ -575,6 +576,42 @@ mod tests {
         );
         assert_eq!(found[0].exec, "home-zed %U");
         assert_eq!(found[0].desktop_id, "dev.zed.Zed");
+    }
+
+    #[test]
+    fn detects_snap_entries() {
+        let base = temp_dir();
+        let dirs = Dirs {
+            data_home: base.join("home"),
+            data_dirs: vec![base.join("snapd")],
+        };
+        let entry = "[Desktop Entry]\nType=Application\nExec=env \
+                     BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/applications/code_code.desktop \
+                     /snap/bin/code --force-user-env %F\n";
+        write(&base, "snapd/applications/code_code.desktop", entry);
+        let found = detect(&dirs);
+        assert_eq!(
+            found
+                .iter()
+                .map(|f| (f.editor, f.desktop_id))
+                .collect::<Vec<_>>(),
+            [(Editor::VsCode, "code_code")]
+        );
+        assert_eq!(
+            expand_exec(&found[0].exec, Path::new("/p")).unwrap(),
+            [
+                "env",
+                "BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/applications/code_code.desktop",
+                "/snap/bin/code",
+                "--force-user-env",
+                "/p"
+            ]
+        );
+        assert!(
+            Dirs::from_env()
+                .data_dirs
+                .contains(&PathBuf::from("/var/lib/snapd/desktop"))
+        );
     }
 
     #[test]
