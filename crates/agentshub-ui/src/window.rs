@@ -5,20 +5,20 @@ use gpui_kit::*;
 use crate::appearance;
 use crate::tray;
 use crate::workspace::Workspace;
-use agentshub_runtime::Runtime;
+use agentshub_runtime::{Intent, Runtime};
 
 /// What a window opens on.
 pub enum Contents {
     /// The workspace of the window that was closed to the tray.
     Workspace(Entity<Workspace>),
-    /// A new workspace, on the runtime built from the database startup
-    /// opened.
-    New(Entity<Runtime>),
+    /// A new workspace.
+    New,
 }
 
-/// Opens the window on `contents`, with the `bounds` it was closed with, if
-/// any.
+/// Opens the window on `contents`, a workspace on `runtime`, with the
+/// `bounds` it was closed with, if any.
 pub fn open_window(
+    runtime: Entity<Runtime>,
     contents: Contents,
     bounds: Option<WindowBounds>,
     cx: &mut App,
@@ -50,13 +50,13 @@ pub fn open_window(
             .detach();
         let workspace = match contents {
             Contents::Workspace(workspace) => {
-                workspace.update(cx, |workspace, cx| {
-                    workspace.set_hidden(false, cx);
-                    workspace.focus_chat(window, cx);
+                runtime.update(cx, |runtime, cx| {
+                    runtime.apply(Intent::SetHidden(false), cx)
                 });
+                workspace.update(cx, |workspace, cx| workspace.focus_chat(window, cx));
                 workspace
             }
-            Contents::New(runtime) => {
+            Contents::New => {
                 appearance::init(cx);
                 let workspace = cx.new(|cx| Workspace::new(runtime, window, cx));
                 // The shortcuts reach the workspace through the focus.

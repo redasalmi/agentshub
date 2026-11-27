@@ -5,13 +5,14 @@ pub mod terminal;
 mod chats;
 mod event;
 mod intent;
+mod lifecycle_io;
 mod manage;
 mod new_chat;
 mod runtime;
 mod sessions;
 mod shells;
 
-pub use chats::{ChatState, IdleCheck, take_and_remove};
+pub use chats::{ChatState, IdleCheck};
 pub use event::RuntimeEvent;
 pub use intent::Intent;
 pub use new_chat::Asked;

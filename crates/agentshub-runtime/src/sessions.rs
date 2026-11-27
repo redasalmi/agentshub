@@ -48,11 +48,11 @@ pub(crate) struct Following {
     /// The sessions whose transcript is being read, which shutdown reads
     /// itself since it can't wait for them. A session is in it once per read
     /// under way, so it stays until the last of them is done.
-    reading: Vec<i64>,
+    pub(crate) reading: Vec<i64>,
     /// The chats whose last session is to be read once the sessions asked to
     /// be recorded are, which shutdown reads itself instead. A chat is in it
     /// once per read.
-    reading_last: Vec<i64>,
+    pub(crate) reading_last: Vec<i64>,
 }
 
 impl Following {
@@ -451,21 +451,6 @@ impl Runtime {
             .ok();
         })
         .detach();
-    }
-
-    #[doc(hidden)]
-    pub fn reports(&self) -> &Reports {
-        &self.following.reports
-    }
-
-    #[doc(hidden)]
-    pub fn reading(&self) -> &[i64] {
-        &self.following.reading
-    }
-
-    #[doc(hidden)]
-    pub fn reading_last(&self) -> &[i64] {
-        &self.following.reading_last
     }
 }
 

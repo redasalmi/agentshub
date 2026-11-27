@@ -42,18 +42,10 @@ impl Workspace {
         }
     }
 
-    /// Tells the runtime whether the settings or the tray cover the
-    /// terminals, which then build no frames.
+    /// Tells the runtime whether the settings cover the terminals, which
+    /// then build no frames.
     pub(super) fn cover_terminals(&self, cx: &mut App) {
-        self.apply(Intent::SetCovered(self.settings_shown || self.hidden), cx);
-    }
-
-    /// Stops the shown terminals from building frames while the window is
-    /// closed to the tray, and starts them again when it opens.
-    pub fn set_hidden(&mut self, hidden: bool, cx: &mut App) {
-        self.hidden = hidden;
-        self.cover_terminals(cx);
-        self.set_focused(cx.active_window().is_some(), cx);
+        self.apply(Intent::SetCovered(self.settings_shown), cx);
     }
 
     /// Shows the shell of the selected project, starting it if it isn't

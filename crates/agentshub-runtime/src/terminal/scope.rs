@@ -85,12 +85,10 @@ pub(super) fn available() -> bool {
     (hooks().available)()
 }
 
-#[cfg(test)]
-pub(super) fn stop_all() {
+pub(crate) fn stop_all() {
     (hooks().stop_all)();
 }
 
-#[cfg(test)]
-pub(super) fn wait_stopped() {
+pub(crate) fn wait_stopped() {
     (hooks().wait_stopped)();
 }

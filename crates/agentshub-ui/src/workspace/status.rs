@@ -61,12 +61,11 @@ impl Workspace {
     }
 
     /// Tells the runtime whether the user can see the shown chat: `focused`
-    /// says whether the window has the focus, and the settings or the tray
-    /// may cover the chat. `focused` is passed in because, on X11, the
-    /// window's activation is reported before `cx.active_window()` catches up
-    /// with it.
+    /// says whether the window has the focus, and the settings may cover the
+    /// chat. `focused` is passed in because, on X11, the window's activation
+    /// is reported before `cx.active_window()` catches up with it.
     pub fn set_focused(&self, focused: bool, cx: &mut App) {
-        let seen = focused && !self.settings_shown && !self.hidden;
+        let seen = focused && !self.settings_shown;
         self.apply(Intent::SetFocused(seen), cx);
     }
 

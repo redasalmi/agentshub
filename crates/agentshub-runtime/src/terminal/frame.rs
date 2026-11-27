@@ -81,6 +81,27 @@ pub struct Colors {
     pub ansi: [RgbColor; 16],
 }
 
+/// xterm's colors, for a terminal that starts before the window's theme
+/// gives its own.
+impl Default for Colors {
+    fn default() -> Self {
+        let rgb = |hex: u32| {
+            let [_, r, g, b] = hex.to_be_bytes();
+            RgbColor { r, g, b }
+        };
+        Self {
+            background: rgb(0x00_0000),
+            foreground: rgb(0xe5_e5e5),
+            ansi: [
+                0x00_0000, 0xcd_0000, 0x00_cd00, 0xcd_cd00, 0x00_00ee, 0xcd_00cd, 0x00_cdcd,
+                0xe5_e5e5, 0x7f_7f7f, 0xff_0000, 0x00_ff00, 0xff_ff00, 0x5c_5cff, 0xff_00ff,
+                0x00_ffff, 0xff_ffff,
+            ]
+            .map(rgb),
+        }
+    }
+}
+
 pub(super) fn set_colors(terminal: &mut VtTerminal<'_, '_>, colors: Colors) -> Result<()> {
     let mut palette = terminal.default_color_palette()?;
     palette.0[..colors.ansi.len()].copy_from_slice(&colors.ansi);

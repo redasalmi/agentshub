@@ -60,7 +60,7 @@ impl Workspace {
             terminal: pane.view.clone(),
             shell,
             shell_share: cx.global::<Settings>().shell_share,
-            hidden: self.hidden,
+            hidden: runtime.hidden(),
             active: runtime.active().is_some(),
             earlier,
             history_open,

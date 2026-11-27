@@ -1,27 +1,52 @@
-//! What the workspace does when the app quits.
+//! What the runtime does when the app starts and quits.
 //!
-//! Nothing can be scheduled on a released workspace, so this runs on the app's
-//! thread and reads what the CLIs wrote last itself.
+//! Nothing can be scheduled on a released runtime, so shutdown runs on the
+//! app's thread and reads what the CLIs wrote last itself.
 
-use super::*;
+use std::collections::HashSet;
+use std::path::Path;
 
-impl Workspace {
+use gpui_kit::{App, Context};
+
+use crate::Runtime;
+use crate::chats::take_and_remove;
+use crate::terminal;
+
+impl Runtime {
+    /// Reads what the CLIs wrote since the transcripts were last read, so
+    /// that the search finds it without each chat having to be opened first.
+    pub(crate) fn catch_up(&self, cx: &mut Context<Self>) {
+        let behind = self.store.transcripts_behind();
+        cx.spawn(async move |this, cx| {
+            match behind.await {
+                Ok(sessions) => this
+                    .update(cx, |this, cx| {
+                        this.read_sessions(sessions, false, cx).detach()
+                    })
+                    .ok(),
+                Err(err) => {
+                    eprintln!("can't list the transcripts to read: {err}");
+                    None
+                }
+            };
+        })
+        .detach();
+    }
+
     /// Stops every CLI, saves what is queued, and reads the sessions the
     /// CLIs left before they go.
     #[expect(
         clippy::too_many_lines,
         reason = "the shutdown steps run in order, each on what the last took from the lifecycle"
     )]
-    pub(super) fn shutdown(&mut self, cx: &mut App) {
-        let store = self.runtime.read(cx).store().clone();
+    pub(crate) fn shutdown(&mut self, cx: &mut App) {
+        let store = self.store.clone();
         // The changes the user made are saved before anything else, so that a
         // chat whose delete is saved can have its worktree removed.
         store.wait_for_writes();
         // A removal confirmed while its project's chats were being listed
         // isn't saved yet, so it is here, with their worktrees.
-        let removing = self
-            .runtime
-            .update(cx, |runtime, _| runtime.lifecycle_mut().take_removing());
+        let removing = self.lifecycle.take_removing();
         // Their chats are gone with them, so nothing is read or recorded for
         // them below. Their CLIs are still stopped.
         let mut removed = HashSet::new();
@@ -40,13 +65,7 @@ impl Workspace {
                         for chat in &project.chats {
                             removed.insert(chat.id);
                             if let Some(worktree) = &chat.worktree {
-                                self.runtime.update(cx, |runtime, _| {
-                                    runtime.lifecycle_mut().track_removal(
-                                        worktree,
-                                        &path,
-                                        Vec::new(),
-                                    )
-                                });
+                                self.lifecycle.track_removal(worktree, &path, Vec::new());
                             }
                         }
                     }
@@ -55,26 +74,19 @@ impl Workspace {
             }
         }
         let mut deleted_reaped = Vec::new();
-        for (id, deleting) in self
-            .runtime
-            .update(cx, |runtime, _| runtime.lifecycle_mut().take_deleting())
-        {
+        for (id, deleting) in self.lifecycle.take_deleting() {
             match deleting.worktree {
                 Some((worktree, project)) if matches!(smol::block_on(store.chat(id)), Ok(None)) => {
-                    self.runtime.update(cx, |runtime, _| {
-                        runtime.lifecycle_mut().track_removal(
-                            &worktree,
-                            &project,
-                            deleting.reaped.into_iter().collect(),
-                        )
-                    });
+                    self.lifecycle.track_removal(
+                        &worktree,
+                        &project,
+                        deleting.reaped.into_iter().collect(),
+                    );
                 }
                 _ => deleted_reaped.extend(deleting.reaped),
             }
         }
-        let adding = self
-            .runtime
-            .update(cx, |runtime, _| runtime.lifecycle_mut().take_adding());
+        let adding = self.lifecycle.take_adding();
         if !adding.is_empty()
             && let Ok(projects) = smol::block_on(store.projects())
         {
@@ -85,50 +97,38 @@ impl Workspace {
                 .collect();
             for (worktree, project) in adding {
                 if !taken.contains(worktree.root.as_path()) {
-                    self.runtime.update(cx, |runtime, _| {
-                        runtime
-                            .lifecycle_mut()
-                            .track_removal(&worktree, &project, Vec::new())
-                    });
+                    self.lifecycle
+                        .track_removal(&worktree, &project, Vec::new());
                 }
             }
         }
-        // Nothing can be scheduled on a released workspace, so what the CLIs
+        // Nothing can be scheduled on a released runtime, so what the CLIs
         // wrote last is read here: the sessions in their queued reports, the
         // ones they were in, and the reads still under way. The sessions they
         // left before were read when they left them.
-        let mut sessions = self.runtime.read(cx).reading().to_vec();
+        let mut sessions = self.following.reading.clone();
         sessions.extend(
-            self.runtime
-                .read(cx)
-                .lifecycle()
+            self.lifecycle
                 .stopping()
                 .filter(|(id, ..)| !removed.contains(id))
                 .filter_map(|(.., session)| session),
         );
         // A session saved by now may not have reached its chat, whose callback
         // can't run anymore, but it is the chat's last.
-        let runtime = self.runtime.read(cx);
-        let chats: Vec<i64> = runtime
+        let chats: Vec<i64> = self
             .open_chats()
             .map(|chat| chat.id)
-            .chain(runtime.lifecycle().stopping().map(|(id, ..)| id))
-            .chain(runtime.reading_last().iter().copied())
+            .chain(self.lifecycle.stopping().map(|(id, ..)| id))
+            .chain(self.following.reading_last.iter().copied())
             .filter(|id| !removed.contains(id))
             .collect();
         for id in chats {
-            sessions.extend(smol::block_on(self.runtime.read(cx).last_session(id)));
+            sessions.extend(smol::block_on(self.last_session(id)));
         }
         // A chat being opened reads its last session on a thread of its own,
         // which isn't in `reading`, so it is read again here, the way
         // `open_chat` reads it.
-        for id in self
-            .runtime
-            .read(cx)
-            .lifecycle()
-            .opening()
-            .filter(|id| !removed.contains(id))
-        {
+        for id in self.lifecycle.opening().filter(|id| !removed.contains(id)) {
             let listed = smol::block_on(store.sessions(id)).unwrap_or_else(|err| {
                 eprintln!("can't list the sessions of chat {id}: {err}");
                 Vec::new()
@@ -141,44 +141,34 @@ impl Workspace {
         }
         // Discover Codex's last session before its process disappears. A
         // queued watcher callback cannot run once we're released.
-        sessions.extend(self.runtime.read(cx).record_codex_sessions(&removed, cx));
+        sessions.extend(self.record_codex_sessions(&removed, cx));
         // The CLIs are killed on threads of their own, which the app would
         // otherwise exit before they are done with.
-        let runtime = self.runtime.read(cx);
-        let reaped: Vec<_> = runtime
+        let reaped: Vec<_> = self
             .open_chats()
-            .filter_map(|chat| runtime.terminal(chat.id))
+            .filter_map(|chat| self.terminal(chat.id))
             .map(|terminal| terminal.read(cx).shutdown())
             .chain(
-                runtime
-                    .lifecycle()
+                self.lifecycle
                     .stopping()
                     .map(|(_, reaped, _)| reaped.clone()),
             )
             .chain(deleted_reaped)
-            .chain(runtime.shut_down_shells(cx))
-            .chain(runtime.lifecycle().removal_waits().cloned())
+            .chain(self.shut_down_shells(cx))
+            .chain(self.lifecycle.removal_waits().cloned())
             .collect();
         terminal::wait_reaped(reaped);
-        #[cfg(target_os = "linux")]
-        {
-            scope::stop_all();
-            scope::wait_stopped();
-        }
-        self.runtime
-            .update(cx, |runtime, _| runtime.abandon_checkouts());
+        terminal::stop_all_scopes();
+        terminal::wait_scopes_stopped();
+        self.abandon_checkouts();
         // The worktrees of deleted chats, whose tasks won't run anymore. One
         // being removed already is waited for.
-        for job in self
-            .runtime
-            .update(cx, |runtime, _| runtime.lifecycle_mut().take_removals())
-        {
+        for job in self.lifecycle.take_removals() {
             if let Some(Err(err)) = take_and_remove(&job) {
                 eprintln!("can't remove a worktree on shutdown: {err:#}");
             }
         }
-        self.runtime
-            .update(cx, |runtime, _| runtime.import_chats(&removed));
+        self.import_chats(&removed);
         sessions.sort_unstable();
         sessions.dedup();
         for id in sessions {
@@ -188,6 +178,6 @@ impl Workspace {
         }
         // The sessions recorded here left others, which the store reads.
         store.wait_for_writes();
-        self.runtime.read(cx).reports().remove();
+        self.following.reports.remove();
     }
 }

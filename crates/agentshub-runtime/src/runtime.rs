@@ -40,8 +40,9 @@ pub struct Runtime {
     pub(crate) focused: bool,
     /// Brings the shown chat's turn up to date while it's under way.
     pub(crate) turn_tick: Option<Task<()>>,
-    /// What the chats' terminals are painted in, once the window says.
-    pub(crate) colors: Option<Colors>,
+    /// What the chats' terminals are painted in: the window's theme once it
+    /// says, xterm's until then.
+    pub(crate) colors: Colors,
     /// How many times the window closed (see `Intent::WindowClosed`).
     pub(crate) window_closes: u64,
     /// The worktrees being checked out for new chats. Each is taken by its
@@ -56,9 +57,10 @@ pub struct Runtime {
     pub(crate) shells: HashMap<PathBuf, Shell>,
     /// The project the sidebar selected, whose shell the panel is for.
     pub(crate) selected: Option<i64>,
-    /// Whether the settings or the tray cover the terminals (see
-    /// `Intent::SetCovered`).
+    /// Whether the settings cover the terminals (see `Intent::SetCovered`).
     pub(crate) covered: bool,
+    /// Whether the window is closed to the tray (see `Intent::SetHidden`).
+    pub(crate) hidden: bool,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
     /// Why the database can't be used: it didn't open, or another Agents Hub
@@ -90,7 +92,7 @@ impl Runtime {
             active: None,
             focused: false,
             turn_tick: None,
-            colors: None,
+            colors: Colors::default(),
             window_closes: 0,
             checkouts: Vec::new(),
             installed: None,
@@ -98,11 +100,16 @@ impl Runtime {
             shells: HashMap::new(),
             selected: None,
             covered: false,
+            hidden: false,
             _lock: lock,
             broken: broken.map(SharedString::from),
             startup: Some((settings, imported)),
         };
         runtime.update_codex_watch();
+        runtime.catch_up(cx);
+        // Released once the window and the tray let go of it, as the app
+        // quits.
+        cx.on_release(|this, cx| this.shutdown(cx)).detach();
         runtime
     }
 
@@ -116,6 +123,11 @@ impl Runtime {
     /// The projects and chats, including the changes not saved yet.
     pub fn projects(&self) -> &[Project] {
         self.catalog.projects()
+    }
+
+    /// Whether the window is closed to the tray.
+    pub fn hidden(&self) -> bool {
+        self.hidden
     }
 
     /// Why the database can't be used, if it can't.
@@ -134,7 +146,7 @@ impl Runtime {
                 self.stop_chat(id, cx);
             }
             Intent::Suspend(id) => self.suspend(id, cx),
-            Intent::SetFocused(focused) => self.set_focused(focused, cx),
+            Intent::SetFocused(focused) => self.set_focused(focused && !self.hidden, cx),
             Intent::WindowClosed => self.window_closes += 1,
             Intent::NewChat {
                 project,
@@ -158,6 +170,7 @@ impl Runtime {
             Intent::SaveSettings(settings) => self.save_settings(settings, cx),
             Intent::ProjectSelected(project) => self.select_project(project, cx),
             Intent::SetCovered(covered) => self.set_covered(covered, cx),
+            Intent::SetHidden(hidden) => self.set_hidden(hidden, cx),
             Intent::ToggleShell => self.toggle_shell(cx),
             Intent::OpenInEditor { chat, editor } => self.open_in_editor(chat, editor, cx),
         }

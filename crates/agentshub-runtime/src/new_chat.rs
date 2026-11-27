@@ -11,7 +11,8 @@ use agentshub_core::store::Project;
 use agentshub_core::worktree::{self, Worktree};
 use gpui_kit::{AppContext as _, Context, SharedString};
 
-use crate::{Runtime, RuntimeEvent, take_and_remove};
+use crate::chats::take_and_remove;
+use crate::{Runtime, RuntimeEvent};
 
 /// When the user asked for a new chat, which what finishes later, git's
 /// answers and the checkout of the chat's worktree, is checked against.
@@ -531,8 +532,7 @@ impl Runtime {
 
     /// Stops the worktrees still being checked out, as when the app quits,
     /// and removes what they made.
-    #[doc(hidden)]
-    pub fn abandon_checkouts(&mut self) {
+    pub(crate) fn abandon_checkouts(&mut self) {
         worktree::abandon(std::mem::take(&mut self.checkouts));
     }
 }

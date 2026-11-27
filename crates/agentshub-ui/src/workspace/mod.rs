@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -36,10 +36,8 @@ use agentshub_app::settings::{
 use agentshub_core::agent::Agent;
 use agentshub_core::status::Status;
 use agentshub_core::store::{self, Change};
-#[cfg(target_os = "linux")]
-use agentshub_platform::scope;
-use agentshub_runtime::terminal::{self, Terminal};
-use agentshub_runtime::{Intent, Runtime, RuntimeEvent, take_and_remove};
+use agentshub_runtime::terminal::Terminal;
+use agentshub_runtime::{Intent, Runtime, RuntimeEvent};
 
 mod actions;
 mod catalog;
@@ -59,7 +57,6 @@ mod projects;
 mod render;
 mod search;
 mod shell;
-mod shutdown;
 mod startup;
 mod status;
 mod terminals;
@@ -108,8 +105,6 @@ pub struct Workspace {
     settings_shown: bool,
     /// The running chats' menu, while it is open.
     running_menu: Option<Entity<PopupMenu>>,
-    /// Whether the window is closed to the tray, so no terminal is shown.
-    hidden: bool,
     /// Holds the focus when nothing in the workspace does, so its key
     /// bindings still reach it.
     focus_handle: FocusHandle,

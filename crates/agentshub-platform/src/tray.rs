@@ -113,8 +113,8 @@ impl ksni::Tray for Icon {
 }
 
 struct Tray {
-    /// Dropped when the app quits, so the workspace it holds can be released
-    /// and shut its agents down.
+    /// Dropped when the app quits, so the runtime it holds can be released
+    /// and shut the agents down.
     hooks: Option<Rc<Hooks>>,
     /// The window's size and state when it last closed.
     bounds: Option<WindowBounds>,
@@ -140,7 +140,7 @@ pub fn init(hooks: Hooks, enabled: bool, cx: &mut App) {
         spawning: false,
         events,
     });
-    // The workspace shuts its agents down when it's released, which this
+    // The runtime shuts the agents down when it's released, which this
     // global would otherwise prevent.
     cx.on_app_quit(|cx| {
         cx.global_mut::<Tray>().hooks = None;

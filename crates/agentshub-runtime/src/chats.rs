@@ -136,8 +136,7 @@ impl ChatRuntime {
 }
 
 /// Takes the worktree out of `job` and removes it, unless it was taken.
-#[doc(hidden)]
-pub fn take_and_remove(
+pub(crate) fn take_and_remove(
     job: &Mutex<Option<(Worktree, PathBuf)>>,
 ) -> Option<Result<worktree::Removal>> {
     agentshub_core::lifecycle::take_and_remove(job, worktree::remove)
@@ -244,7 +243,7 @@ impl Runtime {
     /// Paints every chat's terminal in `colors`, and the ones that start from
     /// now on.
     pub fn set_colors(&mut self, colors: Colors, cx: &App) {
-        self.colors = Some(colors);
+        self.colors = colors;
         for chat in &self.chats {
             if let Some(terminal) = &chat.terminal {
                 terminal.terminal.read(cx).set_colors(colors);
@@ -480,9 +479,7 @@ impl Runtime {
         cx: &mut Context<Self>,
     ) -> bool {
         let report = uuid::Uuid::new_v4().to_string();
-        let colors = self
-            .colors
-            .expect("the window paints the terminals before any chat starts");
+        let colors = self.colors;
         let mut all_args = self.following.reports.args(agent);
         if let Some(session) = session {
             all_args.extend(agent.resume_args(&session.agent_id, &session.transcript_path));
@@ -1014,8 +1011,7 @@ impl Runtime {
     /// Records the session each open Codex chat's CLI is in, but those of
     /// `removed`, from the files its process keeps open, before the process
     /// goes. Gives the sessions recorded.
-    #[doc(hidden)]
-    pub fn record_codex_sessions(&self, removed: &HashSet<i64>, cx: &App) -> Vec<i64> {
+    pub(crate) fn record_codex_sessions(&self, removed: &HashSet<i64>, cx: &App) -> Vec<i64> {
         let mut recorded_sessions = Vec::new();
         for chat in self.chats.iter().filter(|chat| !removed.contains(&chat.id)) {
             if chat.agent == Agent::Codex
@@ -1037,8 +1033,7 @@ impl Runtime {
 
     /// Records the sessions each open chat's CLI reported last, but those of
     /// `removed`, and reads them along with the session the chat is in.
-    #[doc(hidden)]
-    pub fn import_chats(&mut self, removed: &HashSet<i64>) {
+    pub(crate) fn import_chats(&mut self, removed: &HashSet<i64>) {
         for chat in self.chats.iter().filter(|chat| !removed.contains(&chat.id)) {
             if let Err(err) = import_chat(
                 &self.store,

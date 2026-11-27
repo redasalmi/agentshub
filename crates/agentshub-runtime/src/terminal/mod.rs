@@ -40,8 +40,8 @@ mod run;
 mod scope;
 mod selection;
 
-pub(crate) use scope::adopt;
 pub use scope::{Scope, set as set_scope};
+pub(crate) use scope::{adopt, stop_all as stop_all_scopes, wait_stopped as wait_scopes_stopped};
 
 pub use frame::{Colors, Frame, GridSize, Run};
 use frame::{build_frame, set_colors};

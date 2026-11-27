@@ -80,10 +80,10 @@ fn main() {
             let opened = bootstrap::open().await;
             cx.update(|cx| {
                 let runtime = cx.new(|cx| Runtime::new(opened, cx));
-                let workspace = open_window(Contents::New(runtime), None, cx);
+                let workspace = open_window(runtime.clone(), Contents::New, None, cx);
                 alerts::init(&workspace, cx);
                 motion::watch_desktop_motion(cx, appearance::apply_motion);
-                tray::init(workspace, cx);
+                tray::init(runtime, workspace, cx);
                 cx.observe_global::<settings::Settings>(tray::sync).detach();
                 instance::serve(instance, cx, tray::show);
             });

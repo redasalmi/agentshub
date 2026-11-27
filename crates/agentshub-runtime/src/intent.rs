@@ -27,7 +27,8 @@ pub enum Intent {
     /// opening it again resumes.
     Suspend(i64),
     /// Whether the user can see the shown chat: the window has the focus,
-    /// and neither the settings nor the tray hide the chat.
+    /// and the settings don't hide the chat. While the window is closed to
+    /// the tray (see `SetHidden`), the user can't.
     SetFocused(bool),
     /// The window closed, which drops what it asked to open and was still
     /// waiting for: a chat whose last session is being read, or whose stopped
@@ -86,9 +87,13 @@ pub enum Intent {
     /// The sidebar selected another project, or none, whose shell the panel
     /// is for (see `Runtime::shell`).
     ProjectSelected(Option<i64>),
-    /// Whether the settings or the tray cover the terminals, so that none of
-    /// them builds frames.
+    /// Whether the settings cover the terminals, so that none of them builds
+    /// frames. The tray covers them too (see `SetHidden`).
     SetCovered(bool),
+    /// The window was closed to the tray, or opened from it. While it is
+    /// closed, no terminal builds frames, and the user can't see the shown
+    /// chat.
+    SetHidden(bool),
     /// Shows the shell the panel is for, starting it if it isn't running, or
     /// hides it if it shows and nothing covers it (see `Runtime::shell`).
     ToggleShell,

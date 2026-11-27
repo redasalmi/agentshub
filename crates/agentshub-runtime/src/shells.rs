@@ -71,10 +71,20 @@ impl Runtime {
         self.sync_terminals(cx);
     }
 
-    /// Follows whether the settings or the tray cover the terminals.
+    /// Follows whether the settings cover the terminals.
     pub(crate) fn set_covered(&mut self, covered: bool, cx: &App) {
         self.covered = covered;
         self.sync_terminals(cx);
+    }
+
+    /// Follows whether the window is closed to the tray, which covers the
+    /// terminals and the shown chat. Opened again, the chat is in sight if
+    /// the window has the focus and the settings don't cover it.
+    pub(crate) fn set_hidden(&mut self, hidden: bool, cx: &mut App) {
+        self.hidden = hidden;
+        self.sync_terminals(cx);
+        let seen = !hidden && cx.active_window().is_some() && !self.covered;
+        self.set_focused(seen, cx);
     }
 
     /// Lists `projects` as the store has them. Which shell shows depends on
@@ -92,7 +102,7 @@ impl Runtime {
     /// Only the shown chat's CLI and project shell build frames, and neither
     /// does while the settings or the tray cover them.
     pub(crate) fn sync_terminals(&self, cx: &App) {
-        let shown = !self.covered;
+        let shown = !self.covered && !self.hidden;
         let chat = self.active.filter(|_| shown);
         for each in self.open_chats() {
             if let Some(terminal) = self.terminal(each.id) {
@@ -124,6 +134,7 @@ impl Runtime {
         if let Some(shell) = self.shells.get_mut(&cwd)
             && shell.shown
             && !self.covered
+            && !self.hidden
         {
             shell.shown = false;
         } else if let Some(shell) = self.shells.get_mut(&cwd) {
@@ -131,9 +142,7 @@ impl Runtime {
             shell.shown = true;
         } else {
             let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-            let colors = self
-                .colors
-                .expect("the window paints the terminals before any shell starts");
+            let colors = self.colors;
             // Like a CLI, the shell gets a scope of its own, so what it
             // leaves running, `nohup` jobs included, stops once it exits.
             let pty = match Pty::spawn(&program, &[], &[], &cwd, colors) {
@@ -237,8 +246,7 @@ impl Runtime {
 
     /// Kills every shell, as the app quits, and gives the channels that close
     /// once each has been reaped.
-    #[doc(hidden)]
-    pub fn shut_down_shells(&self, cx: &App) -> Vec<Reaped> {
+    pub(crate) fn shut_down_shells(&self, cx: &App) -> Vec<Reaped> {
         self.shells
             .values()
             .map(|shell| shell.terminal.read(cx).shutdown())

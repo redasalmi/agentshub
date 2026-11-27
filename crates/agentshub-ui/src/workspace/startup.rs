@@ -111,10 +111,6 @@ impl Workspace {
             })
         };
 
-        // The workspace outlives its window (see `tray`), so it's released
-        // when the app quits.
-        cx.on_release(|this, cx| this.shutdown(cx)).detach();
-
         let theme = cx.observe_global::<Theme>(|this, cx| {
             let colors = appearance::terminal_colors(cx);
             this.runtime
@@ -154,7 +150,6 @@ impl Workspace {
             shell_views: HashMap::new(),
             settings_shown: false,
             running_menu: None,
-            hidden: false,
             focus_handle: cx.focus_handle(),
             chat_focus: cx.focus_handle(),
             sidebar_width: px(cx.global::<Settings>().sidebar_width),
@@ -167,29 +162,6 @@ impl Workspace {
         let projects = this.runtime.read(cx).projects().to_vec();
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx));
-        this.catch_up(cx);
         this
-    }
-
-    /// Reads what the CLIs wrote since the transcripts were last read, so
-    /// that the search finds it without each chat having to be opened first.
-    fn catch_up(&self, cx: &mut Context<Self>) {
-        let behind = self.runtime.read(cx).store().transcripts_behind();
-        cx.spawn(async move |this, cx| {
-            match behind.await {
-                Ok(sessions) => this
-                    .update(cx, |this, cx| {
-                        this.runtime
-                            .update(cx, |runtime, cx| runtime.read_sessions(sessions, false, cx))
-                            .detach()
-                    })
-                    .ok(),
-                Err(err) => {
-                    eprintln!("can't list the transcripts to read: {err}");
-                    None
-                }
-            };
-        })
-        .detach();
     }
 }
