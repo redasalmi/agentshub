@@ -8,6 +8,8 @@ use crate::actions::{
     RenameChat, ShowRunning, ShowShortcuts, ToggleHistory, ToggleSettings, ToggleShell,
 };
 
+/// The keyboard shortcuts, each beside its keys: the actions' as `window`
+/// binds them, then those no single action has.
 pub fn render_shortcuts(window: &Window, cx: &App) -> impl IntoElement {
     let bound: [(&'static str, Box<dyn Action>); 13] = [
         (

@@ -46,6 +46,7 @@ pub fn editor_icon(icon: Option<&ImageSource>) -> AnyElement {
     }
 }
 
+/// What picking an editor in `editor_menu` does.
 pub type SetEditor = Rc<dyn Fn(Editor, &mut Window, &mut App)>;
 
 /// The installed editors with their icons, `current` checked. Picking one
