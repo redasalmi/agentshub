@@ -63,6 +63,12 @@ pub fn restart_bounds(saved: &HashMap<String, types::Value>) -> Option<WindowBou
     }
 }
 
+/// Whether the database holds bounds a layout restart saved, readable or
+/// not, for startup to clear them.
+pub fn holds_restart_bounds(saved: &HashMap<String, types::Value>) -> bool {
+    matches!(saved.get(RESTART_BOUNDS), Some(types::Value::Text(text)) if !text.is_empty())
+}
+
 fn bounds_to_text(bounds: WindowBounds) -> String {
     let (state, bounds) = match bounds {
         WindowBounds::Windowed(bounds) => ("windowed", bounds),
@@ -364,7 +370,7 @@ mod tests {
     use super::{
         APPEARANCE, Appearance, CLOSE_TO_TRAY, EDITOR, LAYOUT, Layout, MOTION, Motion,
         RESTART_BOUNDS, SHELL_SHARE, SIDEBAR_WIDTH, Settings, ThemeFamily, bounds_from_text,
-        bounds_to_text, restart_bounds,
+        bounds_to_text, holds_restart_bounds, restart_bounds,
     };
     use agentshub_core::editors::Editor;
     use agentshub_core::store::{Db, Store};
@@ -408,6 +414,22 @@ mod tests {
         smol::block_on(value.save(key, &store)).unwrap();
         let settings = smol::block_on(store.settings()).unwrap();
         assert_eq!(restart_bounds(&settings), None);
+    }
+
+    #[test]
+    fn unreadable_bounds_are_cleared_too() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(!holds_restart_bounds(&db.settings().unwrap()));
+        db.set_text(RESTART_BOUNDS, "docked:1,2,3,4").unwrap();
+        let settings = db.settings().unwrap();
+        assert_eq!(restart_bounds(&settings), None);
+        assert!(holds_restart_bounds(&settings));
+        let store = Store::new(db).unwrap();
+        let (key, value) = Settings::clear_restart_bounds();
+        smol::block_on(value.save(key, &store)).unwrap();
+        assert!(!holds_restart_bounds(
+            &smol::block_on(store.settings()).unwrap()
+        ));
     }
 
     #[test]

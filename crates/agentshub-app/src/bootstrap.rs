@@ -17,6 +17,9 @@ pub struct Opened {
     pub settings: Settings,
     /// Where a layout restart left the window, for it to open there.
     pub restart_bounds: Option<WindowBounds>,
+    /// Whether the database holds bounds a layout restart saved, readable or
+    /// not, for startup to clear them.
+    pub holds_restart_bounds: bool,
     pub projects: Vec<Project>,
     /// Why the database can't be used, in which case an empty one in memory
     /// stands in for it.
@@ -43,10 +46,16 @@ pub async fn open() -> Opened {
         }
     })
     .await;
-    let (settings, restart_bounds) = store
+    let (settings, restart_bounds, holds_restart_bounds) = store
         .settings()
         .await
-        .map(|saved| (Settings::load(&saved), settings::restart_bounds(&saved)))
+        .map(|saved| {
+            (
+                Settings::load(&saved),
+                settings::restart_bounds(&saved),
+                settings::holds_restart_bounds(&saved),
+            )
+        })
         .inspect_err(|err| eprintln!("can't read the settings: {err:#}"))
         .unwrap_or_default();
     let projects = store
@@ -60,6 +69,7 @@ pub async fn open() -> Opened {
         imported,
         settings,
         restart_bounds,
+        holds_restart_bounds,
         projects,
         broken,
     }
