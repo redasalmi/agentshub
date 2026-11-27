@@ -21,6 +21,9 @@ use agentshub_ui_kit::widgets::key_number;
 use super::{TriageList, emit};
 
 const CARD_RADIUS: Pixels = px(9.);
+/// The widest a project's name gets on a card; the branch beside it gives
+/// way first.
+const MAX_PROJECT_WIDTH: Pixels = px(160.);
 
 /// What a card says under its title: what its agent needs or does.
 pub(super) fn card_text(agent: Agent, running: Option<Option<Status>>) -> String {
@@ -154,7 +157,13 @@ impl TriageList {
                             .text_color(theme.muted_foreground)
                             .when(self.filter.is_none(), |this| {
                                 this.child(swatch(project.id, cx))
-                                    .child(div().min_w_0().truncate().child(project.name.clone()))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .max_w(MAX_PROJECT_WIDTH)
+                                            .truncate()
+                                            .child(project.name.clone()),
+                                    )
                                     .child(separator())
                             })
                             .child(div().flex_none().child(chat.agent.label()))
@@ -163,6 +172,7 @@ impl TriageList {
                                     .child(Icon::new(ExtraIcon::GitBranch).xsmall())
                                     .child(
                                         div()
+                                            .flex_1()
                                             .min_w_0()
                                             .truncate()
                                             .font_family(theme.mono_font_family.clone())
