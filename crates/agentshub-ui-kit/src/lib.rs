@@ -7,6 +7,7 @@ pub mod editor;
 pub mod history;
 pub mod palette;
 pub mod settings;
+pub mod shortcuts;
 pub mod status;
 pub mod terminal_view;
 pub mod theme;

@@ -3,8 +3,8 @@
 use crate::chat::{ChatIntent, ChatSheet};
 use agentshub_ui_kit::settings::SHORTCUTS_WORK_ANYWHERE;
 
-use super::render::render_shortcuts;
 use super::*;
+use agentshub_ui_kit::shortcuts::render_shortcuts;
 
 impl Workspace {
     pub(super) fn render_chat(&self, id: i64, window: &Window, cx: &Context<Self>) -> AnyElement {
