@@ -39,6 +39,8 @@ pub(crate) struct TriageList {
     running: HashMap<i64, Option<Status>>,
     /// The chats with something the user hasn't seen.
     unseen: HashSet<i64>,
+    /// The open chats whose agent exited without the user closing them.
+    exited: HashSet<i64>,
     /// The chat that is shown.
     active: Option<i64>,
     /// The project the runtime has selected, which "All projects" leaves as
@@ -70,6 +72,7 @@ impl TriageList {
             projects: Vec::new(),
             running: HashMap::new(),
             unseen: HashSet::new(),
+            exited: HashSet::new(),
             active: None,
             selected: None,
             filter: None,
@@ -87,6 +90,7 @@ impl TriageList {
         projects: Vec<Project>,
         running: HashMap<i64, Option<Status>>,
         unseen: HashSet<i64>,
+        exited: HashSet<i64>,
         active: Option<i64>,
         cx: &mut Context<Self>,
     ) {
@@ -99,6 +103,7 @@ impl TriageList {
         self.projects = projects;
         self.running = running;
         self.unseen = unseen;
+        self.exited = exited;
         self.active = active;
         if !self.filter.is_some_and(|id| self.is_listed(id)) {
             self.filter = None;
@@ -146,7 +151,13 @@ impl TriageList {
         self.listed()
             .flat_map(|project| &project.chats)
             .find(|each| each.id == chat)
-            .map(|each| group_of(Tone::of(self.running(chat)), each.archived_at.is_some()))
+            .map(|each| {
+                group_of(
+                    Tone::of(self.running(chat)),
+                    self.exited.contains(&chat),
+                    each.archived_at.is_some(),
+                )
+            })
     }
 
     /// Selects project `project` in the runtime, unless it is.
@@ -235,6 +246,7 @@ impl TriageList {
                 let row = (
                     chat.id,
                     Tone::of(self.running(chat.id)),
+                    self.exited.contains(&chat.id),
                     chat.pinned,
                     chat.archived_at.is_some(),
                     project.id,

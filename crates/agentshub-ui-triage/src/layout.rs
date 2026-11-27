@@ -312,9 +312,14 @@ impl LayoutView for TriageLayout {
             .filter(|chat| chat.unseen)
             .map(|chat| chat.id)
             .collect();
+        let exited = runtime
+            .open_chats()
+            .filter(|chat| !chat.running && chat.message.is_some())
+            .map(|chat| chat.id)
+            .collect();
         let active = runtime.active();
         self.list.update(cx, |list, cx| {
-            list.set_chats(projects, running, unseen, active, cx)
+            list.set_chats(projects, running, unseen, exited, active, cx)
         });
     }
 
