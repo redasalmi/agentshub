@@ -190,6 +190,13 @@ impl Layout {
         }
     }
 
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic",
+            Self::Triage => "Triage",
+        }
+    }
+
     fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|layout| layout.key() == key)
     }
@@ -226,6 +233,8 @@ pub struct Settings {
     pub editor: Option<Editor>,
     /// The layout the window opened in.
     pub layout: Layout,
+    /// The layout the app opens in next, saved by the setting.
+    pub next_layout: Layout,
 }
 
 impl Default for Settings {
@@ -245,6 +254,7 @@ impl Default for Settings {
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             editor: None,
             layout: Layout::default(),
+            next_layout: Layout::default(),
         }
     }
 }
@@ -261,6 +271,9 @@ impl Settings {
                 .ok()
         }
         let defaults = Self::default();
+        let layout = read::<String>(saved, LAYOUT)
+            .and_then(|key| Layout::from_key(&key))
+            .unwrap_or(defaults.layout);
         Self {
             close_to_tray: read::<bool>(saved, CLOSE_TO_TRAY).unwrap_or(defaults.close_to_tray),
             appearance: read::<String>(saved, APPEARANCE)
@@ -292,9 +305,8 @@ impl Settings {
                 .filter(|size| (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(size))
                 .unwrap_or(defaults.terminal_font_size),
             editor: read::<String>(saved, EDITOR).and_then(|key| Editor::from_key(&key)),
-            layout: read::<String>(saved, LAYOUT)
-                .and_then(|key| Layout::from_key(&key))
-                .unwrap_or(defaults.layout),
+            layout,
+            next_layout: layout,
         }
     }
 }
@@ -361,6 +373,22 @@ mod tests {
             Settings::load(&db.settings().unwrap()).layout,
             Layout::Classic
         );
+    }
+
+    #[test]
+    fn the_next_layout_starts_as_the_saved_one() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_text(LAYOUT, "triage").unwrap();
+        let settings = Settings::load(&db.settings().unwrap());
+        assert_eq!(settings.layout, Layout::Triage);
+        assert_eq!(settings.next_layout, Layout::Triage);
+    }
+
+    #[test]
+    fn a_layout_reads_back_as_saved() {
+        for layout in Layout::ALL {
+            assert_eq!(Layout::from_key(layout.key()), Some(layout));
+        }
     }
 
     #[test]
