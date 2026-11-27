@@ -16,10 +16,12 @@ use crate::sidebar::{
 };
 use agentshub_app::settings::{DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, Settings};
 use agentshub_runtime::{Intent, Runtime};
-use agentshub_ui_kit::layout::{Body, Held, LayoutView, NavEvent, Parts, ShownChat};
+use agentshub_ui_kit::layout::{Body, Commands, Held, LayoutView, NavEvent, Parts, ShownChat};
 use agentshub_ui_kit::palette::{Entry, Lead, Pick};
 use agentshub_ui_kit::status::{Filter, Tone};
 use agentshub_ui_kit::workspace::Workspace;
+
+actions!(workspace, [ToggleProjectNames]);
 
 /// The Classic layout, which lists the selected project's chats in the
 /// sidebar.
@@ -78,13 +80,19 @@ impl ClassicLayout {
         let nav = cx.subscribe_in(&sidebar, window, |this, _, event: &NavEvent, window, cx| {
             this.navigate(event, window, cx)
         });
-        let own = cx.subscribe_in(
-            &sidebar,
-            window,
-            |this, _, event: &SidebarEvent, window, cx| match event {
-                SidebarEvent::ShowProjectNames(show) => this.show_project_names(*show, window, cx),
-            },
-        );
+        let own = {
+            let runtime = runtime.downgrade();
+            cx.subscribe_in(
+                &sidebar,
+                window,
+                move |_, sidebar, event: &SidebarEvent, _, cx| match event {
+                    SidebarEvent::ShowProjectNames(show) => {
+                        show_project_names(*show, &runtime, sidebar, cx);
+                        cx.notify();
+                    }
+                },
+            )
+        };
         Self {
             runtime,
             sidebar,
@@ -282,6 +290,22 @@ fn resize_rail(
     workspace.update(cx, |_, cx| cx.notify()).ok();
 }
 
+/// Names the projects in the rail, or shows only their marks, and saves it.
+fn show_project_names(
+    show: bool,
+    runtime: &WeakEntity<Runtime>,
+    sidebar: &Entity<Sidebar>,
+    cx: &mut App,
+) {
+    let saved = Settings::set_project_names(show, cx);
+    runtime
+        .update(cx, |runtime, cx| {
+            runtime.apply(Intent::SaveSettings(vec![saved]), cx)
+        })
+        .ok();
+    sidebar.update(cx, |_, cx| cx.notify());
+}
+
 fn save_rail(runtime: &WeakEntity<Runtime>, cx: &mut App) {
     let settings = *cx.global::<Settings>();
     let width = Settings::set_rail_width(settings.rail_width, cx);
@@ -337,9 +361,9 @@ impl LayoutView for ClassicLayout {
             .update(cx, |sidebar, cx| sidebar.set_held(held, cx));
     }
 
-    fn commands(&self, cx: &App) -> Vec<Entry> {
+    fn commands(&self, cx: &App) -> Commands {
         let filter = self.sidebar.read(cx).filter();
-        Filter::ALL
+        let find = Filter::ALL
             .into_iter()
             .filter(|each| *each != filter)
             .map(|each| {
@@ -354,7 +378,25 @@ impl LayoutView for ClassicLayout {
                     Pick::Filter(each),
                 )
             })
-            .collect()
+            .collect();
+        let names = cx.global::<Settings>().project_names;
+        let look = vec![Entry::new(
+            if names {
+                "Hide the projects' names"
+            } else {
+                "Show the projects' names"
+            },
+            Lead::Icon(
+                if names {
+                    IconName::PanelLeftClose
+                } else {
+                    IconName::PanelLeftOpen
+                }
+                .into(),
+            ),
+            Pick::Run(Box::new(ToggleProjectNames)),
+        )];
+        Commands { find, look }
     }
 
     fn pick(&self, pick: Pick, cx: &mut App) {
@@ -362,6 +404,15 @@ impl LayoutView for ClassicLayout {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_filter(filter, cx));
         }
+    }
+
+    fn handle_action(&self, action: &dyn Action, _: &mut Window, cx: &mut App) -> bool {
+        if !action.as_any().is::<ToggleProjectNames>() {
+            return false;
+        }
+        let show = !cx.global::<Settings>().project_names;
+        show_project_names(show, &self.runtime.downgrade(), &self.sidebar, cx);
+        true
     }
 
     fn render(&self, parts: Parts, window: &mut Window, cx: &mut App) -> AnyElement {

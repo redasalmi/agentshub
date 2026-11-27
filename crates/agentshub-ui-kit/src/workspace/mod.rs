@@ -16,7 +16,7 @@ use crate::actions::{
     AddProject, ArchiveChat, ArchiveProject, CloseAllChats, CloseIdleChats, DeleteChat,
     ExportDatabase, ImportDatabase, NewChat, NextNeedingYou, OpenChatAt, OpenInEditor, OpenSearch,
     RenameChat, SelectProjectAt, ShowArchived, ShowRunning, ShowShortcuts, ToggleHistory,
-    TogglePin, ToggleProjectNames, ToggleSettings, ToggleShell, ToggleTheme, UseTheme,
+    TogglePin, ToggleSettings, ToggleShell, ToggleTheme, UseTheme,
 };
 use crate::appearance;
 use crate::history::History;

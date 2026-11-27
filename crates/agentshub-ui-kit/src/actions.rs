@@ -15,7 +15,6 @@ actions!(
         ToggleTheme,
         ExportDatabase,
         ImportDatabase,
-        ToggleProjectNames,
     ]
 );
 

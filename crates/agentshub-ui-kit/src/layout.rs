@@ -40,12 +40,26 @@ pub trait LayoutView {
     /// hides them.
     fn hold_numbers(&self, held: Option<Held>, cx: &mut App);
     /// The search box's commands that are the layout's own.
-    fn commands(&self, cx: &App) -> Vec<Entry>;
+    fn commands(&self, cx: &App) -> Commands;
     /// Does what `pick`, one of `commands`' picks the workspace doesn't
     /// run itself, says.
     fn pick(&self, pick: Pick, cx: &mut App);
+    /// Runs `action`, which a search box command dispatches, if it is one
+    /// of the layout's own, and says whether it was. The workspace draws
+    /// itself again after one that was.
+    fn handle_action(&self, action: &dyn Action, window: &mut Window, cx: &mut App) -> bool;
     /// The layout, around `parts`.
     fn render(&self, parts: Parts, window: &mut Window, cx: &mut App) -> AnyElement;
+}
+
+/// The search box's commands that are a layout's own, by where they show
+/// among the workspace's.
+#[derive(Default)]
+pub struct Commands {
+    /// Among the ones that find chats, before the running chats'.
+    pub find: Vec<Entry>,
+    /// Among the ones that change how the app looks, before the theme's.
+    pub look: Vec<Entry>,
 }
 
 /// Which shortcut numbers the layout shows, while the modifier that opens

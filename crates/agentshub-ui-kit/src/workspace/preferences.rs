@@ -32,25 +32,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Saves the family of themes and puts the theme in it.
-    /// Names the projects in the sidebar's rail, or shows only their marks.
-    pub fn show_project_names(&mut self, show: bool, _: &mut Window, cx: &mut Context<Self>) {
-        let saved = Settings::set_project_names(show, cx);
-        self.save_setting(saved, cx);
-        self.layout.refresh(cx);
-        cx.notify();
-    }
-
-    pub(super) fn toggle_project_names(
-        &mut self,
-        _: &ToggleProjectNames,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let show = !cx.global::<Settings>().project_names;
-        self.show_project_names(show, window, cx);
-    }
-
     /// Shows the layout's chat numbers while Alt alone is held, and its
     /// project numbers while Ctrl alone is.
     pub(super) fn modifiers_changed(&mut self, modifiers: Modifiers, cx: &mut Context<Self>) {
@@ -93,6 +74,7 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Saves the family of themes and puts the theme in it.
     pub(super) fn set_theme(
         &mut self,
         value: ThemeFamily,

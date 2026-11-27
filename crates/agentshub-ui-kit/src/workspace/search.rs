@@ -10,8 +10,8 @@ use gpui_kit::*;
 use crate::actions::{
     AddProject, ArchiveChat, ArchiveProject, CloseAllChats, CloseIdleChats, DeleteChat,
     ExportDatabase, ImportDatabase, NextNeedingYou, OpenInEditor, RenameChat, ShowArchived,
-    ShowRunning, ShowShortcuts, ToggleHistory, TogglePin, ToggleProjectNames, ToggleSettings,
-    ToggleShell, ToggleTheme, UseTheme,
+    ShowRunning, ShowShortcuts, ToggleHistory, TogglePin, ToggleSettings, ToggleShell, ToggleTheme,
+    UseTheme,
 };
 use crate::palette::{self, Entry, Lead, Pick};
 use crate::terminal_view;
@@ -158,7 +158,8 @@ impl Workspace {
                 .keywords(["stop"]),
             );
         }
-        commands.extend(self.layout.commands(cx));
+        let own = self.layout.commands(cx);
+        commands.extend(own.find);
         commands.push(
             Entry::new(
                 "Show the running chats of every project",
@@ -180,19 +181,7 @@ impl Workspace {
             IconName::FolderOpen,
             Box::new(AddProject),
         ));
-        commands.push(run(
-            if cx.global::<Settings>().project_names {
-                "Hide the projects' names"
-            } else {
-                "Show the projects' names"
-            },
-            if cx.global::<Settings>().project_names {
-                IconName::PanelLeftClose
-            } else {
-                IconName::PanelLeftOpen
-            },
-            Box::new(ToggleProjectNames),
-        ));
+        commands.extend(own.look);
         commands.push(run(
             if cx.theme().is_dark() {
                 "Use the light theme"
@@ -348,7 +337,11 @@ impl Workspace {
                 if !self.focus_handle.contains_focused(window, cx) {
                     self.focus_chat(window, cx);
                 }
-                window.dispatch_action(action, cx);
+                if self.layout.handle_action(action.as_ref(), window, cx) {
+                    cx.notify();
+                } else {
+                    window.dispatch_action(action, cx);
+                }
             }
         }
     }

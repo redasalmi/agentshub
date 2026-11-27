@@ -57,7 +57,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_all_chats))
             .on_action(cx.listener(Self::close_idle_chats))
             .on_action(cx.listener(Self::toggle_theme))
-            .on_action(cx.listener(Self::toggle_project_names))
             .on_action(cx.listener(Self::use_theme))
             .on_action(cx.listener(Self::export_action))
             .on_action(cx.listener(Self::import_action))
