@@ -31,54 +31,21 @@ impl Workspace {
 
         cx.set_global(settings);
         appearance::apply_motion(cx);
-        let sidebar = cx.new(Sidebar::new);
-        let sidebar_events =
-            cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| match event {
-                SidebarEvent::AddProject => this.add_project(window, cx),
-                SidebarEvent::DropPaths(paths) => this.add_dropped(paths, window, cx),
-                SidebarEvent::RemoveProject(id) => this.confirm_remove_project(*id, window, cx),
-                SidebarEvent::ArchiveProject(id) => this.confirm_archive_project(*id, window, cx),
-                SidebarEvent::NewChat(project_id) => {
-                    this.open_new_chat_dialog(*project_id, window, cx)
-                }
-                SidebarEvent::OpenChat(id) => this.open_chat(*id, window, cx),
-                SidebarEvent::RenameChat(id, title) => {
-                    this.open_rename_dialog(*id, title.clone(), window, cx)
-                }
-                SidebarEvent::PinChat(id, pinned) => this.change(
-                    Change::Pin {
-                        chat: *id,
-                        pinned: *pinned,
-                    },
-                    cx,
-                ),
-                SidebarEvent::MoveChat(id, to) => {
-                    this.change(Change::MoveChat { chat: *id, to: *to }, cx)
-                }
-                SidebarEvent::MoveProject(id, to) => this.change(
-                    Change::MoveProject {
-                        project: *id,
-                        to: *to,
-                    },
-                    cx,
-                ),
-                SidebarEvent::CloseChat(id) => this.confirm_close_chat(*id, window, cx),
-                SidebarEvent::DeleteChat(id) => this.confirm_delete_chat(*id, window, cx),
-                SidebarEvent::ArchiveChat(id) => this.confirm_archive_chat(*id, window, cx),
-                SidebarEvent::RestoreChat(id) => this.change(Change::RestoreChat(*id), cx),
-                SidebarEvent::OpenSettings => this.show_settings(true, window, cx),
-                SidebarEvent::ShowProjectNames(show) => this.show_project_names(*show, window, cx),
-                SidebarEvent::Selected => this.project_selected(window, cx),
-            });
+        let layout: Box<dyn LayoutView> = Box::new(ClassicLayout::new(
+            runtime.clone(),
+            cx.weak_entity(),
+            window,
+            cx,
+        ));
 
         let runtime_events = cx.subscribe(&runtime, |this, _, event, cx| match event {
             RuntimeEvent::CatalogChanged => {
-                this.sync_catalog(cx);
+                this.layout.refresh(cx);
                 this.refresh(cx);
             }
             RuntimeEvent::HistoryChanged { sessions } => this.refresh_after(sessions, cx),
             RuntimeEvent::Listed => {
-                this.sync_catalog(cx);
+                this.layout.refresh(cx);
                 // Which shell shows depends on the projects' chats.
                 cx.notify();
             }
@@ -86,7 +53,7 @@ impl Workspace {
             RuntimeEvent::ChatStarted(id) => this.chat_started(*id, cx),
             RuntimeEvent::ChatExited(id) => this.chat_exited(*id, cx),
             RuntimeEvent::ChatEnded(id) => this.chat_ended(*id, cx),
-            RuntimeEvent::StatusChanged(_) => this.sync_sidebar(cx),
+            RuntimeEvent::StatusChanged(_) => this.layout.refresh(cx),
             RuntimeEvent::ActiveChanged(active) => this.active_changed(*active, cx),
             RuntimeEvent::TurnTick => cx.notify(),
             RuntimeEvent::ClosingAfterLookup(ids) => this.close_after_lookup(ids.clone(), cx),
@@ -95,9 +62,7 @@ impl Workspace {
                 this.copying_project(id.clone(), project, cx)
             }
             RuntimeEvent::CopiedProject(id) => this.copied_project(id.clone(), cx),
-            RuntimeEvent::SelectProject(id) => this
-                .sidebar
-                .update(cx, |sidebar, cx| sidebar.select(*id, cx)),
+            RuntimeEvent::SelectProject(id) => this.layout.select_project(*id, cx),
             RuntimeEvent::Undoable { message, undo } => {
                 this.offer_undo(message.clone(), undo.clone(), cx)
             }
@@ -140,13 +105,12 @@ impl Workspace {
         };
 
         let this = Self {
-            sidebar,
+            layout,
             settings_view,
             runtime,
             _runtime_events: runtime_events,
             _window_closed: window_closed,
             panes: HashMap::new(),
-            _sidebar_events: sidebar_events,
             reveal_numbers: None,
             _new_chat_lookup: None,
             palette_start: None,
@@ -157,16 +121,13 @@ impl Workspace {
             running_menu: None,
             focus_handle: cx.focus_handle(),
             chat_focus: cx.focus_handle(),
-            sidebar_width: px(cx.global::<Settings>().sidebar_width),
             importing: false,
         };
         let colors = appearance::terminal_colors(cx);
         this.runtime
             .update(cx, |runtime, cx| runtime.set_colors(colors, cx));
         this.set_focused(window.is_window_active(), cx);
-        let projects = this.runtime.read(cx).projects().to_vec();
-        this.sidebar
-            .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx));
+        this.layout.refresh(cx);
         this
     }
 }

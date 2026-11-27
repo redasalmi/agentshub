@@ -58,7 +58,7 @@ impl Sidebar {
                                     .icon(IconName::Ellipsis)
                                     .tooltip("More")
                                     .dropdown_menu(move |menu, _, _| {
-                                        let emit = |event: SidebarEvent| {
+                                        let emit = |event: NavEvent| {
                                             let sidebar = sidebar.clone();
                                             move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                                                 sidebar.update(cx, |_, cx| cx.emit(event.clone()))
@@ -67,13 +67,13 @@ impl Sidebar {
                                         menu.item(
                                             PopupMenuItem::new("Archive")
                                                 .icon(ExtraIcon::Archive)
-                                                .on_click(emit(SidebarEvent::ArchiveProject(id))),
+                                                .on_click(emit(NavEvent::ArchiveProject(id))),
                                         )
                                         .separator()
                                         .item(
                                             PopupMenuItem::new("Remove")
                                                 .icon(IconName::Delete)
-                                                .on_click(emit(SidebarEvent::RemoveProject(id))),
+                                                .on_click(emit(NavEvent::RemoveProject(id))),
                                         )
                                     }),
                             )
@@ -84,7 +84,7 @@ impl Sidebar {
                                     .icon(IconName::Plus)
                                     .tooltip_with_action("Start an agent here", &NewChat, None)
                                     .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(SidebarEvent::NewChat(id))
+                                        cx.emit(NavEvent::NewChat(id))
                                     })),
                             ),
                     )
@@ -253,7 +253,7 @@ impl Sidebar {
                             .tooltip("Bring this chat back")
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
-                                cx.emit(SidebarEvent::RestoreChat(id));
+                                cx.emit(NavEvent::RestoreChat(id));
                             })),
                     )
                     .child(
@@ -264,28 +264,28 @@ impl Sidebar {
                             .tooltip("Delete this chat")
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
-                                cx.emit(SidebarEvent::DeleteChat(id));
+                                cx.emit(NavEvent::DeleteChat(id));
                             })),
                     ),
             )
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::OpenChat(id))))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(NavEvent::OpenChat(id))))
             .context_menu(move |menu, _, _| {
                 let emit = |event| emit(&sidebar, event);
                 menu.item(
                     PopupMenuItem::new("Open")
                         .icon(IconName::ExternalLink)
-                        .on_click(emit(SidebarEvent::OpenChat(id))),
+                        .on_click(emit(NavEvent::OpenChat(id))),
                 )
                 .item(
                     PopupMenuItem::new("Bring back")
                         .icon(ExtraIcon::ArchiveRestore)
-                        .on_click(emit(SidebarEvent::RestoreChat(id))),
+                        .on_click(emit(NavEvent::RestoreChat(id))),
                 )
                 .separator()
                 .item(
                     PopupMenuItem::new("Delete")
                         .icon(IconName::Delete)
-                        .on_click(emit(SidebarEvent::DeleteChat(id))),
+                        .on_click(emit(NavEvent::DeleteChat(id))),
                 )
             })
     }
@@ -498,7 +498,7 @@ impl Sidebar {
                             })
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
-                                cx.emit(SidebarEvent::PinChat(id, !pinned));
+                                cx.emit(NavEvent::PinChat(id, !pinned));
                             })),
                     )
                     .child(
@@ -509,7 +509,7 @@ impl Sidebar {
                             .tooltip("Rename this chat")
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
-                                cx.emit(SidebarEvent::RenameChat(id, current_title.clone()));
+                                cx.emit(NavEvent::RenameChat(id, current_title.clone()));
                             })),
                     )
                     .when(open, |this| {
@@ -521,7 +521,7 @@ impl Sidebar {
                                 .tooltip("Close this chat")
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.stop_propagation();
-                                    cx.emit(SidebarEvent::CloseChat(id));
+                                    cx.emit(NavEvent::CloseChat(id));
                                 })),
                         )
                     })
@@ -533,7 +533,7 @@ impl Sidebar {
                             .tooltip("Archive this chat")
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
-                                cx.emit(SidebarEvent::ArchiveChat(id));
+                                cx.emit(NavEvent::ArchiveChat(id));
                             })),
                     ),
             )
@@ -549,21 +549,21 @@ impl Sidebar {
             })
             .on_drop(cx.listener(move |_, dragged: &DraggedChat, _, cx| {
                 if dragged.group == order_group && dragged.id != id {
-                    cx.emit(SidebarEvent::MoveChat(dragged.id, id));
+                    cx.emit(NavEvent::MoveChat(dragged.id, id));
                 }
             }))
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::OpenChat(id))))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(NavEvent::OpenChat(id))))
             .context_menu(move |menu, _, _| {
                 let emit = |event| emit(&sidebar, event);
                 menu.item(
                     PopupMenuItem::new("Open")
                         .icon(IconName::ExternalLink)
-                        .on_click(emit(SidebarEvent::OpenChat(id))),
+                        .on_click(emit(NavEvent::OpenChat(id))),
                 )
                 .item(
                     PopupMenuItem::new("Rename…")
                         .icon(ExtraIcon::Pencil)
-                        .on_click(emit(SidebarEvent::RenameChat(id, menu_title.clone()))),
+                        .on_click(emit(NavEvent::RenameChat(id, menu_title.clone()))),
                 )
                 .item(
                     PopupMenuItem::new(if pinned { "Unpin" } else { "Pin to the top" })
@@ -572,25 +572,25 @@ impl Sidebar {
                         } else {
                             ExtraIcon::Pin
                         })
-                        .on_click(emit(SidebarEvent::PinChat(id, !pinned))),
+                        .on_click(emit(NavEvent::PinChat(id, !pinned))),
                 )
                 .when(open, |menu| {
                     menu.item(
                         PopupMenuItem::new("Close")
                             .icon(IconName::Close)
-                            .on_click(emit(SidebarEvent::CloseChat(id))),
+                            .on_click(emit(NavEvent::CloseChat(id))),
                     )
                 })
                 .separator()
                 .item(
                     PopupMenuItem::new("Archive")
                         .icon(ExtraIcon::Archive)
-                        .on_click(emit(SidebarEvent::ArchiveChat(id))),
+                        .on_click(emit(NavEvent::ArchiveChat(id))),
                 )
                 .item(
                     PopupMenuItem::new("Delete")
                         .icon(IconName::Delete)
-                        .on_click(emit(SidebarEvent::DeleteChat(id))),
+                        .on_click(emit(NavEvent::DeleteChat(id))),
                 )
             })
     }

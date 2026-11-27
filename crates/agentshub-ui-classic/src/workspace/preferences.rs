@@ -34,7 +34,7 @@ impl Workspace {
 
     /// Saves the family of themes and puts the theme in it.
     /// Names the projects in the sidebar's rail, or shows only their marks.
-    pub(super) fn show_project_names(
+    pub(crate) fn show_project_names(
         &mut self,
         show: bool,
         _: &mut Window,
@@ -42,7 +42,7 @@ impl Workspace {
     ) {
         let saved = Settings::set_project_names(show, cx);
         self.save_setting(saved, cx);
-        self.sidebar.update(cx, |_, cx| cx.notify());
+        self.layout.refresh(cx);
         cx.notify();
     }
 
@@ -56,7 +56,7 @@ impl Workspace {
         self.show_project_names(show, window, cx);
     }
 
-    /// Shows the sidebar's chat numbers while Alt alone is held, and its
+    /// Shows the layout's chat numbers while Alt alone is held, and its
     /// project numbers while Ctrl alone is.
     pub(super) fn modifiers_changed(&mut self, modifiers: Modifiers, cx: &mut Context<Self>) {
         let held = if modifiers == Modifiers::alt() {
@@ -70,21 +70,17 @@ impl Workspace {
         if let Some(held) = held {
             self.reveal_numbers = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(REVEAL_NUMBERS_AFTER).await;
-                this.update(cx, |this, cx| {
-                    this.sidebar
-                        .update(cx, |sidebar, cx| sidebar.set_held(Some(held), cx))
-                })
-                .ok();
+                this.update(cx, |this, cx| this.layout.hold_numbers(Some(held), cx))
+                    .ok();
             }));
         }
     }
 
-    /// Hides the sidebar's numbers, as when the window loses the keyboard
+    /// Hides the layout's numbers, as when the window loses the keyboard
     /// while a modifier is down and never hears it let go.
     pub fn release_modifiers(&mut self, cx: &mut Context<Self>) {
         self.reveal_numbers = None;
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.set_held(None, cx));
+        self.layout.hold_numbers(None, cx);
     }
 
     /// Makes the terminals' text `by` points bigger, or smaller when negative.

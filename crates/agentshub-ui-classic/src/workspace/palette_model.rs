@@ -31,7 +31,7 @@ impl Workspace {
         reason = "one walk over the projects fills every list"
     )]
     pub(super) fn palette_lists(&self, cx: &App) -> PaletteLists {
-        let sidebar = self.sidebar.read(cx);
+        let running = agentshub_ui_kit::layout::running(self.runtime.read(cx));
         let installed = self
             .runtime
             .read(cx)
@@ -62,7 +62,7 @@ impl Workspace {
                     ));
                     continue;
                 }
-                let tone = Tone::of(sidebar.running(chat.id));
+                let tone = Tone::of(running.get(&chat.id).copied());
                 let doing = match tone {
                     Tone::Saved => sidebar::age(chat.updated_at),
                     tone => tone.label().to_string(),
@@ -88,8 +88,14 @@ impl Workspace {
         chats.sort_by_key(|(needs_you, _)| !needs_you);
         let chats = chats.into_iter().map(|(_, entry)| entry).collect();
 
-        let selected = sidebar.selected().map(|project| project.id);
-        let start_heading = match sidebar.selected() {
+        let selected = self.layout.selected_project(cx);
+        let start_heading = match selected.and_then(|id| {
+            self.runtime
+                .read(cx)
+                .projects()
+                .iter()
+                .find(|project| project.id == id)
+        }) {
             Some(project) => format!("Start an agent in {}", project.name),
             None => "Start an agent".into(),
         };

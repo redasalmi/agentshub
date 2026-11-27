@@ -23,6 +23,7 @@ use agentshub_ui_kit::actions::{
 };
 use agentshub_ui_kit::chat_body::{ChatBody, ChatIntent};
 use agentshub_ui_kit::editor::{EditorChoice, SetEditor, editor_icon, editor_menu};
+use agentshub_ui_kit::layout::NavEvent;
 use agentshub_ui_kit::status::{Tone, badge, dot, live_dot};
 use agentshub_ui_kit::theme as appearance;
 use agentshub_ui_kit::widgets::path_line;
@@ -314,15 +315,7 @@ fn key_hint(keys: SharedString, label: &'static str, cx: &App) -> impl IntoEleme
         .child(label)
 }
 
-/// What the toolbar asks the workspace to do.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ToolbarIntent {
-    OpenPalette,
-    RunningMenu(bool),
-    CloseWindow,
-}
-
-type ToolbarOn = Rc<dyn Fn(ToolbarIntent, &mut Window, &mut App)>;
+type ToolbarOn = Rc<dyn Fn(NavEvent, &mut Window, &mut App)>;
 
 /// The search, the running chats and the window's controls.
 pub struct Toolbar {
@@ -385,7 +378,7 @@ impl Toolbar {
                     ),
             )
             .on_click(move |_, window, cx| {
-                (search_on)(ToolbarIntent::OpenPalette, window, cx);
+                (search_on)(NavEvent::OpenSearch, window, cx);
             });
 
         let running = Button::new("running")
@@ -405,7 +398,7 @@ impl Toolbar {
             .bg(transparent_black())
             .border_b_0()
             .on_close_window(move |_, window, cx| {
-                (close_on)(ToolbarIntent::CloseWindow, window, cx);
+                (close_on)(NavEvent::CloseWindow, window, cx);
             })
             .child(
                 h_flex()
@@ -426,7 +419,7 @@ impl Toolbar {
                                     this.track_focus(&menu.focus_handle(cx))
                                 })
                                 .on_open_change(move |open, window, cx| {
-                                    (menu_on)(ToolbarIntent::RunningMenu(*open), window, cx);
+                                    (menu_on)(NavEvent::RunningMenu(*open), window, cx);
                                 })
                                 .trigger(running)
                                 .content(move |_, _, _| match &menu {

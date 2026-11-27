@@ -11,6 +11,7 @@ use window::Contents;
 use workspace::Workspace;
 
 pub mod chat;
+pub mod layout;
 pub mod sidebar;
 mod window;
 pub mod workspace;

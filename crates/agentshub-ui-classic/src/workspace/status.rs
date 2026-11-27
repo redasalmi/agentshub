@@ -1,5 +1,5 @@
-//! Keeping the sidebar and the chats' histories in step with what each agent
-//! does.
+//! Keeping the chats' histories in step with what each agent does, and
+//! telling the runtime what the user can see.
 
 use super::*;
 
@@ -32,26 +32,5 @@ impl Workspace {
     pub fn set_focused(&self, focused: bool, cx: &mut App) {
         let seen = focused && !self.settings_shown;
         self.apply(Intent::SetFocused(seen), cx);
-    }
-
-    /// Marks the chat that is shown and what each running one is doing.
-    pub(super) fn sync_sidebar(&mut self, cx: &mut Context<Self>) {
-        let runtime = self.runtime.read(cx);
-        let running = runtime
-            .open_chats()
-            .filter(|chat| chat.running)
-            .map(|chat| {
-                // The sidebar shows a finished CLI as done until it is seen.
-                let status = match chat.status {
-                    Some(Status::Idle | Status::Done) if chat.unseen => Some(Status::Done),
-                    Some(Status::Done) => Some(Status::Idle),
-                    status => status,
-                };
-                (chat.id, status)
-            })
-            .collect();
-        let active = runtime.active();
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.set_chats(running, active, cx));
     }
 }

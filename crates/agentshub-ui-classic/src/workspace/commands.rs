@@ -3,6 +3,58 @@
 use super::*;
 
 impl Workspace {
+    /// Does what the layout asks for.
+    pub fn navigate(&mut self, event: &NavEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            NavEvent::AddProject => self.add_project(window, cx),
+            NavEvent::DropPaths(paths) => self.add_dropped(paths, window, cx),
+            NavEvent::RemoveProject(id) => self.confirm_remove_project(*id, window, cx),
+            NavEvent::ArchiveProject(id) => self.confirm_archive_project(*id, window, cx),
+            NavEvent::NewChat(project_id) => self.open_new_chat_dialog(*project_id, window, cx),
+            NavEvent::OpenChat(id) => self.open_chat(*id, window, cx),
+            NavEvent::RenameChat(id, title) => {
+                self.open_rename_dialog(*id, title.clone(), window, cx)
+            }
+            NavEvent::PinChat(id, pinned) => self.change(
+                Change::Pin {
+                    chat: *id,
+                    pinned: *pinned,
+                },
+                cx,
+            ),
+            NavEvent::MoveChat(id, to) => self.change(Change::MoveChat { chat: *id, to: *to }, cx),
+            NavEvent::MoveProject(id, to) => self.change(
+                Change::MoveProject {
+                    project: *id,
+                    to: *to,
+                },
+                cx,
+            ),
+            NavEvent::CloseChat(id) => self.confirm_close_chat(*id, window, cx),
+            NavEvent::DeleteChat(id) => self.confirm_delete_chat(*id, window, cx),
+            NavEvent::ArchiveChat(id) => self.confirm_archive_chat(*id, window, cx),
+            NavEvent::RestoreChat(id) => self.change(Change::RestoreChat(*id), cx),
+            NavEvent::OpenSettings => self.show_settings(true, window, cx),
+            NavEvent::Selected => self.project_selected(window, cx),
+            NavEvent::OpenSearch => self.open_palette(false, window, cx),
+            NavEvent::RunningMenu(open) => {
+                if *open {
+                    self.open_running_menu(window, cx);
+                    if let Some(menu) = &self.running_menu {
+                        menu.focus_handle(cx).focus(window, cx);
+                    }
+                } else {
+                    self.running_menu = None;
+                    cx.notify();
+                }
+            }
+            NavEvent::CloseWindow => {
+                agentshub_platform::tray::remember_bounds(window.window_bounds(), cx);
+                window.remove_window();
+            }
+        }
+    }
+
     /// The shown chat as the catalog lists it.
     pub(super) fn active_entry<'a>(&'a self, cx: &'a App) -> Option<&'a store::Chat> {
         let id = self.runtime.read(cx).active()?;
@@ -40,7 +92,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.sidebar.read(cx).selected().map(|project| project.id) {
+        match self.layout.selected_project(cx) {
             Some(id) => self.open_new_chat_dialog(id, window, cx),
             None => self.add_project(window, cx),
         }
@@ -135,7 +187,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.sidebar.read(cx).selected().map(|project| project.id) {
+        if let Some(id) = self.layout.selected_project(cx) {
             self.confirm_archive_project(id, window, cx);
         }
     }
@@ -253,7 +305,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.sidebar.read(cx).chat_at(action.0) {
+        if let Some(id) = self.layout.chat_at(action.0, cx) {
             self.open_chat(id, window, cx);
         }
     }
@@ -264,8 +316,7 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.select_at(action.0, cx));
+        self.layout.select_project_at(action.0, cx);
     }
 
     pub(super) fn show_running(
@@ -284,9 +335,9 @@ impl Workspace {
     /// Opens the menu of the running chats of every project, under what
     /// their agents need, the most urgent first.
     pub(super) fn open_running_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let sidebar = self.sidebar.read(cx);
-        let chats: Vec<_> = sidebar
-            .running_chats()
+        let runtime = self.runtime.read(cx);
+        let running = agentshub_ui_kit::layout::running(runtime);
+        let chats: Vec<_> = agentshub_ui_kit::layout::running_chats(runtime.projects(), &running)
             .into_iter()
             .map(|(project, chat, tone)| {
                 let title = chat.title.clone().unwrap_or_else(|| "New chat".into());
@@ -386,7 +437,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let active = self.runtime.read(cx).active();
-        match self.sidebar.read(cx).next_needing_you(active) {
+        match self.layout.next_needing_you(active, cx) {
             Some(id) => self.open_chat(id, window, cx),
             None => window.push_notification("No agent needs you", cx),
         }

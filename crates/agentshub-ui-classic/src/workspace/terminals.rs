@@ -24,7 +24,7 @@ impl Workspace {
         });
         let view = terminal.map(|terminal| cx.new(|cx| TerminalView::new(terminal, cx)));
         self.panes.insert(id, ChatPane { view, history });
-        self.sync_sidebar(cx);
+        self.layout.refresh(cx);
         cx.notify();
     }
 
@@ -35,7 +35,7 @@ impl Workspace {
             pane.history
                 .update(cx, |history, cx| history.refresh(None, &[], cx));
         }
-        self.sync_sidebar(cx);
+        self.layout.refresh(cx);
         cx.notify();
     }
 
@@ -56,7 +56,7 @@ impl Workspace {
                 self.focus_chat(window, cx);
             }
         });
-        self.sync_sidebar(cx);
+        self.layout.refresh(cx);
         cx.notify();
     }
 
@@ -82,7 +82,7 @@ impl Workspace {
     /// settings and takes the keyboard.
     pub(super) fn active_changed(&mut self, active: Option<i64>, cx: &mut Context<Self>) {
         let Some(id) = active else {
-            self.sync_sidebar(cx);
+            self.layout.refresh(cx);
             cx.notify();
             return;
         };
@@ -94,11 +94,10 @@ impl Workspace {
             })
             .unwrap_or(false);
         self.cover_terminals(cx);
-        self.sync_sidebar(cx);
+        self.layout.refresh(cx);
         // Showing a chat, even the one already shown, brings its project back
         // into the rail's selection, so the chat list and New Chat follow it.
-        self.sidebar
-            .update(cx, |sidebar, cx| sidebar.reveal(id, cx));
+        self.layout.reveal(id, cx);
         self.set_focused(focused, cx);
         cx.notify();
     }

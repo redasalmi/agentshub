@@ -17,7 +17,6 @@ use agentshub_ui_kit::actions::{
     ToggleShell, ToggleTheme, UseTheme,
 };
 use agentshub_ui_kit::palette::{self, Entry, Lead, Pick};
-use agentshub_ui_kit::status::Filter;
 use agentshub_ui_kit::terminal_view;
 
 use super::palette_model::PaletteLists;
@@ -50,7 +49,6 @@ impl Workspace {
             start,
             selected,
         } = self.palette_lists(cx);
-        let sidebar = self.sidebar.read(cx);
 
         let this = cx.entity().downgrade();
         let on_pick = move |pick, window: &mut Window, cx: &mut App| {
@@ -160,19 +158,7 @@ impl Workspace {
                 .keywords(["stop"]),
             );
         }
-        let filter = sidebar.filter();
-        for each in Filter::ALL.into_iter().filter(|each| *each != filter) {
-            let label = match each {
-                Filter::All => "Show all the chats",
-                Filter::NeedsYou => "Show the chats that need you",
-                Filter::Running => "Show the running chats",
-            };
-            commands.push(Entry::new(
-                label,
-                Lead::Icon(IconName::Search.into()),
-                Pick::Filter(each),
-            ));
-        }
+        commands.extend(self.layout.commands(cx));
         commands.push(
             Entry::new(
                 "Show the running chats of every project",
@@ -344,7 +330,7 @@ impl Workspace {
             ),
             Pick::SelectProject(id) => {
                 let archived = self
-                    .sidebar
+                    .runtime
                     .read(cx)
                     .projects()
                     .iter()
@@ -352,12 +338,9 @@ impl Workspace {
                 if archived {
                     self.change(Change::RestoreProject(id), cx);
                 }
-                self.sidebar
-                    .update(cx, |sidebar, cx| sidebar.select(id, cx))
+                self.layout.select_project(id, cx)
             }
-            Pick::Filter(filter) => self
-                .sidebar
-                .update(cx, |sidebar, cx| sidebar.set_filter(filter, cx)),
+            pick @ Pick::Filter(_) => self.layout.pick(pick, cx),
             // Sent from where the keys would have sent it: closing the search
             // gave the focus back to where it was, as the shell, unless it was
             // outside the workspace.

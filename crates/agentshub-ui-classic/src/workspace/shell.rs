@@ -13,7 +13,7 @@ impl Workspace {
     /// The shell is the selected project's, so it changes with the selection,
     /// and takes the focus from the one before.
     pub(super) fn project_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.sidebar.read(cx).selected().map(|project| project.id);
+        let selected = self.layout.selected_project(cx);
         self.apply(Intent::ProjectSelected(selected), cx);
         let shown = self.shown_shell(cx).map(|(_, view)| view.focus_handle(cx));
         let in_shell = self
@@ -33,7 +33,7 @@ impl Workspace {
     /// Has the runtime find the agents the selected project can start, for
     /// the buttons that start them while no chat is open.
     pub(super) fn look_up_installed(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.sidebar.read(cx).selected().map(|project| project.id) {
+        if let Some(id) = self.layout.selected_project(cx) {
             self.apply(Intent::LookUpInstalled(id), cx);
         }
     }
@@ -55,7 +55,7 @@ impl Workspace {
     ) {
         // The runtime starts no shell in a project being removed, and nothing
         // changes.
-        let selected = self.sidebar.read(cx).selected().map(|project| project.id);
+        let selected = self.layout.selected_project(cx);
         if selected.is_some_and(|id| self.runtime.read(cx).is_removing_project(id)) {
             return;
         }

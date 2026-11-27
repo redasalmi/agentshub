@@ -187,7 +187,7 @@ impl Workspace {
     /// Opening one of its chats again brings it back.
     pub(super) fn archive_project(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         if !self
-            .sidebar
+            .runtime
             .read(cx)
             .projects()
             .iter()

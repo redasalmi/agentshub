@@ -3,22 +3,7 @@
 use super::*;
 
 impl Render for Workspace {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the workspace's whole element tree, from one read of its state"
-    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let window_width = window.viewport_size().width;
-        let names = sidebar::names_width(window_width, cx);
-        let room =
-            window_width - clamp_sidebar_width(self.sidebar_width, window_width, names) - names;
-        let settings_view = self.settings_view.clone();
-        let settings = self.settings_shown.then(|| {
-            settings_view
-                .update(cx, |view, cx| view.render(room, window, cx))
-                .into_any_element()
-        });
-        let theme = cx.theme();
         if let Some(reason) = self.runtime.read(cx).broken().cloned() {
             return render_broken(reason, cx);
         }
@@ -27,6 +12,29 @@ impl Render for Workspace {
             .read(cx)
             .active()
             .filter(|id| self.panes.contains_key(id));
+        let body = match (self.settings_shown, active) {
+            (true, _) => Body::Settings(self.settings_view.clone()),
+            (false, Some(chat)) => match self.shown_chat(chat, cx) {
+                Some(shown) => Body::Chat(Box::new(shown)),
+                None => Body::Empty(Empty.into_any_element()),
+            },
+            (false, None) => Body::Empty(
+                self.render_empty_over_shell(
+                    div()
+                        .size_full()
+                        .overflow_hidden()
+                        .child(self.render_empty(window, cx)),
+                    window,
+                    cx,
+                ),
+            ),
+        };
+        let parts = Parts {
+            body,
+            running_menu: self.running_menu.clone(),
+        };
+        let layout = self.layout.render(parts, window, cx);
+        let theme = cx.theme();
 
         h_flex()
             .size_full()
@@ -80,99 +88,7 @@ impl Render for Workspace {
                     this.zoom_terminals(reset, window, cx)
                 }),
             )
-            // Follows the pointer anywhere in the window while the sidebar's
-            // edge is dragged, since it leaves the edge's thin band at once.
-            .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<ResizeSidebar>, window, cx| {
-                    let window_width = window.viewport_size().width;
-                    let names = sidebar::names_width(window_width, cx);
-                    let width = clamp_sidebar_width(
-                        event.event.position.x - event.bounds.left() - names,
-                        window_width,
-                        names,
-                    );
-                    if width != this.sidebar_width {
-                        this.sidebar_width = width;
-                        cx.notify();
-                    }
-                }),
-            )
-            // The rail's edge likewise. The rail starts where the window
-            // does.
-            .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<ResizeRail>, window, cx| {
-                    let width = event.event.position.x - event.bounds.left();
-                    let rail_width = cx.global::<Settings>().rail_width;
-                    if width < sidebar::FOLD_RAIL_BELOW {
-                        // Folded, it keeps the width to unfold to.
-                        this.resize_rail(false, rail_width, cx);
-                    } else {
-                        let max = rail_room(window.viewport_size().width)
-                            .min(sidebar::MAX_RAIL_WIDTH)
-                            .max(sidebar::MIN_NAMED_RAIL_WIDTH);
-                        let width = width.clamp(sidebar::MIN_NAMED_RAIL_WIDTH, max);
-                        this.resize_rail(true, f32::from(width), cx);
-                    }
-                }),
-            )
-            .child(
-                div()
-                    .relative()
-                    .w(clamp_sidebar_width(self.sidebar_width, window_width, names) + names)
-                    .h_full()
-                    .flex_none()
-                    // Terminal output re-renders the window many times a
-                    // second; the sidebar and the history only need to render
-                    // again when their own state changes.
-                    .child(
-                        self.sidebar
-                            .clone()
-                            .cached(StyleRefinement::default().size_full()),
-                    )
-                    .child(self.render_rail_edge(window_width, cx))
-                    .child(self.render_sidebar_edge(cx)),
-            )
-            // The sheet the chat is drawn on, set on the sidebar's ground
-            // under the toolbar.
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(self.render_toolbar(room, window, cx))
-                    .child(
-                        v_flex().flex_1().min_h_0().px_2().pb_2().child(
-                            v_flex()
-                                .flex_1()
-                                .min_h_0()
-                                .w_full()
-                                .bg(theme.background)
-                                .border_1()
-                                .border_color(theme.border)
-                                .rounded(theme.radius_lg)
-                                .shadow_xs()
-                                .child(v_flex().flex_1().min_h_0().map(|this| {
-                                    match (settings, active) {
-                                        (Some(settings), _) => this.child(settings),
-                                        (None, Some(chat)) => {
-                                            this.child(self.render_chat(chat, window, cx))
-                                        }
-                                        (None, None) => this.child(
-                                            self.render_empty_over_shell(
-                                                div()
-                                                    .size_full()
-                                                    .overflow_hidden()
-                                                    .child(self.render_empty(window, cx)),
-                                                window,
-                                                cx,
-                                            ),
-                                        ),
-                                    }
-                                }))
-                                .child(self.render_footer(room, window, cx)),
-                        ),
-                    ),
-            )
+            .child(layout)
             .into_any_element()
     }
 }

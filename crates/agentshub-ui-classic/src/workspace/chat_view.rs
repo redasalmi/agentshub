@@ -1,7 +1,6 @@
-//! The shown chat's sheet, the toolbar, the footer, the empty state and the
-//! shortcut list, built from what the workspace holds.
+//! The shown chat's body, the empty state and the shortcut list, built from
+//! what the workspace holds.
 
-use crate::chat::ChatSheet;
 use agentshub_ui_kit::chat_body::{ChatBody, ChatIntent, Shell};
 use agentshub_ui_kit::empty::{EmptyIntent, EmptyState, Recent};
 use agentshub_ui_kit::settings::SHORTCUTS_WORK_ANYWHERE;
@@ -10,20 +9,13 @@ use super::*;
 use agentshub_ui_kit::shortcuts::render_shortcuts;
 
 impl Workspace {
-    pub(super) fn render_chat(&self, id: i64, window: &Window, cx: &Context<Self>) -> AnyElement {
+    /// What the workspace holds of chat `id`, which shows, unless it has
+    /// gone.
+    pub(super) fn shown_chat(&self, id: i64, cx: &Context<Self>) -> Option<ShownChat> {
         let runtime = self.runtime.read(cx);
         let (Some(chat), Some(pane)) = (runtime.chat(id), self.panes.get(&id)) else {
-            return Empty.into_any_element();
+            return None;
         };
-        let (title, pinned) = self
-            .active_entry(cx)
-            .map(|entry| {
-                (
-                    entry.title.clone().unwrap_or_else(|| "New chat".into()),
-                    entry.pinned,
-                )
-            })
-            .unwrap_or_else(|| ("New chat".into(), false));
         let history = pane.history.read(cx);
         let (earlier, history_open) = (history.count(), history.is_open());
         let shell = self.shown_shell(cx).map(|(cwd, view)| Shell { cwd, view });
@@ -46,19 +38,10 @@ impl Workspace {
                 }
             })
         };
-        ChatSheet {
-            title: title.into(),
-            pinned,
-            agent: chat.agent,
-            cwd: chat.cwd.to_path_buf(),
-            tone: Tone::of(self.sidebar.read(cx).running(chat.id)),
-            turn: chat.turn,
-            running: chat.running,
-            hidden: runtime.hidden(),
+        Some(ShownChat {
+            focus: self.chat_focus.clone(),
             earlier,
             history_open,
-            editors: agentshub_ui_kit::editor::editor_choices(cx),
-            focus: self.chat_focus.clone(),
             body: ChatBody {
                 id: chat.id,
                 notice: chat.notice.cloned(),
@@ -71,8 +54,7 @@ impl Workspace {
                 on,
                 save,
             },
-        }
-        .render(window, cx)
+        })
     }
 
     pub(super) fn render_empty_over_shell(
@@ -139,83 +121,6 @@ impl Workspace {
         }
     }
 
-    /// The search, which opens the search modal, and the menu of the running
-    /// chats, over the `width` the sidebar leaves.
-    pub(super) fn render_toolbar(
-        &self,
-        width: Pixels,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let running = self
-            .sidebar
-            .read(cx)
-            .running_chats()
-            .into_iter()
-            .map(|(_, _, tone)| tone)
-            .collect();
-        let on = {
-            let this = cx.weak_entity();
-            Rc::new(
-                move |intent: crate::chat::ToolbarIntent, window: &mut Window, cx: &mut App| {
-                    if let Some(this) = this.upgrade() {
-                        this.update(cx, |this, cx| this.toolbar_intent(intent, window, cx));
-                    }
-                },
-            )
-        };
-        crate::chat::Toolbar {
-            width,
-            running,
-            menu: self.running_menu.clone(),
-            on,
-        }
-        .render(window, cx)
-    }
-
-    fn toolbar_intent(
-        &mut self,
-        intent: crate::chat::ToolbarIntent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match intent {
-            crate::chat::ToolbarIntent::OpenPalette => self.open_palette(false, window, cx),
-            crate::chat::ToolbarIntent::RunningMenu(open) => {
-                if open {
-                    self.open_running_menu(window, cx);
-                    if let Some(menu) = &self.running_menu {
-                        menu.focus_handle(cx).focus(window, cx);
-                    }
-                } else {
-                    self.running_menu = None;
-                    cx.notify();
-                }
-            }
-            crate::chat::ToolbarIntent::CloseWindow => {
-                agentshub_platform::tray::remember_bounds(window.window_bounds(), cx);
-                window.remove_window();
-            }
-        }
-    }
-
-    pub(super) fn render_footer(
-        &self,
-        width: Pixels,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let sidebar = self.sidebar.read(cx);
-        let summary = sidebar.summary();
-        let needing = sidebar.next_needing_you(None).is_some();
-        crate::chat::Footer {
-            summary: &summary,
-            needing,
-            width,
-        }
-        .render(window, cx)
-    }
-
     pub(super) fn show_shortcuts(
         &mut self,
         _: &ShowShortcuts,
@@ -244,12 +149,12 @@ impl Workspace {
     /// The agents the selected project can start now, in the new chat
     /// dialog's order.
     fn empty_agents(&self, cx: &App) -> Option<(i64, Vec<Agent>)> {
-        let project = self.sidebar.read(cx).selected()?;
+        let project = self.layout.selected_project(cx)?;
         let (id, agents) = self.runtime.read(cx).installed()?;
-        if id != project.id {
+        if id != project {
             return None;
         }
-        Some((project.id, agents.to_vec()))
+        Some((project, agents.to_vec()))
     }
 
     /// Starts the `n`th agent the empty state offers, counting from one, on
@@ -286,15 +191,18 @@ impl Workspace {
     /// What shows while no chat is open: the agents to start, with their
     /// number keys, and the chats last worked in, to go back to.
     pub(super) fn render_empty(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
-        let selected = self
-            .sidebar
-            .read(cx)
-            .selected()
-            .map(|project| project.name.clone().into());
+        let runtime = self.runtime.read(cx);
+        let selected = self.layout.selected_project(cx).and_then(|id| {
+            runtime
+                .projects()
+                .iter()
+                .find(|project| project.id == id)
+                .map(|project| project.name.clone().into())
+        });
         let agents = self.empty_agents(cx);
         let recent: Vec<_> = {
-            let sidebar = self.sidebar.read(cx);
-            let mut recent: Vec<_> = sidebar
+            let running = agentshub_ui_kit::layout::running(runtime);
+            let mut recent: Vec<_> = runtime
                 .projects()
                 .iter()
                 .filter(|project| project.archived_at.is_none())
@@ -311,7 +219,7 @@ impl Workspace {
                 .into_iter()
                 .take(RECENT_CHATS)
                 .map(|(project, chat)| {
-                    let tone = Tone::of(sidebar.running(chat.id));
+                    let tone = Tone::of(running.get(&chat.id).copied());
                     Recent {
                         id: chat.id,
                         title: chat.title.clone().unwrap_or_else(|| "New chat".into()),

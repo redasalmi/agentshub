@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as ExtraIcon;
@@ -19,6 +18,7 @@ use agentshub_core::status::Status;
 use agentshub_core::store::{Chat, Project};
 
 use agentshub_ui_kit::actions::{NUMBERED, NewChat};
+use agentshub_ui_kit::layout::{Held, NavEvent, running_chats};
 use agentshub_ui_kit::status::{Filter, POP, Tone, badge, dot};
 use agentshub_ui_kit::theme::{self as appearance, Tint};
 use agentshub_ui_kit::widgets::{heading, path_line};
@@ -85,45 +85,11 @@ const LEAVE: Duration = Duration::from_millis(180);
 /// At least as tall as a chat's row, which grows from nothing to this.
 const CHAT_ROW_HEIGHT: Pixels = px(60.);
 
+/// What the sidebar alone asks for, besides what every layout can.
 #[derive(Clone)]
 pub enum SidebarEvent {
-    AddProject,
-    /// Files and folders dropped on the sidebar from outside the app; the
-    /// folders among them become projects.
-    DropPaths(Vec<PathBuf>),
-    RemoveProject(i64),
-    /// Archive a project, which leaves the rail with its chats.
-    ArchiveProject(i64),
-    /// Move a project to where another one is.
-    MoveProject(i64, i64),
-    /// Start a chat in a project.
-    NewChat(i64),
-    OpenChat(i64),
-    /// Ask for a chat's new title, starting from its current one.
-    RenameChat(i64, SharedString),
-    PinChat(i64, bool),
-    /// Another project was selected, or none.
-    Selected,
-    /// Move a chat to where another one is.
-    MoveChat(i64, i64),
-    /// Stop a running chat's agent, which opening the chat again resumes.
-    CloseChat(i64),
-    DeleteChat(i64),
-    /// Archive a chat, which leaves the list, stopping its agent.
-    ArchiveChat(i64),
-    /// Take a chat out of the archive, to the top of its list.
-    RestoreChat(i64),
-    OpenSettings,
     /// Name the projects in the rail, or show only their marks.
     ShowProjectNames(bool),
-}
-
-/// Which shortcut numbers the sidebar shows, while the modifier that opens
-/// them is held: Alt for the chats, Ctrl for the projects.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Held {
-    Chats,
-    Projects,
 }
 
 /// `row` growing into the list from nothing, or, when it `leaves`, folding
@@ -198,6 +164,7 @@ pub struct Sidebar {
     _age: Task<()>,
 }
 
+impl EventEmitter<NavEvent> for Sidebar {}
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Sidebar {
@@ -244,7 +211,7 @@ impl Sidebar {
                 .or_else(|| self.listed().next().map(|project| project.id));
             if selected != self.selected {
                 self.selected = selected;
-                cx.emit(SidebarEvent::Selected);
+                cx.emit(NavEvent::Selected);
             }
         }
 
@@ -372,21 +339,7 @@ impl Sidebar {
     /// and in the rail's order within the same urgency, so a chat only moves
     /// when what its agent does changes.
     pub fn running_chats(&self) -> Vec<(&Project, &Chat, Tone)> {
-        let mut chats: Vec<_> = self
-            .listed()
-            .flat_map(|project| {
-                project
-                    .chats
-                    .iter()
-                    .filter(|chat| chat.archived_at.is_none())
-                    .filter_map(move |chat| {
-                        let running = self.running(chat.id)?;
-                        Some((project, chat, Tone::of(Some(running))))
-                    })
-            })
-            .collect();
-        chats.sort_by_key(|(_, _, tone)| tone.urgency());
-        chats
+        running_chats(&self.projects, &self.running)
     }
 
     /// The chat to go to next among the ones that need the user: the one
@@ -437,7 +390,7 @@ impl Sidebar {
     pub fn select(&mut self, project_id: i64, cx: &mut Context<Self>) {
         if self.selected != Some(project_id) {
             self.selected = Some(project_id);
-            cx.emit(SidebarEvent::Selected);
+            cx.emit(NavEvent::Selected);
         }
         cx.notify();
     }
@@ -504,7 +457,7 @@ impl Sidebar {
 /// A click handler that sends `event` from the sidebar.
 fn emit(
     sidebar: &Entity<Sidebar>,
-    event: SidebarEvent,
+    event: NavEvent,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
     let sidebar = sidebar.clone();
     move |_, _, cx| sidebar.update(cx, |_, cx| cx.emit(event.clone()))
@@ -595,40 +548,38 @@ impl Render for Sidebar {
             // light it up too, and are turned away then.
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_color))
             .on_drop(cx.listener(|_, dropped: &ExternalPaths, _, cx| {
-                cx.emit(SidebarEvent::DropPaths(dropped.paths().to_vec()))
+                cx.emit(NavEvent::DropPaths(dropped.paths().to_vec()))
             }))
             .child(self.render_rail(window.viewport_size().width, cx))
             .map(|this| match self.selected() {
                 Some(project) => this.child(self.render_list(project, cx)),
-                None => {
-                    this.child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .p_4()
-                            .gap_3()
-                            .child(div().font_semibold().child("No projects yet"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .line_height(rems(1.4))
-                                    .text_color(theme.muted_foreground)
-                                    .child("Add a folder you work in to start agents there."),
-                            )
-                            .child(
-                                h_flex().child(
-                                    Button::new("add-first-project")
-                                        .primary()
-                                        .small()
-                                        .icon(IconName::FolderOpen)
-                                        .label("Add project")
-                                        .on_click(cx.listener(|_, _, _, cx| {
-                                            cx.emit(SidebarEvent::AddProject)
-                                        })),
-                                ),
+                None => this.child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .p_4()
+                        .gap_3()
+                        .child(div().font_semibold().child("No projects yet"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .line_height(rems(1.4))
+                                .text_color(theme.muted_foreground)
+                                .child("Add a folder you work in to start agents there."),
+                        )
+                        .child(
+                            h_flex().child(
+                                Button::new("add-first-project")
+                                    .primary()
+                                    .small()
+                                    .icon(IconName::FolderOpen)
+                                    .label("Add project")
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(NavEvent::AddProject)),
+                                    ),
                             ),
-                    )
-                }
+                        ),
+                ),
             })
     }
 }

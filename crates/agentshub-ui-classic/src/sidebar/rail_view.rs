@@ -11,7 +11,7 @@ impl Sidebar {
             .ghost()
             .icon(ExtraIcon::Settings)
             .tooltip("Settings")
-            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::OpenSettings)));
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(NavEvent::OpenSettings)));
         let toggle = Button::new("project-names")
             .ghost()
             .icon(if named {
@@ -275,7 +275,7 @@ impl Sidebar {
             })
             .on_drop(cx.listener(move |_, dragged: &DraggedProject, _, cx| {
                 if dragged.id != id {
-                    cx.emit(SidebarEvent::MoveProject(dragged.id, id));
+                    cx.emit(NavEvent::MoveProject(dragged.id, id));
                 }
             }))
             .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx)))
@@ -284,18 +284,18 @@ impl Sidebar {
                 menu.item(
                     PopupMenuItem::new("New chat…")
                         .icon(IconName::Plus)
-                        .on_click(emit(SidebarEvent::NewChat(id))),
+                        .on_click(emit(NavEvent::NewChat(id))),
                 )
                 .separator()
                 .item(
                     PopupMenuItem::new("Archive")
                         .icon(ExtraIcon::Archive)
-                        .on_click(emit(SidebarEvent::ArchiveProject(id))),
+                        .on_click(emit(NavEvent::ArchiveProject(id))),
                 )
                 .item(
                     PopupMenuItem::new("Remove")
                         .icon(IconName::Delete)
-                        .on_click(emit(SidebarEvent::RemoveProject(id))),
+                        .on_click(emit(NavEvent::RemoveProject(id))),
                 )
             })
     }
@@ -344,6 +344,6 @@ impl Sidebar {
                 .tooltip(|window, cx| Tooltip::new("Add a project").build(window, cx))
         };
         item.cursor_pointer()
-            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::AddProject)))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(NavEvent::AddProject)))
     }
 }
