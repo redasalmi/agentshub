@@ -36,6 +36,11 @@ impl Workspace {
         }
 
         cx.set_global(settings);
+        // Before the terminals take the theme's colors. The observer below
+        // can't hear this change: GPUI drops a second notice of the theme
+        // while the first is pending, and that one goes out before the
+        // observer starts.
+        appearance::follow_system(window, cx);
         appearance::apply_motion(cx);
         let layout = layout(cx.weak_entity(), window, cx);
 

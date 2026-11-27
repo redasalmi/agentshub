@@ -180,8 +180,8 @@ pub fn watch_window(window: &mut Window, cx: &mut App) {
     window
         .observe_window_appearance(appearance::follow_system)
         .detach();
-    // The layout loads the settings that pick the mode the first time.
-    // Later, the system may have changed mode while the window was closed,
-    // and the observer only fires on later changes.
+    // The workspace followed it when it was made. Later, the system may
+    // have changed mode while the window was closed, and the observer only
+    // fires on later changes.
     appearance::follow_system(window, cx);
 }
