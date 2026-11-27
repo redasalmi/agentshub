@@ -3,7 +3,6 @@
 
 use std::rc::Rc;
 
-use gpui_kit::component::TitleBar;
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{ActiveTheme as _, Selectable, StyledExt as _, h_flex, v_flex};
@@ -17,6 +16,7 @@ use agentshub_ui_kit::marks::marks;
 use agentshub_ui_kit::palette::Pick;
 use agentshub_ui_kit::status::Tone;
 use agentshub_ui_kit::theme::{self as appearance, Tint};
+use agentshub_ui_kit::widgets::title_bar;
 use agentshub_ui_kit::workspace::Workspace;
 
 use crate::header::{Banner, Header};
@@ -93,8 +93,7 @@ impl TriageLayout {
             })
         };
         let close_on = Rc::clone(&on);
-        TitleBar::new()
-            .h(TITLE_BAR_HEIGHT)
+        title_bar(TITLE_BAR_HEIGHT)
             .pl(px(22.))
             .bg(transparent_black())
             .border_b_1()

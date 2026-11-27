@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName as ExtraIcon;
-use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu};
 use gpui_kit::component::popover::Popover;
@@ -26,7 +25,7 @@ use agentshub_ui_kit::editor::{EditorChoice, editor_button};
 use agentshub_ui_kit::layout::NavEvent;
 use agentshub_ui_kit::status::{Tone, badge, status_pill};
 use agentshub_ui_kit::theme as appearance;
-use agentshub_ui_kit::widgets::{path_line, stay_put};
+use agentshub_ui_kit::widgets::{path_line, stay_put, title_bar};
 
 /// What the chat sheet shows and the intents it emits.
 pub struct ChatSheet {
@@ -327,8 +326,7 @@ impl Toolbar {
 
         let close_on = Rc::clone(&on);
         let menu_on = on;
-        TitleBar::new()
-            .h(TITLE_BAR_HEIGHT)
+        title_bar(TITLE_BAR_HEIGHT)
             .pl_2()
             .bg(transparent_black())
             .border_b_0()

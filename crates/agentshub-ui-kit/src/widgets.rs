@@ -1,15 +1,26 @@
-//! Headings, path lines and number keys shared by the layouts.
+//! Headings, path lines, number keys and the title bar shared by the
+//! layouts.
 
 use std::path::Path;
 
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, StyledExt as _, TITLE_BAR_HEIGHT as WINDOW_CONTROL_SIZE, TitleBar, h_flex,
+};
 use gpui_kit::*;
 
 use agentshub_core::format::home_relative;
 
 use crate::status::Tone;
 use crate::theme as appearance;
+
+/// A title bar `height` tall, with the window's controls square in it, as
+/// they are as tall as the bar's content.
+pub fn title_bar(height: Pixels) -> TitleBar {
+    TitleBar::new()
+        .h(height)
+        .py((height - WINDOW_CONTROL_SIZE) / 2.)
+}
 
 /// A heading of the running list, in the color of what its chats need.
 pub fn group_heading(label: &'static str, count: usize, tone: Tone, cx: &App) -> impl IntoElement {
