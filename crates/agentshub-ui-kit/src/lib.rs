@@ -1,6 +1,6 @@
 //! What the layouts of the app share: the actions and their shortcuts, the
-//! theme, the terminal view, the history, the status glyphs and the
-//! interface the binary opens a layout through.
+//! theme, the terminal view, the history, the status glyphs, the chat body,
+//! the empty state and the interface the binary opens a layout through.
 
 pub mod actions;
 pub mod appearance;
