@@ -14,10 +14,16 @@ pub mod chat;
 pub mod layout;
 pub mod sidebar;
 
-/// Opens the Classic layout's window on a new workspace on `runtime`.
-pub fn open(runtime: Entity<Runtime>, cx: &mut App) -> Rc<dyn Frontend> {
+/// Opens the Classic layout's window on a new workspace on `runtime`, at
+/// `bounds` if any.
+pub fn open(
+    runtime: Entity<Runtime>,
+    bounds: Option<WindowBounds>,
+    cx: &mut App,
+) -> Rc<dyn Frontend> {
     frontend::open(
         runtime.clone(),
+        bounds,
         move |workspace, window, cx| Box::new(ClassicLayout::new(runtime, workspace, window, cx)),
         cx,
     )

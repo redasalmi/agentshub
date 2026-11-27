@@ -76,10 +76,15 @@ fn main() {
             let opened = bootstrap::open().await;
             cx.update(|cx| {
                 let layout = opened.settings.layout;
+                let bounds = opened.restart_bounds;
                 let runtime = cx.new(|cx| Runtime::new(opened, cx));
                 let frontend = match layout {
-                    settings::Layout::Classic => agentshub_ui_classic::open(runtime.clone(), cx),
-                    settings::Layout::Triage => agentshub_ui_triage::open(runtime.clone(), cx),
+                    settings::Layout::Classic => {
+                        agentshub_ui_classic::open(runtime.clone(), bounds, cx)
+                    }
+                    settings::Layout::Triage => {
+                        agentshub_ui_triage::open(runtime.clone(), bounds, cx)
+                    }
                 };
                 alerts::init(&frontend, cx);
                 motion::watch_desktop_motion(cx, appearance::apply_motion);

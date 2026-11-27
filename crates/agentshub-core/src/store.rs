@@ -513,13 +513,13 @@ impl Store {
         self.write(move |db| Ok(db.set_flag(key, value)?))
     }
 
-    /// Saves a setting that is one of several words.
+    /// Saves a setting that is text.
     pub fn set_text(
         &self,
         key: &'static str,
-        value: &'static str,
+        value: String,
     ) -> impl Future<Output = anyhow::Result<()>> + use<> {
-        self.write(move |db| Ok(db.set_text(key, value)?))
+        self.write(move |db| Ok(db.set_text(key, &value)?))
     }
 
     /// Saves a setting that is a number.

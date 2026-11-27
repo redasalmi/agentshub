@@ -28,9 +28,10 @@ type BuildLayout = Box<
 >;
 
 /// Opens the window on a new workspace on `runtime`, in the layout
-/// `build_layout` builds.
+/// `build_layout` builds, at `bounds` if any.
 pub fn open(
     runtime: Entity<Runtime>,
+    bounds: Option<WindowBounds>,
     build_layout: impl FnOnce(
         WeakEntity<Workspace>,
         &mut Window,
@@ -42,7 +43,7 @@ pub fn open(
     let workspace = open_window(
         runtime.clone(),
         Contents::New(Box::new(build_layout)),
-        None,
+        bounds,
         cx,
     );
     Rc::new(Opened { runtime, workspace })

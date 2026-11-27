@@ -3,8 +3,9 @@
 use std::fs;
 
 use anyhow::Context as _;
+use gpui_kit::WindowBounds;
 
-use crate::settings::Settings;
+use crate::settings::{self, Settings};
 use agentshub_core::store::{Db, Imported, Project, Store, open_locked};
 
 /// The database as startup opened it.
@@ -14,6 +15,8 @@ pub struct Opened {
     pub lock: Option<fs::File>,
     pub imported: Option<Imported>,
     pub settings: Settings,
+    /// Where a layout restart left the window, for it to open there.
+    pub restart_bounds: Option<WindowBounds>,
     pub projects: Vec<Project>,
     /// Why the database can't be used, in which case an empty one in memory
     /// stands in for it.
@@ -40,10 +43,10 @@ pub async fn open() -> Opened {
         }
     })
     .await;
-    let settings = store
+    let (settings, restart_bounds) = store
         .settings()
         .await
-        .map(|saved| Settings::load(&saved))
+        .map(|saved| (Settings::load(&saved), settings::restart_bounds(&saved)))
         .inspect_err(|err| eprintln!("can't read the settings: {err:#}"))
         .unwrap_or_default();
     let projects = store
@@ -56,6 +59,7 @@ pub async fn open() -> Opened {
         lock,
         imported,
         settings,
+        restart_bounds,
         projects,
         broken,
     }

@@ -26,6 +26,7 @@ const MOTION: &str = "motion";
 const TERMINAL_FONT_SIZE: &str = "terminal_font_size";
 const EDITOR: &str = "editor";
 const LAYOUT: &str = "layout";
+const RESTART_BOUNDS: &str = "restart_bounds";
 
 /// A setting as the database keeps it, which a setter gives with its key.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,6 +35,8 @@ pub enum Value {
     Number(f64),
     /// One of several words.
     Text(&'static str),
+    /// Where the window is, saved as text.
+    Bounds(WindowBounds),
 }
 
 impl Value {
@@ -46,8 +49,50 @@ impl Value {
         match self {
             Self::Flag(value) => Box::pin(store.set_flag(key, value)),
             Self::Number(value) => Box::pin(store.set_number(key, value)),
-            Self::Text(value) => Box::pin(store.set_text(key, value)),
+            Self::Text(value) => Box::pin(store.set_text(key, value.to_owned())),
+            Self::Bounds(bounds) => Box::pin(store.set_text(key, bounds_to_text(bounds))),
         }
+    }
+}
+
+/// The bounds a layout restart saved for the window to open at, if any.
+pub fn restart_bounds(saved: &HashMap<String, types::Value>) -> Option<WindowBounds> {
+    match saved.get(RESTART_BOUNDS)? {
+        types::Value::Text(text) => bounds_from_text(text),
+        _ => None,
+    }
+}
+
+fn bounds_to_text(bounds: WindowBounds) -> String {
+    let (state, bounds) = match bounds {
+        WindowBounds::Windowed(bounds) => ("windowed", bounds),
+        WindowBounds::Maximized(bounds) => ("maximized", bounds),
+        WindowBounds::Fullscreen(bounds) => ("fullscreen", bounds),
+    };
+    format!(
+        "{state}:{},{},{},{}",
+        f32::from(bounds.origin.x),
+        f32::from(bounds.origin.y),
+        f32::from(bounds.size.width),
+        f32::from(bounds.size.height)
+    )
+}
+
+fn bounds_from_text(text: &str) -> Option<WindowBounds> {
+    let (state, numbers) = text.split_once(':')?;
+    let numbers: Vec<f32> = numbers
+        .split(',')
+        .map(|number| number.parse().ok())
+        .collect::<Option<_>>()?;
+    let [x, y, width, height] = numbers[..] else {
+        return None;
+    };
+    let bounds = Bounds::new(point(px(x), px(y)), size(px(width), px(height)));
+    match state {
+        "windowed" => Some(WindowBounds::Windowed(bounds)),
+        "maximized" => Some(WindowBounds::Maximized(bounds)),
+        "fullscreen" => Some(WindowBounds::Fullscreen(bounds)),
+        _ => None,
     }
 }
 
@@ -314,12 +359,56 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::{Bounds, WindowBounds, point, px, size};
+
     use super::{
-        APPEARANCE, Appearance, CLOSE_TO_TRAY, EDITOR, LAYOUT, Layout, MOTION, Motion, SHELL_SHARE,
-        SIDEBAR_WIDTH, Settings, ThemeFamily,
+        APPEARANCE, Appearance, CLOSE_TO_TRAY, EDITOR, LAYOUT, Layout, MOTION, Motion,
+        RESTART_BOUNDS, SHELL_SHARE, SIDEBAR_WIDTH, Settings, ThemeFamily, bounds_from_text,
+        bounds_to_text, restart_bounds,
     };
     use agentshub_core::editors::Editor;
-    use agentshub_core::store::Db;
+    use agentshub_core::store::{Db, Store};
+
+    fn somewhere() -> Bounds<gpui_kit::Pixels> {
+        Bounds::new(point(px(120.), px(-40.5)), size(px(1024.), px(700.25)))
+    }
+
+    #[test]
+    fn bounds_read_back_as_written() {
+        for bounds in [
+            WindowBounds::Windowed(somewhere()),
+            WindowBounds::Maximized(somewhere()),
+            WindowBounds::Fullscreen(somewhere()),
+        ] {
+            assert_eq!(bounds_from_text(&bounds_to_text(bounds)), Some(bounds));
+        }
+    }
+
+    #[test]
+    fn malformed_bounds_are_ignored() {
+        for text in [
+            "",
+            "1,2",
+            "windowed:x,y,w,h",
+            "windowed:1,2,3",
+            "docked:1,2,3,4",
+        ] {
+            assert_eq!(bounds_from_text(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn saved_bounds_are_read_once() {
+        let saved = WindowBounds::Windowed(somewhere());
+        let db = Db::open_in_memory().unwrap();
+        db.set_text(RESTART_BOUNDS, &bounds_to_text(saved)).unwrap();
+        assert_eq!(restart_bounds(&db.settings().unwrap()), Some(saved));
+        let store = Store::new(db).unwrap();
+        let (key, value) = Settings::clear_restart_bounds();
+        smol::block_on(value.save(key, &store)).unwrap();
+        let settings = smol::block_on(store.settings()).unwrap();
+        assert_eq!(restart_bounds(&settings), None);
+    }
 
     #[test]
     fn loads_what_was_saved() {

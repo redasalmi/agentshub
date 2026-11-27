@@ -131,6 +131,20 @@ impl Settings {
         (LAYOUT, Value::Text(value.key()))
     }
 
+    /// Saves where the window is for the next start to open it there, once
+    /// (see `clear_restart_bounds`).
+    #[must_use = "the setting is saved only once the runtime is asked to save it"]
+    pub fn save_restart_bounds(bounds: WindowBounds) -> (&'static str, Value) {
+        (RESTART_BOUNDS, Value::Bounds(bounds))
+    }
+
+    /// Forgets the bounds `save_restart_bounds` saved, once a start has read
+    /// them, so a later one opens centred.
+    #[must_use = "the setting is saved only once the runtime is asked to save it"]
+    pub fn clear_restart_bounds() -> (&'static str, Value) {
+        (RESTART_BOUNDS, Value::Text(""))
+    }
+
     #[must_use = "the setting is saved only once the runtime is asked to save it"]
     pub fn set_editor(value: Editor, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {

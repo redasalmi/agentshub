@@ -81,6 +81,7 @@ impl Runtime {
             lock,
             imported,
             settings,
+            restart_bounds,
             projects,
             broken,
         } = opened;
@@ -108,6 +109,9 @@ impl Runtime {
         };
         runtime.update_codex_watch();
         runtime.catch_up(cx);
+        if restart_bounds.is_some() {
+            runtime.save_settings(vec![Settings::clear_restart_bounds()], cx);
+        }
         // Released once the window and the tray let go of it, as the app
         // quits.
         cx.on_release(|this, cx| this.shutdown(cx)).detach();
