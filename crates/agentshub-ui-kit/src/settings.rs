@@ -14,8 +14,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use agentshub_app::settings::{
-    Appearance, DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE, Motion,
-    Settings, ThemeFamily,
+    Appearance, DEFAULT_TERMINAL_FONT_SIZE, Layout, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
+    Motion, Settings, ThemeFamily,
 };
 use agentshub_core::editors::Editor;
 
@@ -34,6 +34,8 @@ pub const SHORTCUTS_WORK_ANYWHERE: &str = "They work while an agent has the keyb
 pub enum SettingsIntent {
     Close,
     SetTheme(ThemeFamily),
+    SetLayout(Layout),
+    RestartForLayout,
     SetAppearance(Appearance),
     SetMotion(Motion),
     Zoom(f32),
@@ -96,6 +98,7 @@ fn render_settings(
     cx: &mut Context<SettingsView>,
 ) -> AnyElement {
     let theme_focus = choice_focus("theme", ThemeFamily::ALL.len(), window, cx);
+    let layout_focus = choice_focus("layout", Layout::ALL.len(), window, cx);
     let mode_focus = choice_focus("appearance", Appearance::ALL.len(), window, cx);
     let motion_focus = choice_focus("motion", Motion::ALL.len(), window, cx);
     let editor_row = render_editor_row(cx);
@@ -110,6 +113,8 @@ fn render_settings(
         worktree_by_default,
         motion,
         terminal_font_size,
+        layout,
+        next_layout,
         ..
     } = *cx.global::<Settings>();
     let dark = cx.theme().is_dark();
@@ -224,6 +229,7 @@ fn render_settings(
                         .into_any_element(),
                     cx,
                 ),
+                render_layout_row(layout, next_layout, layout_focus, window, cx),
                 setting_row(
                     "Mode",
                     Some("System follows your desktop's light or dark preference."),
@@ -448,6 +454,67 @@ fn render_settings(
                 .font_family(theme.mono_font_family.clone())
                 .text_color(theme.muted_foreground)
                 .child(concat!("Agents Hub ", env!("CARGO_PKG_VERSION"))),
+        )
+        .into_any_element()
+}
+
+/// The layout the app opens in next, picked among `Layout::ALL`, and while
+/// it isn't `open`, the one the window opened in, a button to restart into
+/// it now.
+fn render_layout_row(
+    open: Layout,
+    next: Layout,
+    focus: Vec<FocusHandle>,
+    window: &Window,
+    cx: &Context<SettingsView>,
+) -> AnyElement {
+    let row = setting_row(
+        "Layout",
+        Some(
+            "Classic lists each project's chats beside a rail of projects. Triage lists every \
+             chat by what needs you.",
+        ),
+        segmented(
+            "layout",
+            Layout::ALL.map(|each| (each, each.label())).to_vec(),
+            next,
+            focus,
+            SettingsIntent::SetLayout,
+            window,
+            cx,
+        ),
+        cx,
+    );
+    if next == open {
+        return row;
+    }
+    v_flex()
+        .child(row)
+        .child(
+            h_flex()
+                .px_4()
+                .pb_3()
+                .gap_x_6()
+                .gap_y_2()
+                .flex_wrap()
+                .justify_between()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "Agents Hub opens in {} the next time it starts.",
+                            next.label()
+                        )),
+                )
+                .child(
+                    Button::new("restart-for-layout")
+                        .small()
+                        .label("Restart now")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.send(SettingsIntent::RestartForLayout, window, cx)
+                        })),
+                ),
         )
         .into_any_element()
 }

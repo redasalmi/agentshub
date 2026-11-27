@@ -1,6 +1,7 @@
 //! The settings screen and the preferences that change the app's look.
 
 use super::*;
+use crate::dialogs;
 
 impl Workspace {
     /// Shows the settings in place of the chat, or the chat again. The focus
@@ -87,6 +88,43 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Saves the layout the app opens in next and, unless the window is in
+    /// it, asks whether to restart into it now.
+    fn set_layout(&mut self, value: Layout, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = Settings::set_layout(value, cx);
+        self.save_setting(saved, cx);
+        if value == cx.global::<Settings>().layout {
+            return;
+        }
+        let running = self
+            .runtime
+            .read(cx)
+            .open_chats()
+            .filter(|chat| chat.running)
+            .count();
+        let this = cx.entity().downgrade();
+        dialogs::restart_for_layout(
+            window,
+            cx,
+            value,
+            running,
+            move |window, cx| {
+                this.update(cx, |this, cx| this.restart_into_layout(window, cx))
+                    .ok();
+            },
+            |_, _| {},
+        );
+    }
+
+    /// Restarts into the layout the app opens in next, with the window where
+    /// it is. Shutdown waits for the writes asked for, so the bounds are
+    /// saved before the next start reads them.
+    fn restart_into_layout(&self, window: &Window, cx: &mut App) {
+        let saved = Settings::save_restart_bounds(window.inner_window_bounds());
+        self.save_setting(saved, cx);
+        cx.restart();
+    }
+
     /// Applies what the settings view asked for.
     pub(super) fn settings_intent(
         &mut self,
@@ -97,6 +135,8 @@ impl Workspace {
         match intent {
             SettingsIntent::Close => self.show_settings(false, window, cx),
             SettingsIntent::SetTheme(theme) => self.set_theme(theme, window, cx),
+            SettingsIntent::SetLayout(value) => self.set_layout(value, window, cx),
+            SettingsIntent::RestartForLayout => self.restart_into_layout(window, cx),
             SettingsIntent::SetAppearance(value) => self.set_appearance(value, window, cx),
             SettingsIntent::SetMotion(value) => self.set_motion(value, window, cx),
             SettingsIntent::Zoom(by) => self.zoom_terminals(by, window, cx),

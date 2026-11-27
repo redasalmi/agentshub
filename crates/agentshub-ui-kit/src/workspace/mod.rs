@@ -28,7 +28,7 @@ use crate::terminal_view::{self, TerminalView};
 use crate::widgets::group_heading;
 use agentshub_app::alerts;
 use agentshub_app::settings::{
-    Appearance, DEFAULT_TERMINAL_FONT_SIZE, Motion, Settings, ThemeFamily, Value,
+    Appearance, DEFAULT_TERMINAL_FONT_SIZE, Layout, Motion, Settings, ThemeFamily, Value,
 };
 use agentshub_core::agent::Agent;
 use agentshub_core::format::home_relative;

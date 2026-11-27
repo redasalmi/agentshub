@@ -18,9 +18,9 @@ shot opened
 xdotool mousemove 640 400
 for _ in 1 2 3 4 5 6 7 8 9 10; do xdotool click 5; sleep 0.1; done
 shot notifications
-click 1090 318
+click 1090 412
 wait_until 5 "popups off" [ "$(setting notification_popups)" = "0" ]
-click 1090 389
+click 1090 483
 wait_until 5 "sound off" [ "$(setting notification_sound)" = "0" ]
 shot changed
 
