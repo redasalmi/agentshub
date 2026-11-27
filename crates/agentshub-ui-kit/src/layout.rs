@@ -9,7 +9,7 @@ use gpui_kit::*;
 
 use agentshub_core::status::Status;
 use agentshub_core::store::{Chat, Project};
-use agentshub_runtime::Runtime;
+use agentshub_runtime::{ChatState, Runtime};
 
 use crate::chat_body::ChatBody;
 use crate::palette::{Entry, Pick};
@@ -152,8 +152,12 @@ pub struct ShownChat {
 /// What each chat whose CLI runs is doing, as the layouts show it: a CLI
 /// that finished shows as done until its chat is seen, and as idle after.
 pub fn running(runtime: &Runtime) -> HashMap<i64, Option<Status>> {
-    runtime
-        .open_chats()
+    running_of(runtime.open_chats())
+}
+
+fn running_of<'a>(chats: impl IntoIterator<Item = ChatState<'a>>) -> HashMap<i64, Option<Status>> {
+    chats
+        .into_iter()
         .filter(|chat| chat.running)
         .map(|chat| {
             let status = match chat.status {
@@ -190,4 +194,146 @@ pub fn running_chats<'a>(
         .collect();
     chats.sort_by_key(|(_, _, tone)| tone.urgency());
     chats
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    use agentshub_core::agent::Agent;
+    use agentshub_core::status::Status;
+    use agentshub_core::store::{Chat, Project};
+    use agentshub_runtime::ChatState;
+
+    use super::{running_chats, running_of};
+    use crate::status::Tone;
+
+    fn open(id: i64, status: Option<Status>, unseen: bool, running: bool) -> ChatState<'static> {
+        ChatState {
+            id,
+            agent: Agent::Claude,
+            cwd: Path::new("/tmp"),
+            status,
+            turn: None,
+            unseen,
+            running,
+            message: None,
+            notice: None,
+        }
+    }
+
+    fn chat(id: i64, project_id: i64, archived: bool) -> Chat {
+        Chat {
+            id,
+            project_id,
+            agent: Agent::Claude,
+            title: None,
+            pinned: false,
+            updated_at: 0,
+            archived_at: archived.then_some(1),
+            worktree: None,
+        }
+    }
+
+    fn project(id: i64, archived: bool, chats: Vec<Chat>) -> Project {
+        Project {
+            id,
+            path: format!("/tmp/{id}").into(),
+            name: id.to_string(),
+            archived_at: archived.then_some(1),
+            chats,
+        }
+    }
+
+    #[test]
+    fn a_finished_chat_is_done_until_seen() {
+        let running = running_of([
+            open(1, Some(Status::Done), true, true),
+            open(2, Some(Status::Done), false, true),
+            open(3, Some(Status::Idle), true, true),
+            open(4, Some(Status::Idle), false, true),
+            open(5, Some(Status::Working), true, true),
+            open(6, None, false, true),
+            open(7, Some(Status::Done), true, false),
+        ]);
+        assert_eq!(running[&1], Some(Status::Done));
+        assert_eq!(running[&2], Some(Status::Idle));
+        assert_eq!(running[&3], Some(Status::Done));
+        assert_eq!(running[&4], Some(Status::Idle));
+        assert_eq!(running[&5], Some(Status::Working));
+        assert_eq!(running[&6], None);
+        // A CLI that doesn't run isn't listed, whatever it last said.
+        assert!(!running.contains_key(&7));
+    }
+
+    #[test]
+    fn leaves_out_what_is_archived() {
+        let projects = [
+            project(1, false, vec![chat(10, 1, false), chat(11, 1, true)]),
+            project(2, true, vec![chat(20, 2, false)]),
+        ];
+        let running = HashMap::from([
+            (10, Some(Status::Working)),
+            (11, Some(Status::Working)),
+            (20, Some(Status::Working)),
+        ]);
+        let ids: Vec<_> = running_chats(&projects, &running)
+            .into_iter()
+            .map(|(_, chat, _)| chat.id)
+            .collect();
+        assert_eq!(ids, [10]);
+    }
+
+    #[test]
+    fn puts_the_most_urgent_first_then_the_projects_order() {
+        let projects = [
+            project(
+                1,
+                false,
+                vec![
+                    chat(10, 1, false),
+                    chat(11, 1, false),
+                    chat(12, 1, false),
+                    chat(13, 1, false),
+                ],
+            ),
+            project(
+                2,
+                false,
+                vec![
+                    chat(20, 2, false),
+                    chat(21, 2, false),
+                    chat(22, 2, false),
+                    chat(23, 2, false),
+                ],
+            ),
+        ];
+        let running = HashMap::from([
+            (10, Some(Status::Idle)),
+            (11, Some(Status::Working)),
+            (12, None),
+            (13, Some(Status::Done)),
+            (20, Some(Status::Working)),
+            (21, Some(Status::Error)),
+            (22, Some(Status::Blocked(None))),
+            // Not running: not listed.
+        ]);
+        let listed: Vec<_> = running_chats(&projects, &running)
+            .into_iter()
+            .map(|(project, chat, tone)| (project.id, chat.id, tone))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (2, 22, Tone::NeedsYou(None)),
+                (2, 21, Tone::Error),
+                (1, 13, Tone::Done),
+                (1, 11, Tone::Working),
+                (2, 20, Tone::Working),
+                (1, 12, Tone::Running),
+                (1, 10, Tone::Idle),
+            ]
+        );
+    }
 }
