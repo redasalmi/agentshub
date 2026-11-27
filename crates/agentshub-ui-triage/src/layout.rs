@@ -205,29 +205,39 @@ impl TriageLayout {
         Some((header, banner))
     }
 
-    /// What the title bar says while no chat shows: the selected project's
-    /// name, over the empty state.
-    fn render_title(&self, body: &Body, cx: &App) -> AnyElement {
-        let name = match body {
-            Body::Empty(_) => {
-                let selected = self.list.read(cx).selected_project();
-                self.runtime
-                    .read(cx)
-                    .projects()
-                    .iter()
-                    .find(|project| Some(project.id) == selected)
-                    .map(|project| SharedString::from(project.name.clone()))
-            }
-            Body::Settings(_) | Body::Chat(_) => None,
-        };
-        div()
+    /// What shows while no chat does: a title bar that names `title`, over
+    /// `body`.
+    fn render_screen(
+        &self,
+        title: Option<SharedString>,
+        body: AnyElement,
+        menu: Option<Entity<PopupMenu>>,
+        cx: &App,
+    ) -> AnyElement {
+        let title = div()
             .flex_1()
             .min_w_0()
             .truncate()
             .text_size(px(15.))
             .font_semibold()
-            .children(name)
+            .children(title)
+            .into_any_element();
+        v_flex()
+            .size_full()
+            .child(self.render_title_bar(title, menu, cx))
+            .child(v_flex().flex_1().min_h_0().child(body))
             .into_any_element()
+    }
+
+    /// The selected project's name.
+    fn selected_name(&self, cx: &App) -> Option<SharedString> {
+        let selected = self.list.read(cx).selected_project();
+        self.runtime
+            .read(cx)
+            .projects()
+            .iter()
+            .find(|project| Some(project.id) == selected)
+            .map(|project| project.name.clone().into())
     }
 }
 
@@ -331,21 +341,13 @@ impl LayoutView for TriageLayout {
         let menu = parts.running_menu;
         let main = match parts.body {
             Body::Chat(shown) => self.render_chat(&shown, menu, window, cx),
-            body => {
-                let title = self.render_title(&body, cx);
-                let body = match body {
-                    Body::Settings(view) => view
-                        .update(cx, |view, cx| view.render(room, window, cx))
-                        .into_any_element(),
-                    Body::Empty(empty) => empty,
-                    Body::Chat(_) => Empty.into_any_element(),
-                };
-                v_flex()
-                    .size_full()
-                    .child(self.render_title_bar(title, menu, cx))
-                    .child(v_flex().flex_1().min_h_0().child(body))
-                    .into_any_element()
+            Body::Settings(view) => {
+                let body = view
+                    .update(cx, |view, cx| view.render(room, window, cx))
+                    .into_any_element();
+                self.render_screen(None, body, menu, cx)
             }
+            Body::Empty(empty) => self.render_screen(self.selected_name(cx), empty, menu, cx),
         };
         h_flex()
             .size_full()
