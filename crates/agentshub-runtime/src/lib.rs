@@ -5,10 +5,12 @@ pub mod terminal;
 mod event;
 mod intent;
 mod runtime;
+mod sessions;
 
 pub use event::RuntimeEvent;
 pub use intent::Intent;
 pub use runtime::Runtime;
+pub use sessions::{import_chat, reported_sessions};
 
 #[cfg(test)]
 mod tests;

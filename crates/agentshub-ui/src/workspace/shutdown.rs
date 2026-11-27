@@ -4,6 +4,7 @@
 //! thread and reads what the CLIs wrote last itself.
 
 use super::*;
+use agentshub_runtime::import_chat;
 
 impl Workspace {
     /// Stops every CLI, saves what is queued, and reads the sessions the

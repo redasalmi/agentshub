@@ -40,12 +40,12 @@ use agentshub_core::agent::Agent;
 use agentshub_core::reports::{self, Reports};
 use agentshub_core::sessions;
 use agentshub_core::status::Status;
-use agentshub_core::store::{self, Change, Store};
+use agentshub_core::store::{self, Change};
 use agentshub_core::worktree::{self, Worktree};
 #[cfg(target_os = "linux")]
 use agentshub_platform::scope;
 use agentshub_runtime::terminal::{self, Exited, Pty, StatusChanged, Terminal};
-use agentshub_runtime::{Intent, Runtime, RuntimeEvent};
+use agentshub_runtime::{Intent, Runtime, RuntimeEvent, reported_sessions};
 
 mod actions;
 mod catalog;
@@ -75,9 +75,6 @@ mod terminals;
 
 pub use actions::*;
 pub(crate) use format::{Turn, duration, plural};
-pub(crate) use session::import_chat;
-#[cfg(test)]
-pub(crate) use session::reported_sessions;
 
 use agentshub_core::lifecycle::{Added, Codex, Deleted, Reaped, Saved, Saving};
 

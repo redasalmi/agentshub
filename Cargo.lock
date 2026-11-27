@@ -177,8 +177,10 @@ dependencies = [
  "jiff",
  "libghostty-vt",
  "portable-pty",
+ "serde_json",
  "smol",
  "unicode-segmentation",
+ "uuid",
 ]
 
 [[package]]
