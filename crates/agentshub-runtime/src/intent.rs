@@ -82,4 +82,13 @@ pub enum Intent {
     /// Saves settings the window applied, as each setter of `Settings` gives
     /// them: if one can't be saved, it lasts until the app quits.
     SaveSettings(Vec<(&'static str, Value)>),
+    /// The sidebar selected another project, or none, whose shell the panel
+    /// is for (see `Runtime::shell`).
+    ProjectSelected(Option<i64>),
+    /// Whether the settings or the tray cover the terminals, so that none of
+    /// them builds frames.
+    SetCovered(bool),
+    /// Shows the shell the panel is for, starting it if it isn't running, or
+    /// hides it if it shows and nothing covers it (see `Runtime::shell`).
+    ToggleShell,
 }

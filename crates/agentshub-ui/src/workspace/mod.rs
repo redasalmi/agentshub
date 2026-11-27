@@ -36,10 +36,9 @@ use agentshub_app::settings::{
 use agentshub_core::agent::Agent;
 use agentshub_core::status::Status;
 use agentshub_core::store::{self, Change};
-use agentshub_core::worktree::Worktree;
 #[cfg(target_os = "linux")]
 use agentshub_platform::scope;
-use agentshub_runtime::terminal::{self, Exited, Pty, Terminal};
+use agentshub_runtime::terminal::{self, Terminal};
 use agentshub_runtime::{Intent, Runtime, RuntimeEvent, take_and_remove};
 
 mod actions;
@@ -103,10 +102,8 @@ pub struct Workspace {
     palette_start: Option<(i64, palette::Sections)>,
     _theme: Subscription,
     _focus_lost: Subscription,
-    /// The projects' shells, by folder, for quick commands next to their
-    /// chats. Nothing about them is saved, and they run until they exit or
-    /// the app quits.
-    shells: HashMap<PathBuf, Shell>,
+    /// The views of the runtime's shells, by folder.
+    shell_views: HashMap<PathBuf, Entity<TerminalView>>,
     /// Whether the settings show in place of the chat.
     settings_shown: bool,
     /// The running chats' menu, while it is open.
@@ -177,15 +174,6 @@ fn clamp_sidebar_width(width: Pixels, window_width: Pixels, names: Pixels) -> Pi
         .min(window_width - MIN_MAIN_WIDTH - names)
         .max(MIN_SIDEBAR_WIDTH);
     width.clamp(MIN_SIDEBAR_WIDTH, max)
-}
-
-struct Shell {
-    terminal: Entity<Terminal>,
-    view: Entity<TerminalView>,
-    /// Whether the panel shows this shell. Each project keeps its own, so
-    /// switching projects leaves the panel as it was in each of them.
-    shown: bool,
-    _exited: Subscription,
 }
 
 /// A chat's view state: its terminal and the history above it.

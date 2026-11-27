@@ -212,6 +212,9 @@ impl Runtime {
                 terminal.terminal.read(cx).set_colors(colors);
             }
         }
+        for shell in self.shells.values() {
+            shell.terminal.read(cx).set_colors(colors);
+        }
     }
 
     /// Whether a chat, or its project, is archived.
@@ -656,6 +659,7 @@ impl Runtime {
             self.active = None;
             cx.emit(RuntimeEvent::ActiveChanged(None));
         }
+        self.sync_terminals(cx);
         self.tick_turn(cx);
         reaped
     }
@@ -825,6 +829,7 @@ impl Runtime {
         self.active = Some(id);
         self.lifecycle.shown(id);
         cx.emit(RuntimeEvent::ActiveChanged(Some(id)));
+        self.sync_terminals(cx);
         self.tick_turn(cx);
     }
 

@@ -96,18 +96,10 @@ impl Workspace {
             RuntimeEvent::Undoable { message, undo } => {
                 this.offer_undo(message.clone(), undo.clone(), cx)
             }
-            RuntimeEvent::RemovingWorktree {
-                worktree,
-                project,
-                reaped,
-            } => this.remove_worktree(worktree, project, reaped.clone(), cx),
+            RuntimeEvent::ShellStarted(cwd) => this.shell_started(cwd, cx),
+            RuntimeEvent::ShellEnded(cwd) => this.shell_ended(cwd, cx),
             RuntimeEvent::ImportChecked { path, checked } => this.import_checked(path, checked, cx),
             RuntimeEvent::Restart => cx.restart(),
-            RuntimeEvent::RemovingProject(path) => {
-                // Dropping its terminal kills the shell.
-                this.shells.remove(path);
-                this.sync_terminals(cx);
-            }
         });
 
         let window_closed = {
@@ -127,9 +119,6 @@ impl Workspace {
             let colors = appearance::terminal_colors(cx);
             this.runtime
                 .update(cx, |runtime, cx| runtime.set_colors(colors, cx));
-            for shell in this.shells.values() {
-                shell.terminal.read(cx).set_colors(colors);
-            }
         });
 
         // Nothing has the keyboard once what had it is gone, such as the
@@ -162,7 +151,7 @@ impl Workspace {
             palette_start: None,
             _theme: theme,
             _focus_lost: focus_lost,
-            shells: HashMap::new(),
+            shell_views: HashMap::new(),
             settings_shown: false,
             running_menu: None,
             hidden: false,

@@ -9,6 +9,7 @@ mod manage;
 mod new_chat;
 mod runtime;
 mod sessions;
+mod shells;
 
 pub use chats::{ChatState, IdleCheck, take_and_remove};
 pub use event::RuntimeEvent;

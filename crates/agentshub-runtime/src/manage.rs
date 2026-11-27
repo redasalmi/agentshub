@@ -217,9 +217,21 @@ impl Runtime {
     /// Closes a project's chats, and archives it with them. Opening one of
     /// its chats again brings it back.
     pub(crate) fn archive_project(&mut self, id: i64, cx: &mut Context<Self>) {
-        if !self.projects().iter().any(|project| project.id == id) {
+        let Some((path, worktrees)) =
+            self.projects()
+                .iter()
+                .find(|project| project.id == id)
+                .map(|project| {
+                    let worktrees: Vec<PathBuf> = project
+                        .chats
+                        .iter()
+                        .filter_map(|chat| Some(chat.worktree.as_ref()?.root.clone()))
+                        .collect();
+                    (project.path.clone(), worktrees)
+                })
+        else {
             return;
-        }
+        };
         let ids = self.chats_of(id);
         for id in &ids {
             self.lifecycle.cancel_opening(*id);
@@ -243,6 +255,7 @@ impl Runtime {
                 archived: false,
             }),
         });
+        self.stop_archived_shells(&path, &worktrees, cx);
     }
 
     /// Stops a chat's agent and deletes the chat, with `worktree`, the one
@@ -284,11 +297,7 @@ impl Runtime {
             // Its notification can't open it anymore.
             alerts::withdraw(id, cx);
             if let Some((worktree, project)) = worktree {
-                cx.emit(RuntimeEvent::RemovingWorktree {
-                    worktree,
-                    project,
-                    reaped,
-                });
+                self.remove_chat_worktree(&worktree, &project, reaped, cx);
             }
         }
         cx.emit(RuntimeEvent::HistoryChanged {
@@ -343,7 +352,7 @@ impl Runtime {
                 .map(|worktree| (worktree, project.path.clone()));
             self.lifecycle.mark_deleting(chat.id, worktree, reaped);
         }
-        cx.emit(RuntimeEvent::RemovingProject(project.path.clone()));
+        self.stop_project_shell(&project.path, cx);
         let removed = self.store.remove_project(id, project.path);
         cx.spawn(async move |this, cx| {
             let removed = removed.await;

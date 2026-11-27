@@ -1,6 +1,8 @@
 //! The runtime's state, and the intents that change it.
 
+use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 
 use agentshub_app::bootstrap::Opened;
 use agentshub_app::catalog::Catalog;
@@ -13,6 +15,7 @@ use gpui_kit::{Context, EventEmitter, SharedString, Task};
 
 use crate::chats::ChatRuntime;
 use crate::sessions::Following;
+use crate::shells::Shell;
 use crate::terminal::Colors;
 use crate::{Intent, RuntimeEvent};
 
@@ -49,6 +52,13 @@ pub struct Runtime {
     /// thread, and the lookup under way.
     pub(crate) installed: Option<(i64, Vec<Agent>)>,
     pub(crate) installed_lookup: Option<Task<()>>,
+    /// The projects' shells, by folder.
+    pub(crate) shells: HashMap<PathBuf, Shell>,
+    /// The project the sidebar selected, whose shell the panel is for.
+    pub(crate) selected: Option<i64>,
+    /// Whether the settings or the tray cover the terminals (see
+    /// `Intent::SetCovered`).
+    pub(crate) covered: bool,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
     /// Why the database can't be used: it didn't open, or another Agents Hub
@@ -85,6 +95,9 @@ impl Runtime {
             checkouts: Vec::new(),
             installed: None,
             installed_lookup: None,
+            shells: HashMap::new(),
+            selected: None,
+            covered: false,
             _lock: lock,
             broken: broken.map(SharedString::from),
             startup: Some((settings, imported)),
@@ -143,6 +156,9 @@ impl Runtime {
             Intent::Import(path) => self.check_import(path, cx),
             Intent::ConfirmImport(pending) => self.confirm_import(&pending, cx),
             Intent::SaveSettings(settings) => self.save_settings(settings, cx),
+            Intent::ProjectSelected(project) => self.select_project(project, cx),
+            Intent::SetCovered(covered) => self.set_covered(covered, cx),
+            Intent::ToggleShell => self.toggle_shell(cx),
         }
     }
 

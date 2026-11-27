@@ -188,7 +188,7 @@ impl Workspace {
             && self.chat_focus.contains_focused(window, cx);
         let focused_shell = self
             .shown_shell(cx)
-            .filter(|(_, shell)| shell.view.focus_handle(cx).contains_focused(window, cx))
+            .filter(|(_, view)| view.focus_handle(cx).contains_focused(window, cx))
             .map(|(cwd, _)| cwd);
         self.apply(intent, cx);
         let shell = self.shown_shell(cx);
@@ -197,7 +197,7 @@ impl Workspace {
             // the chat is gone, so a worktree's shell gives way to the
             // project's, which takes the keyboard if it's running.
             Some(cwd) if shell.as_ref().map(|(shown, _)| shown) != Some(&cwd) => match shell {
-                Some((_, shell)) => shell.view.focus_handle(cx).focus(window, cx),
+                Some((_, view)) => view.focus_handle(cx).focus(window, cx),
                 None => self.focus_chat(window, cx),
             },
             // The shown chat went, its terminal and header with it, and the

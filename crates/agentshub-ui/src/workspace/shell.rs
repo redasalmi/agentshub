@@ -1,44 +1,25 @@
-//! The project shell and the terminal wiring around the chats.
+//! The project shell's view and the terminal wiring around the chats.
 
 use super::*;
 
 impl Workspace {
-    pub(super) fn active_cwd(&self, cx: &App) -> Option<PathBuf> {
-        let runtime = self.runtime.read(cx);
-        Some(runtime.chat(runtime.active()?)?.cwd.to_path_buf())
-    }
-
-    /// The folder of the shell that shows: the selected project, or the
-    /// shown chat's folder when the chat is in it, which may be a worktree;
-    /// without a project selected, the shown chat's folder, or the home one.
-    pub(super) fn shell_cwd(&self, cx: &App) -> Option<PathBuf> {
-        let selected = self.sidebar.read(cx).selected();
-        let active = self.runtime.read(cx).active();
-        let shows_chat_of =
-            |project: &store::Project| project.chats.iter().any(|chat| Some(chat.id) == active);
-        match selected {
-            Some(project) if !shows_chat_of(project) => Some(project.path.clone()),
-            _ => self.active_cwd(cx),
-        }
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-    }
-
-    pub(super) fn shown_shell(&self, cx: &App) -> Option<(PathBuf, &Shell)> {
-        let cwd = self.shell_cwd(cx)?;
-        let shell = self.shells.get(&cwd)?;
-        shell.shown.then_some((cwd, shell))
+    /// The shell the panel shows, with its folder.
+    pub(super) fn shown_shell(&self, cx: &App) -> Option<(PathBuf, Entity<TerminalView>)> {
+        let (cwd, _, shown) = self.runtime.read(cx).shell()?;
+        let view = self.shell_views.get(&cwd)?.clone();
+        shown.then_some((cwd, view))
     }
 
     /// The shell is the selected project's, so it changes with the selection,
     /// and takes the focus from the one before.
     pub(super) fn project_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self
-            .shown_shell(cx)
-            .map(|(_, shell)| shell.view.focus_handle(cx));
+        let selected = self.sidebar.read(cx).selected().map(|project| project.id);
+        self.apply(Intent::ProjectSelected(selected), cx);
+        let shown = self.shown_shell(cx).map(|(_, view)| view.focus_handle(cx));
         let in_shell = self
-            .shells
+            .shell_views
             .values()
-            .any(|shell| shell.view.focus_handle(cx).is_focused(window));
+            .any(|view| view.focus_handle(cx).is_focused(window));
         if in_shell && !shown.as_ref().is_some_and(|focus| focus.is_focused(window)) {
             match shown {
                 Some(focus) if !self.settings_shown => focus.focus(window, cx),
@@ -49,7 +30,6 @@ impl Workspace {
         // New Chat dialog asked for before doesn't take the view from it.
         self.runtime
             .update(cx, |runtime, _| runtime.lifecycle_mut().navigate());
-        self.sync_terminals(cx);
         self.look_up_installed(cx);
         cx.notify();
     }
@@ -62,30 +42,17 @@ impl Workspace {
         }
     }
 
-    /// Only the shown chat's CLI and project shell build frames, and neither
-    /// does while the settings cover them or the window is closed to the tray.
-    pub(super) fn sync_terminals(&self, cx: &App) {
-        let shown = !self.hidden && !self.settings_shown;
-        let runtime = self.runtime.read(cx);
-        let chat = runtime.active().filter(|_| shown);
-        for each in runtime.open_chats() {
-            if let Some(terminal) = runtime.terminal(each.id) {
-                terminal.read(cx).set_visible(Some(each.id) == chat);
-            }
-        }
-        let shell = self.shown_shell(cx).map(|(cwd, _)| cwd).filter(|_| shown);
-        for (cwd, each) in &self.shells {
-            each.terminal
-                .read(cx)
-                .set_visible(Some(cwd) == shell.as_ref());
-        }
+    /// Tells the runtime whether the settings or the tray cover the
+    /// terminals, which then build no frames.
+    pub(super) fn cover_terminals(&self, cx: &mut App) {
+        self.apply(Intent::SetCovered(self.settings_shown || self.hidden), cx);
     }
 
     /// Stops the shown terminals from building frames while the window is
     /// closed to the tray, and starts them again when it opens.
     pub fn set_hidden(&mut self, hidden: bool, cx: &mut App) {
         self.hidden = hidden;
-        self.sync_terminals(cx);
+        self.cover_terminals(cx);
         self.set_focused(cx.active_window().is_some(), cx);
     }
 
@@ -98,82 +65,66 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Removing the project stopped its shell, and nothing would stop
-        // another one started before it is gone.
+        // The runtime starts no shell in a project being removed, and nothing
+        // changes.
         let selected = self.sidebar.read(cx).selected().map(|project| project.id);
         if selected.is_some_and(|id| self.runtime.read(cx).lifecycle().is_removing_project(id)) {
             return;
         }
-        let Some(cwd) = self.shell_cwd(cx) else {
+        self.apply(Intent::ToggleShell, cx);
+        // Without a shell, none could start, so the settings stay up.
+        let Some((cwd, terminal, shown)) = self.runtime.read(cx).shell() else {
             return;
         };
-        let settings_were_shown = std::mem::take(&mut self.settings_shown);
-        if !settings_were_shown && self.shells.get(&cwd).is_some_and(|shell| shell.shown) {
-            if let Some(shell) = self.shells.get_mut(&cwd) {
-                shell.shown = false;
-            }
-            self.focus_chat(window, cx);
+        self.settings_shown = false;
+        if shown {
+            let view = self.shell_view(cwd, terminal, cx);
+            view.focus_handle(cx).focus(window, cx);
         } else {
-            if !self.shells.contains_key(&cwd) {
-                let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-                let colors = appearance::terminal_colors(cx);
-                // Like a CLI, the shell gets a scope of its own, so what it
-                // leaves running, `nohup` jobs included, stops once it exits.
-                let pty = match Pty::spawn(&program, &[], &[], &cwd, colors) {
-                    Ok(pty) => pty,
-                    Err(err) => {
-                        // Nothing changes, so the settings stay up.
-                        self.settings_shown = settings_were_shown;
-                        window.push_notification(format!("Couldn't start {program}: {err}"), cx);
-                        return;
-                    }
-                };
-                let terminal = cx.new(|cx| Terminal::new(pty, cx));
-                let view = cx.new(|cx| TerminalView::new(terminal.clone(), cx));
-                let exited_cwd = cwd.clone();
-                // Shells can exit while the window is closed to the tray.
-                let exited = cx.subscribe(&terminal, move |this, _, _: &Exited, cx| {
-                    this.shell_exited(&exited_cwd, cx)
-                });
-                self.shells.insert(
-                    cwd.clone(),
-                    Shell {
-                        terminal,
-                        view,
-                        shown: true,
-                        _exited: exited,
-                    },
-                );
-            }
-            let shell = self
-                .shells
-                .get_mut(&cwd)
-                .expect("the shell was just started");
-            // A shell of this project may be running hidden already.
-            shell.shown = true;
-            shell.view.focus_handle(cx).focus(window, cx);
+            self.focus_chat(window, cx);
         }
-        self.sync_terminals(cx);
+        self.cover_terminals(cx);
         // Closing the settings shows the chat, which no activation reports
         // while the window already has the focus.
         self.set_focused(window.is_window_active(), cx);
         cx.notify();
     }
 
-    /// Closes a shell that exited. The panel goes with it, and the keyboard
-    /// moves back to the chat if the shell had it.
-    fn shell_exited(&mut self, cwd: &Path, cx: &mut Context<Self>) {
-        let Some(shell) = self.shells.remove(cwd) else {
+    /// The view of the shell in `cwd`, built on its terminal the first time.
+    fn shell_view(
+        &mut self,
+        cwd: PathBuf,
+        terminal: Entity<Terminal>,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalView> {
+        self.shell_views
+            .entry(cwd)
+            .or_insert_with(|| cx.new(|cx| TerminalView::new(terminal, cx)))
+            .clone()
+    }
+
+    /// Builds the view of a shell that started, if the panel is for it.
+    pub(super) fn shell_started(&mut self, cwd: &Path, cx: &mut Context<Self>) {
+        if let Some((shell, terminal, _)) = self.runtime.read(cx).shell()
+            && shell == cwd
+        {
+            self.shell_view(shell, terminal, cx);
+        }
+        cx.notify();
+    }
+
+    /// Drops the view of a shell that ended. The panel goes with it, and the
+    /// keyboard moves back to the chat if the shell had it.
+    pub(super) fn shell_ended(&mut self, cwd: &Path, cx: &mut Context<Self>) {
+        let Some(view) = self.shell_views.remove(cwd) else {
             return;
         };
-        if shell.shown {
-            // Without a window there's no focus to move.
-            cx.with_window(cx.entity_id(), |window, cx| {
-                if shell.view.focus_handle(cx).is_focused(window) {
-                    self.focus_chat(window, cx);
-                }
-            });
-        }
+        // Without a window there's no focus to move.
+        cx.with_window(cx.entity_id(), |window, cx| {
+            if view.focus_handle(cx).is_focused(window) {
+                self.focus_chat(window, cx);
+            }
+        });
         cx.notify();
     }
 }

@@ -22,11 +22,11 @@ impl Workspace {
                     if this.runtime.read(cx).catalog().unsaved() > 0 {
                         return;
                     }
-                    let shell = this.shell_cwd(cx);
+                    let shell = this.shown_shell(cx).map(|(cwd, _)| cwd);
                     match listed {
                         Ok(projects) => {
                             this.runtime
-                                .update(cx, |runtime, _| runtime.catalog_mut().listed(projects));
+                                .update(cx, |runtime, cx| runtime.listed(projects, cx));
                             this.sync_catalog(cx);
                         }
                         Err(err) => eprintln!("can't list the projects: {err}"),
@@ -38,11 +38,9 @@ impl Workspace {
                         this.sidebar
                             .update(cx, |sidebar, cx| sidebar.select(id, cx));
                     }
-                    // Which shell shows depends on the projects' chats, and a
-                    // new chat shown before they list it got its project's
-                    // shell meanwhile.
-                    if this.shell_cwd(cx) != shell {
-                        this.sync_terminals(cx);
+                    // Which shell shows depends on the projects' chats (see
+                    // `Runtime::listed`).
+                    if this.shown_shell(cx).map(|(cwd, _)| cwd) != shell {
                         cx.notify();
                     }
                 })

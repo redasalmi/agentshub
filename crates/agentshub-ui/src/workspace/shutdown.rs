@@ -156,11 +156,7 @@ impl Workspace {
                     .map(|(_, reaped, _)| reaped.clone()),
             )
             .chain(deleted_reaped)
-            .chain(
-                self.shells
-                    .values()
-                    .map(|shell| shell.terminal.read(cx).shutdown()),
-            )
+            .chain(runtime.shut_down_shells(cx))
             .chain(runtime.lifecycle().removal_waits().cloned())
             .collect();
         terminal::wait_reaped(reaped);

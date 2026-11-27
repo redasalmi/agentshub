@@ -473,8 +473,7 @@ impl Runtime {
     /// it, its CLI, if it had one, and the shells running in it, has been
     /// reaped. Git keeps one that has changes nobody committed, which the
     /// user is told about.
-    #[doc(hidden)]
-    pub fn remove_worktree(
+    pub(crate) fn remove_worktree(
         &mut self,
         worktree: &Worktree,
         project: &Path,

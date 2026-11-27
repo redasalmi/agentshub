@@ -16,7 +16,7 @@ impl Workspace {
         } else {
             self.focus_chat(window, cx);
         }
-        self.sync_terminals(cx);
+        self.cover_terminals(cx);
         self.set_focused(window.is_window_active(), cx);
         cx.notify();
     }

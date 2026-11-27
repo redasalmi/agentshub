@@ -2,9 +2,7 @@
 
 use std::path::PathBuf;
 
-use agentshub_core::lifecycle::Reaped;
 use agentshub_core::store::{PendingImport, Project};
-use agentshub_core::worktree::Worktree;
 use gpui_kit::SharedString;
 
 use crate::Intent;
@@ -55,18 +53,11 @@ pub enum RuntimeEvent {
     /// A new chat is shown in project `id`, which the sidebar selects: it
     /// doesn't list the chat yet, so it can't find its project by itself.
     SelectProject(i64),
-    /// A deleted chat's worktree, in `project`'s folder, is to be removed.
-    /// The window stops the shells running in it, and has the runtime remove
-    /// it once they and the chat's CLI, if it had one (`reaped`), have been
-    /// reaped (see `Runtime::remove_worktree`).
-    RemovingWorktree {
-        worktree: Worktree,
-        project: PathBuf,
-        reaped: Option<Reaped>,
-    },
-    /// The project in this folder is being removed, so the window stops its
-    /// shell.
-    RemovingProject(PathBuf),
+    /// The shell in this folder started, so its view can be built.
+    ShellStarted(PathBuf),
+    /// The shell in this folder exited or was stopped, and its terminal went
+    /// with it.
+    ShellEnded(PathBuf),
     /// The database at `path` was checked to import: the copy of it that
     /// `Intent::ConfirmImport` puts in place, and the projects it holds, or
     /// why it can't be imported. The window asks the user, and discards the

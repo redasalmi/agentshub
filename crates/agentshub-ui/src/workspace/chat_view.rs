@@ -23,10 +23,9 @@ impl Workspace {
             .unwrap_or_else(|| ("New chat".into(), false));
         let history = pane.history.read(cx);
         let (earlier, history_open) = (history.count(), history.is_open());
-        let shell = self.shown_shell(cx).map(|(cwd, shell)| crate::chat::Shell {
-            cwd,
-            view: shell.view.clone(),
-        });
+        let shell = self
+            .shown_shell(cx)
+            .map(|(cwd, view)| crate::chat::Shell { cwd, view });
         let on = {
             let this = cx.weak_entity();
             let id = chat.id;
@@ -79,10 +78,9 @@ impl Workspace {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let shell = self.shown_shell(cx).map(|(cwd, shell)| crate::chat::Shell {
-            cwd,
-            view: shell.view.clone(),
-        });
+        let shell = self
+            .shown_shell(cx)
+            .map(|(cwd, view)| crate::chat::Shell { cwd, view });
         let on = {
             let this = cx.weak_entity();
             Rc::new(

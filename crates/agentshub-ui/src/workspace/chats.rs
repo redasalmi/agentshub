@@ -103,37 +103,6 @@ impl Workspace {
         .detach();
     }
 
-    /// Stops the shells running in the worktree a chat ran in, and has the
-    /// runtime remove it once they and its CLI, if it had one, have been
-    /// reaped.
-    pub(super) fn remove_worktree(
-        &mut self,
-        worktree: &Worktree,
-        project: &Path,
-        reaped: Option<smol::channel::Receiver<()>>,
-        cx: &mut Context<Self>,
-    ) {
-        let inside: Vec<PathBuf> = self
-            .shells
-            .keys()
-            .filter(|cwd| cwd.starts_with(&worktree.root))
-            .cloned()
-            .collect();
-        let mut waits: Vec<_> = reaped.into_iter().collect();
-        for cwd in &inside {
-            if let Some(shell) = self.shells.remove(cwd) {
-                waits.push(shell.terminal.read(cx).shutdown());
-            }
-        }
-        if !inside.is_empty() {
-            self.sync_terminals(cx);
-            cx.notify();
-        }
-        self.runtime.update(cx, |runtime, cx| {
-            runtime.remove_worktree(worktree, project, waits, cx)
-        });
-    }
-
     /// Archives a chat, closing it first, and asks first if its agent is in
     /// the middle of something.
     pub(super) fn confirm_archive_chat(
@@ -219,32 +188,16 @@ impl Workspace {
     /// Closes a project's chats and its shell, and archives it with them.
     /// Opening one of its chats again brings it back.
     pub(super) fn archive_project(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((path, worktrees)) = self
+        if !self
             .sidebar
             .read(cx)
             .projects()
             .iter()
-            .find(|project| project.id == id)
-            .map(|project| {
-                let worktrees: Vec<PathBuf> = project
-                    .chats
-                    .iter()
-                    .filter_map(|chat| Some(chat.worktree.as_ref()?.root.clone()))
-                    .collect();
-                (project.path.clone(), worktrees)
-            })
-        else {
+            .any(|project| project.id == id)
+        {
             return;
-        };
-        self.apply_closing(Intent::ArchiveProject(id), window, cx);
-        // Dropping their terminals kills the shells, as removing the project
-        // does: its own, and the ones in its chats' worktrees.
-        let shells = self.shells.len();
-        self.shells
-            .retain(|cwd, _| *cwd != path && !worktrees.iter().any(|root| cwd.starts_with(root)));
-        if self.shells.len() != shells {
-            self.sync_terminals(cx);
         }
+        self.apply_closing(Intent::ArchiveProject(id), window, cx);
     }
 
     /// Shows `change` at once, and saves it. The projects are listed as saved

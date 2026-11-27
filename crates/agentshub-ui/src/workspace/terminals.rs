@@ -56,7 +56,6 @@ impl Workspace {
                 self.focus_chat(window, cx);
             }
         });
-        self.sync_terminals(cx);
         self.sync_sidebar(cx);
         cx.notify();
     }
@@ -83,7 +82,6 @@ impl Workspace {
     /// settings and takes the keyboard.
     pub(super) fn active_changed(&mut self, active: Option<i64>, cx: &mut Context<Self>) {
         let Some(id) = active else {
-            self.sync_terminals(cx);
             self.sync_sidebar(cx);
             cx.notify();
             return;
@@ -95,7 +93,7 @@ impl Workspace {
                 window.is_window_active()
             })
             .unwrap_or(false);
-        self.sync_terminals(cx);
+        self.cover_terminals(cx);
         self.sync_sidebar(cx);
         // Showing a chat, even the one already shown, brings its project back
         // into the rail's selection, so the chat list and New Chat follow it.
