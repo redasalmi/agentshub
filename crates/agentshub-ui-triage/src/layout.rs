@@ -200,6 +200,7 @@ impl TriageLayout {
             editors: agentshub_ui_kit::editor::editor_choices(cx),
             focus: shown.focus.clone(),
             on: Rc::clone(&shown.body.on),
+            room: window.viewport_size().width - SIDEBAR_WIDTH,
         };
         let banner = Banner::new(chat.agent, running, next, shown.focus.clone());
         Some((header, banner))

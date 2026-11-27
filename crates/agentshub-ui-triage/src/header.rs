@@ -31,6 +31,16 @@ use crate::list::project_mark;
 /// folder gives way first.
 const MAX_NAME_WIDTH: Pixels = px(200.);
 
+/// The least room the title keeps beside the buttons.
+const MIN_TITLE_WIDTH: Pixels = px(120.);
+
+/// How wide the area beside the list must be for the header to show the
+/// status pill, which the card and the banner also show, and the buttons'
+/// labels. Below these the header drops them so the buttons keep clear of
+/// the window's own controls.
+const PILL_FROM: Pixels = px(720.);
+const LABELS_FROM: Pixels = px(560.);
+
 /// What the banner says after what the chat needs.
 const ANSWER: &str = "Answer it in the terminal below.";
 
@@ -56,6 +66,8 @@ pub(crate) struct Header {
     pub editors: Option<(EditorChoice, Vec<EditorChoice>)>,
     pub focus: FocusHandle,
     pub on: On,
+    /// How wide the area beside the list is.
+    pub room: Pixels,
 }
 
 impl Header {
@@ -66,10 +78,11 @@ impl Header {
             .min_w_0()
             .h_full()
             .gap_4()
+            .overflow_hidden()
             .child(
                 v_flex()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(MIN_TITLE_WIDTH)
                     .child(
                         div()
                             .truncate()
@@ -81,7 +94,7 @@ impl Header {
             )
             .child(
                 stay_put(h_flex().flex_none().gap_4())
-                    .when(self.running, |this| {
+                    .when(self.running && self.room >= PILL_FROM, |this| {
                         this.child(status_pill(self.tone, self.turn, self.spin, cx))
                     })
                     .child(self.render_buttons()),
@@ -134,6 +147,7 @@ impl Header {
         let on = Rc::clone(&self.on);
         let focus = self.focus.clone();
         let pinned = self.pinned;
+        let labels = self.room >= LABELS_FROM;
         h_flex()
             .flex_none()
             .gap_1()
@@ -144,7 +158,9 @@ impl Header {
                         .ghost()
                         .small()
                         .icon(ExtraIcon::Clock)
-                        .label(format!("{} earlier", self.earlier))
+                        .when(labels, |this| {
+                            this.label(format!("{} earlier", self.earlier))
+                        })
                         .selected(self.history_open)
                         .tooltip_with_action(
                             "Show or hide the earlier sessions",
@@ -165,7 +181,7 @@ impl Header {
                     .ghost()
                     .small()
                     .icon(IconName::SquareTerminal)
-                    .label("Shell")
+                    .when(labels, |this| this.label("Shell"))
                     .selected(self.shell)
                     .tooltip_with_action("Show or hide the project's shell", &ToggleShell, None)
                     .on_click(move |_, window, cx| {
