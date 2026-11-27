@@ -96,6 +96,13 @@ pub struct Worktree {
     pub folder: PathBuf,
 }
 
+impl Worktree {
+    /// The branch Agents Hub checked the worktree out on.
+    pub fn branch(&self) -> String {
+        branch_of(&self.root)
+    }
+}
+
 /// What a checkout made.
 #[derive(Debug)]
 pub struct Created {
@@ -482,7 +489,7 @@ mod tests {
         assert_eq!(worktree.folder, worktree.root.join("app"));
         assert!(worktree.root.starts_with(base.join("worktrees/repo")));
         assert!(worktree.folder.join("main.rs").exists());
-        let branch = branch_of(&worktree.root);
+        let branch = worktree.branch();
         assert!(branch_exists(&root, &branch));
 
         fs::write(worktree.folder.join("new.rs"), "").unwrap();
