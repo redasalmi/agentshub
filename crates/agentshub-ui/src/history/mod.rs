@@ -4,14 +4,13 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use agentshub_core::store::{HistorySource, Item, Session};
+use agentshub_core::store::{HistorySource, Item, Kind, Session};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::Value;
 
 use agentshub_core::format::age;
-use agentshub_core::transcript::Kind;
 
 mod render;
 

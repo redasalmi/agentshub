@@ -21,7 +21,7 @@ pub use self::db::{
 };
 use crate::agent::Agent;
 use crate::transcript;
-pub use crate::transcript::Transcript;
+pub use crate::transcript::{Kind, Transcript};
 use crate::worktree::Worktree;
 
 mod db;
