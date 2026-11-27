@@ -20,4 +20,8 @@ pub enum Intent {
     /// Whether the user can see the shown chat: the window has the focus,
     /// and neither the settings nor the tray hide the chat.
     SetFocused(bool),
+    /// The window closed, which drops what it asked to open and was still
+    /// waiting for: a chat whose last session is being read, or whose stopped
+    /// CLI is being reaped, doesn't start once that's done.
+    WindowClosed,
 }

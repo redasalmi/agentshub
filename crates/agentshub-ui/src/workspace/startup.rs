@@ -86,6 +86,15 @@ impl Workspace {
             RuntimeEvent::TurnTick => cx.notify(),
         });
 
+        let window_closed = {
+            let runtime = runtime.downgrade();
+            cx.on_window_closed(move |cx, _| {
+                runtime
+                    .update(cx, |runtime, cx| runtime.apply(Intent::WindowClosed, cx))
+                    .ok();
+            })
+        };
+
         // The workspace outlives its window (see `tray`), so it's released
         // when the app quits.
         cx.on_release(|this, cx| this.shutdown(cx)).detach();
@@ -121,6 +130,7 @@ impl Workspace {
             settings_view,
             runtime,
             _runtime_events: runtime_events,
+            _window_closed: window_closed,
             panes: HashMap::new(),
             _sidebar_events: sidebar_events,
             reveal_numbers: None,

@@ -258,11 +258,13 @@ impl Runtime {
         }
         // A CLI that was stopped to free what it held opens again once it's
         // gone, so the two never run in one session.
+        // A window that closed meanwhile doesn't open it.
+        let window_closes = self.window_closes;
         if let Some(reaped) = self.lifecycle.reaping(id) {
             cx.spawn(async move |this, cx| {
                 reaped.recv().await.ok();
                 this.update(cx, |this, cx| {
-                    if this.lifecycle.is_requested(id) {
+                    if this.window_closes == window_closes && this.lifecycle.is_requested(id) {
                         this.open_chat(id, cx);
                     }
                 })
@@ -328,6 +330,12 @@ impl Runtime {
             }
             .await;
             this.update(cx, |this, cx| {
+                // The window closed meanwhile, so the chat isn't started, but
+                // it can be opened again.
+                if this.window_closes != window_closes {
+                    this.lifecycle.opened(id);
+                    return;
+                }
                 // The chats may have been closed meanwhile.
                 if !this.lifecycle.opened(id) {
                     return;

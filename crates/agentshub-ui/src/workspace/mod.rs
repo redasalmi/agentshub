@@ -91,6 +91,8 @@ pub struct Workspace {
     /// on their way in or out, which outlive the window.
     runtime: Entity<Runtime>,
     _runtime_events: Subscription,
+    /// Tells the runtime when the window closes.
+    _window_closed: Subscription,
     /// The panes of the runtime's open chats, by chat.
     panes: HashMap<i64, ChatPane>,
     _sidebar_events: Subscription,

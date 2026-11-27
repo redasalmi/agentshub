@@ -37,6 +37,8 @@ pub struct Runtime {
     pub(crate) turn_tick: Option<Task<()>>,
     /// What the chats' terminals are painted in, once the window says.
     pub(crate) colors: Option<Colors>,
+    /// How many times the window closed (see `Intent::WindowClosed`).
+    pub(crate) window_closes: u64,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
     /// Why the database can't be used: it didn't open, or another Agents Hub
@@ -69,6 +71,7 @@ impl Runtime {
             focused: false,
             turn_tick: None,
             colors: None,
+            window_closes: 0,
             _lock: lock,
             broken: broken.map(SharedString::from),
             startup: Some((settings, imported)),
@@ -106,6 +109,7 @@ impl Runtime {
             }
             Intent::Suspend(id) => self.suspend(id, cx),
             Intent::SetFocused(focused) => self.set_focused(focused, cx),
+            Intent::WindowClosed => self.window_closes += 1,
         }
     }
 
