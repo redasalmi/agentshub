@@ -98,8 +98,13 @@ for cli in claude codex pi; do
 	chmod +x "$work/bin/$cli"
 done
 
+# Editors opened from a chat get them back too, through the app, which sets
+# each AGENTSHUB_EDITOR_<NAME> as <NAME> for them, or unsets it when empty.
 start_app() {
-	XDG_DATA_HOME="$work/data" PATH="$work/bin:$PATH" DBUS_SESSION_BUS_ADDRESS="$bus_address" \
+	AGENTSHUB_EDITOR_XDG_DATA_HOME="${XDG_DATA_HOME:-}" \
+		AGENTSHUB_EDITOR_DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
+		AGENTSHUB_EDITOR_PATH="$PATH" \
+		XDG_DATA_HOME="$work/data" PATH="$work/bin:$PATH" DBUS_SESSION_BUS_ADDRESS="$bus_address" \
 		"$bin" "$@" &
 	app=$!
 }

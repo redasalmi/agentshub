@@ -1,5 +1,6 @@
 //! The code editors a chat's folder can be opened in.
 
+use std::ffi::OsString;
 use std::io;
 use std::iter;
 use std::os::unix::process::CommandExt as _;
@@ -350,6 +351,23 @@ pub fn pick(installed: &[Found], saved: Option<Editor>) -> Option<&Found> {
         .or_else(|| installed.first())
 }
 
+/// What a launcher saved for editors with `AGENTSHUB_EDITOR_<NAME>`: each is
+/// dropped, and `<NAME>` is set to its value, or unset when it is empty. A dev
+/// build with a data folder and session bus of its own gives the user's back
+/// this way.
+fn editor_env(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, Option<OsString>)> {
+    vars.into_iter()
+        .filter_map(|(key, value)| {
+            let name = key.to_str()?.strip_prefix("AGENTSHUB_EDITOR_")?.to_owned();
+            let value = (!value.is_empty()).then_some(value);
+            Some([(key, None), (name.into(), value)])
+        })
+        .flatten()
+        .collect()
+}
+
 /// Starts `found` on `folder`, out of this app's process group. `adopt` gets
 /// the editor's pid before it is reaped, on a thread that then waits for it,
 /// as long as it runs.
@@ -366,7 +384,14 @@ pub fn open(found: &Found, folder: &Path, adopt: fn(u32, &str)) -> io::Result<()
             format!("the folder {} no longer exists", folder.display()),
         ));
     }
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    for (name, value) in editor_env(env::vars_os()) {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let mut child = command
         .args(args)
         .current_dir(folder)
         .stdin(Stdio::null())
@@ -430,6 +455,28 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn editor_env_restores_what_the_launcher_saved() {
+        let os = |s: &str| OsString::from(s);
+        let vars = [
+            (
+                os("AGENTSHUB_EDITOR_XDG_DATA_HOME"),
+                os("/home/me/.local/share"),
+            ),
+            (os("AGENTSHUB_EDITOR_DBUS_SESSION_BUS_ADDRESS"), os("")),
+            (os("HOME"), os("/home/me")),
+        ];
+        assert_eq!(
+            editor_env(vars),
+            [
+                (os("AGENTSHUB_EDITOR_XDG_DATA_HOME"), None),
+                (os("XDG_DATA_HOME"), Some(os("/home/me/.local/share"))),
+                (os("AGENTSHUB_EDITOR_DBUS_SESSION_BUS_ADDRESS"), None),
+                (os("DBUS_SESSION_BUS_ADDRESS"), None),
+            ]
+        );
     }
 
     #[test]

@@ -7,6 +7,9 @@ seed_project "$project"
 seed_editor dev.zed.Zed '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="3" fill="#e5484d"/></svg>'
 seed_editor code
 
+# What a launcher such as scripts/try-dev.sh hands back to editors.
+export AGENTSHUB_EDITOR_XDG_DATA_HOME="$AHV_WORK/restored"
+export AGENTSHUB_EDITOR_DBUS_SESSION_BUS_ADDRESS=
 app_start
 key ctrl+1
 key ctrl+shift+n
@@ -16,6 +19,10 @@ shot header
 
 click 1120 86
 wait_until 5 "zed to open the project" grep -qxF "dev.zed.Zed|$project|$project" "$EDITOR_LOG"
+zed_env="$AHV_OUT/editor-env-dev.zed.Zed"
+grep -qxF "XDG_DATA_HOME=$AHV_WORK/restored" "$zed_env" || fail "the editor didn't get XDG_DATA_HOME back"
+grep -q '^DBUS_SESSION_BUS_ADDRESS=' "$zed_env" && fail "the editor kept the app's session bus"
+grep -q '^AGENTSHUB_EDITOR_' "$zed_env" && fail "AGENTSHUB_EDITOR_ variables reached the editor"
 
 editor_setting() { [ "$(sql "SELECT value FROM settings WHERE key = 'editor'")" = "$1" ]; }
 
