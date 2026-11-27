@@ -107,6 +107,11 @@ kill "$(field pid "$started")"
 exited() { grep -q "^exit $agent pid=$(field pid "$started")$" "$CLI_LOG"; }
 wait_until 10 "$agent to exit" exited
 shot exited
+# Its card leads Needs you, which isn't folded, so Alt+1 shows it again from
+# the settings.
+key ctrl+comma
+key alt+1
+shot exited-needs-you
 click 1220 78
 restarted() { [ "$(cli_count "$agent")" -gt "$before" ]; }
 wait_until 15 "$agent to restart" restarted

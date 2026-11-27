@@ -33,6 +33,6 @@ its top.
 | Copy, paste | Selection copied; clipboard pasted to the CLI | |
 | Font size | Terminal text grows and shrinks | rendering |
 | Agent output | Box lines, blocks and braille meet without seams; check marks, symbols and emoji draw (emoji in one color where the system's color emoji are COLRv1) | rendering |
-| Agent exits | "<Agent> exited. Its terminal output is kept below." under the header, with Restart agent, which resumes the same session | triage |
+| Agent exits | "<Agent> exited. Its terminal output is kept below." under the header, with Restart agent, which resumes the same session; Triage lists the chat under Needs you | triage |
 | Layout | The `layout` setting opens Classic, or Triage when it is `triage`, again after a relaunch | triage |
 | Triage filter | The list shows the picked project's chats, or every project's; no CLI starts or stops | triage |
