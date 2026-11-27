@@ -44,7 +44,8 @@ pub fn render_shortcuts(window: &Window, cx: &App) -> impl IntoElement {
             "Alt+1…9".into(),
         ),
         (
-            "Select a project by its place in the rail; hold Ctrl to see the numbers",
+            "Select a project by its place in Classic's rail or Triage's project filter; hold Ctrl \
+             to see the numbers",
             "Ctrl+1…9".into(),
         ),
         (

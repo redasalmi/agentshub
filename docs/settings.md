@@ -5,6 +5,9 @@ Open the settings by clicking the gear button at the bottom of the rail, choosin
 ## Look and feel
 
 - **Theme**: the app's colours. Click one of the previews to pick it.
+- **Layout**: how the window lists your chats. **Classic** lists each project's chats beside a rail of projects. **Triage** lists every project's chats in one list, grouped by what needs you (see [The Triage layout](projects-and-chats.md#the-triage-layout)). Picking the other one asks whether to restart Agents Hub to use it:
+  - **Restart now** stops the agents running now and opens Agents Hub again in the new layout, with the window where it was. Each chat picks its conversation up again when you open it.
+  - **Later** keeps everything as it is, and Agents Hub opens in the new layout the next time it starts. A note under the setting says so, with its own **Restart now**.
 - **Mode**: **Light**, **Dark**, or **System** to follow your desktop's light or dark preference.
 - **Motion**: how much the app animates. **System** follows your desktop's reduced-motion preference. **Reduced** keeps changes of colour, and slows or stills what moves.
 - **Terminal text**: the size of the text in every terminal. Use **Smaller** and **Bigger**, or double-click the size to reset it. Holding **Ctrl** and scrolling over a terminal does the same.

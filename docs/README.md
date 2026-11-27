@@ -7,12 +7,12 @@ You can have several agents working at once, in the same project or in different
 ## Guides
 
 1. [Getting started](getting-started.md): install the app, add your first project and start your first chat.
-2. [Projects and chats](projects-and-chats.md): the sidebar, what the coloured status dots mean, and how to rename, pin, close, archive and delete.
+2. [Projects and chats](projects-and-chats.md): the sidebar, the Triage layout, what the coloured status dots mean, and how to rename, pin, close, archive and delete.
 3. [Working in a chat](working-in-a-chat.md): typing to the agent, copy and paste, text size, dropping files, the project shell and earlier sessions.
 4. [Separate checkouts for each chat (git worktrees)](worktrees.md): let several agents work on the same project without getting in each other's way.
 5. [Search and commands](search.md): find any chat, project or message, and run any command from one box.
 6. [Notifications and the tray](notifications-and-tray.md): get told when an agent finishes, and keep agents running with the window closed.
-7. [Settings](settings.md): themes, text size, behaviour, notifications, and backing up your chats.
+7. [Settings](settings.md): themes, layouts, text size, behaviour, notifications, and backing up your chats.
 8. [Keyboard shortcuts](keyboard-shortcuts.md): every shortcut on one page.
 9. [Questions and troubleshooting](troubleshooting.md)
 

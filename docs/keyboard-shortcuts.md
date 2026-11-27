@@ -10,7 +10,7 @@ These shortcuts work anywhere in the app, even while an agent has the keyboard, 
 | Ctrl+0 | Show the running chats of every project |
 | Ctrl+Shift+J | Open the next chat that needs you |
 | Alt+1 … Alt+9 | Open a chat by its place in the list (hold Alt to see the numbers) |
-| Ctrl+1 … Ctrl+9 | Select a project by its place in the rail (hold Ctrl to see the numbers) |
+| Ctrl+1 … Ctrl+9 | Select a project by its place in Classic's rail or Triage's project filter (hold Ctrl to see the numbers) |
 | Ctrl+, | Open or close the settings |
 | Ctrl+Shift+/ | Show the keyboard shortcuts |
 

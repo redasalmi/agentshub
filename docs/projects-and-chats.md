@@ -78,3 +78,30 @@ Right-click a project in the rail, or use the **More** menu at the top of the ch
 - **Remove**: stop the project's agents and remove it and its chats from Agents Hub. Your folder and its files are not touched.
 
 To reorder your projects, drag one in the rail and drop it on another.
+
+## The Triage layout
+
+Triage is the other layout, which you can pick under **Look and feel** in the [settings](settings.md). Instead of a rail of projects and a chat list for each, it shows the chats of every project in one list, grouped by what their agents are doing, with the ones that need you first:
+
+- **Needs you**: the agent is waiting for you, stopped on an error, or exited.
+- **Ready to review**: the agent has finished, and you haven't looked at the result yet.
+- **Working**: the agent is running or busy on your request.
+- **Idle**: the agent is waiting for your next instruction.
+- **Closed**: the agent isn't running. Click the heading to show or hide them.
+- **Archived**: chats you put away. Click the heading to show or hide them.
+
+A chat you open stays in its group while you read it, until its agent does something new, so the list doesn't move under the pointer.
+
+### The project filter
+
+The menu at the top of the list, **All projects** to begin with, picks whose chats the list shows: every project's, or one project's. Choosing doesn't start or stop any agent. Hover a project in the menu to see its own buttons: **New chat…**, **Archive…** and **Remove…**. **Add project…** is at the bottom of the menu. The projects keep the order you gave them in Classic's rail.
+
+### Pinning and the numbers
+
+- Right-click a chat, or use the **More** menu at the top of an open chat, to pin it: a pinned chat comes first in its group. Chats can't be dragged into another order in Triage.
+- Hold **Alt** for a moment to see numbers on the chats in the list, and press **Alt+1** to **Alt+9** to open one. Chats in a hidden group have no number.
+- Press **Ctrl+1** to **Ctrl+9** to show one project's chats, by its place in the project filter's menu.
+
+### The banner
+
+When the open chat needs you, a banner under its header says what it needs, for example "Claude Code has a question. Answer it in the terminal below." When other chats need you too, its **Next: …** button opens the next one, as **Ctrl+Shift+J** does.
