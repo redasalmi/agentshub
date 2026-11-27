@@ -1,7 +1,7 @@
 //! Adding, removing and archiving projects, and the database file behind them.
 
-use super::render::render_import;
 use super::*;
+use agentshub_ui_kit::dialogs::{self, Confirm, Import};
 
 impl Workspace {
     pub(super) fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -152,61 +152,29 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        let chats: usize = projects.iter().map(|project| project.chats.len()).sum();
-        let holds = match (projects.len(), chats) {
-            (0, _) => format!("{name} has no projects."),
-            (projects, chats) => format!(
-                "{name} has {} and {}:",
-                plural(projects, "project"),
-                plural(chats, "chat")
-            ),
-        };
-        let dir = store::path()
+        let backup_dir = store::path()
             .and_then(|path| path.parent().map(home_relative))
             .unwrap_or_default();
-        let projects: Rc<[store::Project]> = projects.into();
         let runtime = self.runtime.downgrade();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let theme = cx.theme();
-            let (confirm, discard) = (pending.clone(), pending.clone());
-            let runtime = runtime.clone();
-            alert
-                .confirm()
-                .width(px(520.))
-                .title("Replace your chats with these?")
-                .description(holds.clone())
-                .when(!projects.is_empty(), |alert| {
-                    alert.child(render_import(&projects, theme))
-                })
-                .child(
-                    div()
-                        .text_sm()
-                        .line_height(rems(1.4))
-                        .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "Agents Hub restarts to use them, which stops the agents running \
-                             now. Your projects, chats and settings are replaced; the database \
-                             holding them is backed up first in {dir}, and importing that \
-                             backup brings them back."
-                        )),
-                )
-                .ok_text("Import and restart")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    let confirm = Intent::ConfirmImport(confirm.clone());
-                    runtime
-                        .update(cx, |runtime, cx| runtime.apply(confirm, cx))
-                        .ok();
-                    true
-                })
-                // The checked copy is gone once confirmed, so this only
-                // deletes one the user turned down.
-                .on_close(move |_, _, _| discard.discard())
-        });
+        let discard = pending.clone();
+        dialogs::import(
+            window,
+            cx,
+            Import {
+                path: path.to_path_buf(),
+                projects,
+                backup_dir,
+            },
+            move |_, cx| {
+                let confirm = Intent::ConfirmImport(pending.clone());
+                runtime
+                    .update(cx, |runtime, cx| runtime.apply(confirm, cx))
+                    .ok();
+            },
+            // The checked copy is gone once confirmed, so this only deletes
+            // one the user turned down.
+            move |_, _| discard.discard(),
+        );
     }
 
     pub(super) fn confirm_remove_project(
@@ -242,20 +210,20 @@ impl Workspace {
                     return;
                 }
                 let this = cx.entity().downgrade();
-                window.open_alert_dialog(cx, move |alert, _, _| {
-                    let this = this.clone();
-                    alert
-                        .confirm()
-                        .title("Remove this project?")
-                        .description(description)
-                        .ok_text("Remove")
-                        .ok_variant(ButtonVariant::Danger)
-                        .on_ok(move |_, _, cx| {
-                            this.update(cx, |this, cx| this.apply(Intent::RemoveProject(id), cx))
-                                .ok();
-                            true
-                        })
-                });
+                dialogs::confirm(
+                    window,
+                    cx,
+                    Confirm {
+                        title: "Remove this project?".into(),
+                        description: description.into(),
+                        ok_text: "Remove".into(),
+                        danger: true,
+                    },
+                    move |_, cx| {
+                        this.update(cx, |this, cx| this.apply(Intent::RemoveProject(id), cx))
+                            .ok();
+                    },
+                );
             })
             .ok();
         })

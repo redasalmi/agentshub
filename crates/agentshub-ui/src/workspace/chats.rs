@@ -1,6 +1,7 @@
 //! Closing, deleting and archiving chats and projects.
 
 use super::*;
+use agentshub_ui_kit::dialogs::{self, Confirm};
 
 impl Workspace {
     /// Closes a running chat, asking first if its agent is in the middle of
@@ -21,23 +22,22 @@ impl Workspace {
             return;
         }
         let this = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let this = this.clone();
-            alert
-                .confirm()
-                .title("Close this chat?")
-                .description(
-                    "Its agent is working, and closing the chat stops it mid-turn. \
-                     Opening the chat again resumes its session.",
-                )
-                .ok_text("Close")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    this.update(cx, |this, cx| this.close_chats(vec![id], window, cx))
-                        .ok();
-                    true
-                })
-        });
+        dialogs::confirm(
+            window,
+            cx,
+            Confirm {
+                title: "Close this chat?".into(),
+                description: "Its agent is working, and closing the chat stops it mid-turn. \
+                              Opening the chat again resumes its session."
+                    .into(),
+                ok_text: "Close".into(),
+                danger: true,
+            },
+            move |window, cx| {
+                this.update(cx, |this, cx| this.close_chats(vec![id], window, cx))
+                    .ok();
+            },
+        );
     }
 
     pub(super) fn confirm_delete_chat(
@@ -80,23 +80,23 @@ impl Workspace {
                     return;
                 }
                 let this = cx.entity().downgrade();
-                window.open_alert_dialog(cx, move |alert, _, _| {
-                    let (this, worktree) = (this.clone(), worktree.clone());
-                    alert
-                        .confirm()
-                        .title("Delete this chat?")
-                        .description(description)
-                        .ok_text("Delete")
-                        .ok_variant(ButtonVariant::Danger)
-                        .on_ok(move |_, _, cx| {
-                            let worktree = worktree.clone();
-                            this.update(cx, |this, cx| {
-                                this.apply(Intent::DeleteChat { chat: id, worktree }, cx)
-                            })
-                            .ok();
-                            true
+                dialogs::confirm(
+                    window,
+                    cx,
+                    Confirm {
+                        title: "Delete this chat?".into(),
+                        description: description.into(),
+                        ok_text: "Delete".into(),
+                        danger: true,
+                    },
+                    move |_, cx| {
+                        let worktree = worktree.clone();
+                        this.update(cx, |this, cx| {
+                            this.apply(Intent::DeleteChat { chat: id, worktree }, cx)
                         })
-                });
+                        .ok();
+                    },
+                );
             })
             .ok();
         })
@@ -121,23 +121,22 @@ impl Workspace {
             return;
         }
         let this = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let this = this.clone();
-            alert
-                .confirm()
-                .title("Archive this chat?")
-                .description(
-                    "Its agent is working, and archiving the chat stops it mid-turn. \
-                     Opening the chat again resumes its session.",
-                )
-                .ok_text("Archive")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    this.update(cx, |this, cx| this.archive_chat(id, window, cx))
-                        .ok();
-                    true
-                })
-        });
+        dialogs::confirm(
+            window,
+            cx,
+            Confirm {
+                title: "Archive this chat?".into(),
+                description: "Its agent is working, and archiving the chat stops it mid-turn. \
+                              Opening the chat again resumes its session."
+                    .into(),
+                ok_text: "Archive".into(),
+                danger: true,
+            },
+            move |window, cx| {
+                this.update(cx, |this, cx| this.archive_chat(id, window, cx))
+                    .ok();
+            },
+        );
     }
 
     /// Closes a chat and archives it. Opening it again brings it back and
@@ -165,24 +164,23 @@ impl Workspace {
             return;
         }
         let this = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let this = this.clone();
-            alert
-                .confirm()
-                .title("Archive this project?")
-                .description(
-                    "An agent in it is working, and archiving the project stops it mid-turn. \
-                     Opening one of its chats again brings the project back and resumes the \
-                     chat's session.",
-                )
-                .ok_text("Archive")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    this.update(cx, |this, cx| this.archive_project(id, window, cx))
-                        .ok();
-                    true
-                })
-        });
+        dialogs::confirm(
+            window,
+            cx,
+            Confirm {
+                title: "Archive this project?".into(),
+                description: "An agent in it is working, and archiving the project stops it \
+                              mid-turn. Opening one of its chats again brings the project back \
+                              and resumes the chat's session."
+                    .into(),
+                ok_text: "Archive".into(),
+                danger: true,
+            },
+            move |window, cx| {
+                this.update(cx, |this, cx| this.archive_project(id, window, cx))
+                    .ok();
+            },
+        );
     }
 
     /// Closes a project's chats and its shell, and archives it with them.

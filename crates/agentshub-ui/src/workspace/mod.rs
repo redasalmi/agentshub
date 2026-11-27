@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::InteractiveElementExt as _;
-use gpui_kit::component::button::{Button, ButtonVariant};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{HandleEdge, resize_handle};
@@ -49,7 +49,6 @@ mod commands;
 mod dialogs;
 mod editor;
 mod feedback;
-mod format;
 mod layout;
 mod new_chat;
 mod open_chat;
@@ -62,8 +61,6 @@ mod shell;
 mod startup;
 mod status;
 mod terminals;
-
-pub(crate) use format::plural;
 
 /// How many of the chats last worked in show while no chat is open.
 const RECENT_CHATS: usize = 5;

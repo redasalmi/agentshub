@@ -1,20 +1,23 @@
-//! The dialogs the layouts share: starting a new chat and renaming one.
+//! The dialogs the layouts share: starting a new chat, renaming one, and the
+//! questions asked before closing, deleting, archiving, removing or importing.
 
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{
-    ActiveTheme as _, StyledExt as _, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, StyledExt as _, Theme, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use agentshub_core::agent::Agent;
+use agentshub_core::format::{home_relative, plural};
+use agentshub_core::store;
 
 use crate::widgets::path_line;
 
@@ -306,4 +309,174 @@ pub fn rename(
                 true
             })
     });
+}
+
+/// A question asked before doing something, in an alert.
+pub struct Confirm {
+    pub title: SharedString,
+    pub description: SharedString,
+    /// The label of the button that goes ahead.
+    pub ok_text: SharedString,
+    /// Whether going ahead loses something, which colors its button.
+    pub danger: bool,
+}
+
+/// Asks `confirm`'s question, and calls `on_ok` once the user goes ahead.
+pub fn confirm(
+    window: &mut Window,
+    cx: &mut App,
+    confirm: Confirm,
+    on_ok: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    let on_ok = Rc::new(on_ok);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let on_ok = Rc::clone(&on_ok);
+        alert
+            .confirm()
+            .title(confirm.title.clone())
+            .description(confirm.description.clone())
+            .ok_text(confirm.ok_text.clone())
+            .when(confirm.danger, |alert| {
+                alert.ok_variant(ButtonVariant::Danger)
+            })
+            .on_ok(move |_, window, cx| {
+                on_ok(window, cx);
+                true
+            })
+    });
+}
+
+/// What a database about to be imported holds.
+pub struct Import {
+    /// The database file picked.
+    pub path: PathBuf,
+    pub projects: Vec<store::Project>,
+    /// Where the database it replaces is backed up, as shown.
+    pub backup_dir: String,
+}
+
+/// Shows what `import`'s database holds, and asks whether to restart with
+/// it in place of the user's. `on_import` is called once they confirm, and
+/// `on_close` whenever the dialog closes.
+pub fn import(
+    window: &mut Window,
+    cx: &mut App,
+    import: Import,
+    on_import: impl Fn(&mut Window, &mut App) + 'static,
+    on_close: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    let Import {
+        path,
+        projects,
+        backup_dir: dir,
+    } = import;
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let chats: usize = projects.iter().map(|project| project.chats.len()).sum();
+    let holds = match (projects.len(), chats) {
+        (0, _) => format!("{name} has no projects."),
+        (projects, chats) => format!(
+            "{name} has {} and {}:",
+            plural(projects, "project"),
+            plural(chats, "chat")
+        ),
+    };
+    let projects: Rc<[store::Project]> = projects.into();
+    let (on_import, on_close) = (Rc::new(on_import), Rc::new(on_close));
+    window.open_alert_dialog(cx, move |alert, _, cx| {
+        let theme = cx.theme();
+        let (on_import, on_close) = (Rc::clone(&on_import), Rc::clone(&on_close));
+        alert
+            .confirm()
+            .width(px(520.))
+            .title("Replace your chats with these?")
+            .description(holds.clone())
+            .when(!projects.is_empty(), |alert| {
+                alert.child(render_import(&projects, theme))
+            })
+            .child(
+                div()
+                    .text_sm()
+                    .line_height(rems(1.4))
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "Agents Hub restarts to use them, which stops the agents running \
+                         now. Your projects, chats and settings are replaced; the database \
+                         holding them is backed up first in {dir}, and importing that \
+                         backup brings them back."
+                    )),
+            )
+            .ok_text("Import and restart")
+            .ok_variant(ButtonVariant::Danger)
+            .on_ok(move |_, window, cx| {
+                on_import(window, cx);
+                true
+            })
+            .on_close(move |_, window, cx| on_close(window, cx))
+    });
+}
+
+/// The projects of a database about to be imported, each with its first few
+/// chats.
+fn render_import(projects: &[store::Project], theme: &Theme) -> impl IntoElement {
+    /// The chats listed under each project; the others are counted.
+    const SHOWN_CHATS: usize = 3;
+    v_flex()
+        .id("import-projects")
+        .max_h(px(260.))
+        .overflow_y_scroll()
+        .gap_3()
+        .p_3()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .text_sm()
+        .children(projects.iter().map(|project| {
+            let more = project.chats.len().saturating_sub(SHOWN_CHATS);
+            v_flex()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_medium()
+                                .text_color(theme.foreground)
+                                .child(project.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .child(home_relative(&project.path)),
+                        ),
+                )
+                .children(project.chats.iter().take(SHOWN_CHATS).map(|chat| {
+                    div()
+                        .pl_3()
+                        .truncate()
+                        .text_color(theme.muted_foreground)
+                        .child(chat.title.clone().unwrap_or_else(|| "New chat".into()))
+                }))
+                .when(more > 0, |list| {
+                    list.child(
+                        div()
+                            .pl_3()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("and {} more", plural(more, "chat"))),
+                    )
+                })
+                .when(project.chats.is_empty(), |list| {
+                    list.child(
+                        div()
+                            .pl_3()
+                            .text_color(theme.muted_foreground)
+                            .child("No chats"),
+                    )
+                })
+        }))
 }
