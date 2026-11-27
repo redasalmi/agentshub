@@ -190,6 +190,7 @@ impl Layout {
         }
     }
 
+    /// How the settings and dialogs name it.
     pub fn label(self) -> &'static str {
         match self {
             Self::Classic => "Classic",
