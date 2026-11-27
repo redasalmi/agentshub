@@ -7,12 +7,11 @@ use super::render::render_shortcuts;
 use super::*;
 
 impl Workspace {
-    pub(super) fn render_chat(
-        &self,
-        chat: &Chat,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn render_chat(&self, id: i64, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let runtime = self.runtime.read(cx);
+        let (Some(chat), Some(pane)) = (runtime.chat(id), self.panes.get(&id)) else {
+            return Empty.into_any_element();
+        };
         let (title, pinned) = self
             .active_entry(cx)
             .map(|entry| {
@@ -22,7 +21,7 @@ impl Workspace {
                 )
             })
             .unwrap_or_else(|| ("New chat".into(), false));
-        let history = chat.pane.history.read(cx);
+        let history = pane.history.read(cx);
         let (earlier, history_open) = (history.count(), history.is_open());
         let shell = self.shown_shell(cx).map(|(cwd, shell)| crate::chat::Shell {
             cwd,
@@ -52,22 +51,18 @@ impl Workspace {
             title: title.into(),
             pinned,
             agent: chat.agent,
-            cwd: chat.cwd.clone(),
+            cwd: chat.cwd.to_path_buf(),
             tone: Tone::of(self.sidebar.read(cx).running(chat.id)),
             turn: chat.turn,
-            running: chat.running(),
-            notice: chat.notice.clone(),
-            message: chat.message.clone(),
-            history: chat.pane.history.clone(),
-            terminal: chat
-                .pane
-                .terminal
-                .as_ref()
-                .map(|terminal| terminal.view.clone()),
+            running: chat.running,
+            notice: chat.notice.cloned(),
+            message: chat.message.cloned(),
+            history: pane.history.clone(),
+            terminal: pane.view.clone(),
             shell,
             shell_share: cx.global::<Settings>().shell_share,
             hidden: self.hidden,
-            active: self.active.is_some(),
+            active: runtime.active().is_some(),
             earlier,
             history_open,
             editors: crate::chat::editor_choices(cx),
@@ -127,7 +122,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match intent {
-            ChatIntent::Restart => self.restart(id, window, cx),
+            ChatIntent::Restart => self.apply(Intent::RestartChat(id), cx),
             ChatIntent::ToggleHistory => self.toggle_history(&ToggleHistory, window, cx),
             ChatIntent::ToggleShell => self.toggle_shell(&ToggleShell, window, cx),
             ChatIntent::ResizeShell(share) => self.resize_shell(share, cx),
@@ -261,7 +256,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active.is_some()
+        if self.runtime.read(cx).active().is_some()
             || self.settings_shown
             || event.keystroke.modifiers.number_of_modifiers() > 0
         {

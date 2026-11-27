@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -30,21 +30,19 @@ use crate::sidebar::{
     home_relative, rail_room,
 };
 use crate::terminal_view::{self, TerminalView};
-use agentshub_app::alerts::{self, Alert};
+use agentshub_app::alerts;
 use agentshub_app::settings::{
     Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, DEFAULT_TERMINAL_FONT_SIZE, Motion,
     Settings, ThemeFamily,
 };
 use agentshub_core::agent::Agent;
-use agentshub_core::reports;
-use agentshub_core::sessions;
 use agentshub_core::status::Status;
 use agentshub_core::store::{self, Change};
 use agentshub_core::worktree::{self, Worktree};
 #[cfg(target_os = "linux")]
 use agentshub_platform::scope;
-use agentshub_runtime::terminal::{self, Exited, Pty, StatusChanged, Terminal};
-use agentshub_runtime::{Intent, Recording, Runtime, RuntimeEvent, take_and_remove};
+use agentshub_runtime::terminal::{self, Exited, Pty, Terminal};
+use agentshub_runtime::{Intent, Runtime, RuntimeEvent, take_and_remove};
 
 mod actions;
 mod catalog;
@@ -67,29 +65,19 @@ mod shell;
 mod shutdown;
 mod startup;
 mod status;
-mod terminal_registry;
 mod terminals;
 
 pub use actions::*;
-pub(crate) use format::{Turn, duration, plural};
+pub(crate) use format::plural;
 
-use agentshub_core::lifecycle::{Added, Codex, Deleted, Reaped, Saved, Saving};
+use agentshub_core::lifecycle::{Added, Deleted, Saved, Saving};
 
 /// How many of the chats last worked in show while no chat is open.
 const RECENT_CHATS: usize = 5;
 
-/// How often the time the shown chat's prompt has taken so far is brought up
-/// to date.
-const TURN_INTERVAL: Duration = Duration::from_secs(1);
-
 /// How long Alt or Ctrl is held alone before the sidebar shows the numbers it
 /// opens chats or projects with, so quick shortcuts don't flash them.
 const REVEAL_NUMBERS_AFTER: Duration = Duration::from_millis(400);
-
-/// Said above a chat whose last session couldn't be resumed, and kept in that
-/// session's history.
-const TRANSCRIPT_GONE: &str = "This session's transcript is gone, so it couldn't be resumed. \
-                               Its saved history is still available here.";
 
 /// Binds the shortcuts that reach the workspace.
 pub fn init(cx: &mut App) {
@@ -99,19 +87,13 @@ pub fn init(cx: &mut App) {
 pub struct Workspace {
     sidebar: Entity<Sidebar>,
     settings_view: Entity<SettingsView>,
-    /// The store, the projects and chats, and the chats on their way in or
-    /// out, which outlive the window.
+    /// The store, the projects and chats, the open chats' CLIs, and the chats
+    /// on their way in or out, which outlive the window.
     runtime: Entity<Runtime>,
     _runtime_events: Subscription,
-    /// Open chats, including exited terminals and history whose CLI couldn't
-    /// start. Running processes keep running while another chat is shown,
-    /// until the user closes them.
-    chats: Vec<Chat>,
-    /// The chat that is shown.
-    active: Option<i64>,
+    /// The panes of the runtime's open chats, by chat.
+    panes: HashMap<i64, ChatPane>,
     _sidebar_events: Subscription,
-    /// Brings the shown chat's turn up to date while it's under way.
-    turn_tick: Option<Task<()>>,
     /// Shows the sidebar's shortcut numbers once their modifier has been
     /// held a moment on its own.
     reveal_numbers: Option<Task<()>>,
@@ -222,62 +204,11 @@ struct Shell {
     _exited: Subscription,
 }
 
-/// A chat's backend state: what its CLI is doing and which session it is in.
-struct ChatRuntime {
-    id: i64,
-    agent: Agent,
-    /// Its project's folder, which its CLI runs in.
-    cwd: PathBuf,
-    /// The name of the file its CLI reports its sessions to.
-    report: String,
-    /// Startup failure or exit message, shown alongside the saved history.
-    message: Option<SharedString>,
-    /// The session the CLI is in, once known. It changes when the CLI
-    /// switches to another session, as on `/clear`.
-    session: Option<i64>,
-    /// That session's transcript.
-    transcript: Option<PathBuf>,
-    /// The sessions the CLI last went into, being recorded.
-    recording: Option<Recording>,
-    /// What the CLI last reported doing, if it reports that at all.
-    status: Option<Status>,
-    /// How long the CLI has been on the last prompt, or took on it.
-    turn: Option<Turn>,
-    /// Whether the CLI finished while another chat was shown, and hasn't been
-    /// looked at since.
-    unseen: bool,
-    /// The lookups of the session its CLI is in, if it's Codex.
-    codex: Codex,
-    /// Something about the session to show above the terminal, without a
-    /// restart button.
-    notice: Option<SharedString>,
-    /// Whether restarting starts a new session instead of resuming the last.
-    fresh_on_restart: bool,
-}
-
 /// A chat's view state: its terminal and the history above it.
 struct ChatPane {
-    terminal: Option<ChatTerminal>,
+    /// The view of its terminal, unless its CLI didn't start.
+    view: Option<Entity<TerminalView>>,
     history: Entity<History>,
-}
-
-struct Chat {
-    runtime: ChatRuntime,
-    pane: ChatPane,
-}
-
-impl std::ops::Deref for Chat {
-    type Target = ChatRuntime;
-
-    fn deref(&self) -> &Self::Target {
-        &self.runtime
-    }
-}
-
-impl std::ops::DerefMut for Chat {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.runtime
-    }
 }
 
 /// A chat being added, with what starting it needs once it is.
@@ -288,27 +219,6 @@ struct PendingChat {
     project: PathBuf,
     saving: Saving,
     asked: Asked,
-}
-
-struct ChatTerminal {
-    terminal: Entity<Terminal>,
-    view: Entity<TerminalView>,
-    exited: bool,
-    _exited: Subscription,
-    _status: Subscription,
-}
-
-impl Chat {
-    fn running(&self) -> bool {
-        self.pane
-            .terminal
-            .as_ref()
-            .is_some_and(|terminal| !terminal.exited)
-    }
-
-    fn current_session(&self) -> Option<i64> {
-        self.session.filter(|_| self.running())
-    }
 }
 
 #[cfg(test)]

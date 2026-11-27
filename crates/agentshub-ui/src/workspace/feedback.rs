@@ -60,14 +60,15 @@ impl Workspace {
     /// or the settings cover it. A terminal out of the rendered tree can't
     /// hold the focus: keys would skip the workspace's bindings.
     pub fn focus_chat(&self, window: &mut Window, cx: &mut App) {
-        match self
-            .chats
-            .iter()
-            .find(|chat| Some(chat.id) == self.active)
-            .and_then(|chat| chat.pane.terminal.as_ref())
-            .filter(|_| !self.settings_shown)
-        {
-            Some(terminal) => terminal.view.focus_handle(cx).focus(window, cx),
+        let view = self
+            .runtime
+            .read(cx)
+            .active()
+            .and_then(|id| self.panes.get(&id))
+            .and_then(|pane| pane.view.clone())
+            .filter(|_| !self.settings_shown);
+        match view {
+            Some(view) => view.focus_handle(cx).focus(window, cx),
             None => self.focus_handle.focus(window, cx),
         }
     }

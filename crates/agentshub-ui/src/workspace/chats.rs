@@ -12,9 +12,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let working = self
-            .chats
-            .iter()
-            .any(|chat| chat.id == id && chat.status == Some(Status::Working));
+            .runtime
+            .read(cx)
+            .chat(id)
+            .is_some_and(|chat| chat.status == Some(Status::Working));
         if !working {
             self.close_chats(vec![id], window, cx);
             return;
@@ -110,7 +111,8 @@ impl Workspace {
         self.runtime
             .update(cx, |runtime, _| runtime.lifecycle_mut().cancel_opening(id));
         let reaped = self
-            .stop_chat(id, cx)
+            .runtime
+            .update(cx, |runtime, cx| runtime.stop_chat(id, cx))
             .or_else(|| self.runtime.read(cx).lifecycle().reaping(id));
         self.runtime.update(cx, |runtime, _| {
             runtime.lifecycle_mut().mark_deleting(id, worktree, reaped)
@@ -154,9 +156,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let working = self
-            .chats
-            .iter()
-            .any(|chat| chat.id == id && chat.status == Some(Status::Working));
+            .runtime
+            .read(cx)
+            .chat(id)
+            .is_some_and(|chat| chat.status == Some(Status::Working));
         if !working {
             self.archive_chat(id, window, cx);
             return;
@@ -216,8 +219,9 @@ impl Workspace {
     ) {
         let ids = self.chats_of(id, cx);
         let working = self
-            .chats
-            .iter()
+            .runtime
+            .read(cx)
+            .open_chats()
             .any(|chat| ids.contains(&chat.id) && chat.status == Some(Status::Working));
         if !working {
             self.archive_project(id, window, cx);
@@ -316,7 +320,12 @@ impl Workspace {
     /// Shows `change` at once, and saves it. The projects are listed as saved
     /// once every change shown is, which takes back one that couldn't be.
     pub(super) fn change(&mut self, change: Change, cx: &mut Context<Self>) {
+        self.apply(Intent::Change(change), cx);
+    }
+
+    /// Asks the runtime for what `intent` says.
+    pub(super) fn apply(&self, intent: Intent, cx: &mut App) {
         self.runtime
-            .update(cx, |runtime, cx| runtime.apply(Intent::Change(change), cx));
+            .update(cx, |runtime, cx| runtime.apply(intent, cx));
     }
 }

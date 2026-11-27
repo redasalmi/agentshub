@@ -11,8 +11,6 @@ use gpui_kit::{Context, Task};
 use notify::{RecursiveMode, Watcher as _};
 
 use agentshub_core::agent::Agent;
-use agentshub_core::lifecycle::{Codex, Lookup};
-use agentshub_core::process::Pid;
 use agentshub_core::reports::Reports;
 use agentshub_core::sessions;
 use agentshub_core::store::Store;
@@ -25,22 +23,22 @@ const CODEX_DELAY: Duration = Duration::from_millis(500);
 
 /// Sessions a chat's CLI went into, as one report or lookup found them.
 #[derive(Clone)]
-pub struct Recording {
+pub(crate) struct Recording {
     /// Closes once they're recorded, as are those asked for before.
-    pub done: smol::channel::Receiver<()>,
+    pub(crate) done: smol::channel::Receiver<()>,
     /// The last of them, once recorded. A newer recording can finish first,
     /// so what the chat's CLI was in when this was asked for is this, not the
     /// chat's `session`.
-    pub session: Rc<Cell<Option<i64>>>,
+    session: Rc<Cell<Option<i64>>>,
     /// The agent's id for that session, which is the chat's before it's
     /// recorded.
-    pub agent_id: String,
+    pub(crate) agent_id: String,
 }
 
 /// What follows the sessions the chats' CLIs report, and the ones Codex's
 /// session files show.
 pub(crate) struct Following {
-    reports: Reports,
+    pub(crate) reports: Reports,
     codex_watcher: Option<notify::RecommendedWatcher>,
     /// What the watcher looks at: Codex's session folder, or while it doesn't
     /// exist yet, the closest folder above it.
@@ -64,7 +62,7 @@ impl Following {
         let report_events = cx.spawn(async move |this, cx| {
             while let Ok(report) = reported.recv().await {
                 if this
-                    .update(cx, |_, cx| cx.emit(RuntimeEvent::Reported(report)))
+                    .update(cx, |this, cx| this.read_reports(&report, cx))
                     .is_err()
                 {
                     break;
@@ -111,7 +109,7 @@ fn watch_sessions(cx: &mut Context<Runtime>) -> (Option<notify::RecommendedWatch
             while codex_changed.try_recv().is_ok() {}
             let watched = this.update(cx, |this, cx| {
                 this.update_codex_watch();
-                cx.emit(RuntimeEvent::CodexChanged);
+                this.find_codex_sessions(cx);
             });
             if watched.is_err() {
                 break;
@@ -124,7 +122,7 @@ fn watch_sessions(cx: &mut Context<Runtime>) -> (Option<notify::RecommendedWatch
 impl Runtime {
     /// Points the watcher at Codex's session folder, or while it doesn't
     /// exist yet, at the closest folder above it.
-    pub fn update_codex_watch(&mut self) {
+    pub(crate) fn update_codex_watch(&mut self) {
         let following = &mut self.following;
         let (Some(watcher), Some(dir)) =
             (&mut following.codex_watcher, sessions::codex_sessions_dir())
@@ -153,26 +151,47 @@ impl Runtime {
         }
     }
 
-    /// Takes the sessions out of the reports queued for terminal `report`,
-    /// whose CLI is `agent`, in the order it went into them.
-    pub fn read_reports(
-        &mut self,
-        agent: Agent,
-        report: &str,
-    ) -> Vec<(String, PathBuf, Option<String>)> {
-        reported_sessions(&mut self.following.reports, report, agent)
+    /// Records the sessions in the reports queued for the terminal with
+    /// report name `report`.
+    pub(crate) fn read_reports(&mut self, report: &str, cx: &mut Context<Self>) {
+        let Some((id, agent)) = self
+            .chats
+            .iter()
+            .find(|chat| chat.report == report)
+            .map(|chat| (chat.id, chat.agent))
+        else {
+            return;
+        };
+        let sessions = reported_sessions(&mut self.following.reports, report, agent);
+        self.record_sessions(id, sessions, cx);
     }
 
     /// Records the sessions chat `chat_id`'s CLI went into, in order, each
-    /// with its CLI's id, transcript and reason, and once that is saved, reads
-    /// the ones it left. Gives the last of them once recorded.
-    pub fn record_sessions(
+    /// with its CLI's id, transcript and reason, and moves the chat into the
+    /// last of them. Once that is saved, reads the ones it left.
+    pub(crate) fn record_sessions(
         &mut self,
         chat_id: i64,
-        agent: Agent,
         sessions: Vec<(String, PathBuf, Option<String>)>,
         cx: &mut Context<Self>,
-    ) -> Task<Option<i64>> {
+    ) {
+        let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == chat_id) else {
+            return;
+        };
+        let Some((agent_id, path, _)) = sessions.last() else {
+            return;
+        };
+        chat.transcript = Some(path.clone());
+        // Sessions are recorded in the order they're asked for, so once the
+        // last ones are, so are those before.
+        let (done, receiver) = smol::channel::bounded::<()>(1);
+        let recording = Recording {
+            done: receiver,
+            session: Rc::default(),
+            agent_id: agent_id.clone(),
+        };
+        chat.recording = Some(recording.clone());
+        let (agent, report) = (chat.agent, chat.report.clone());
         let recorded: Vec<_> = sessions
             .into_iter()
             .map(|(agent_id, path, reason)| {
@@ -200,24 +219,48 @@ impl Runtime {
                         Err(err) => eprintln!("can't record session {agent_id}: {err}"),
                     }
                 }
-                session
+                let Some(session) = session else {
+                    return;
+                };
+                recording.session.set(Some(session));
+                // A newer terminal of the chat's is in a session of its own,
+                // and sessions its CLI reported since are newer than these.
+                if let Some(chat) = this.chats.iter_mut().find(|chat| {
+                    chat.id == chat_id
+                        && chat.report == report
+                        && chat
+                            .recording
+                            .as_ref()
+                            .is_some_and(|last| Rc::ptr_eq(&last.session, &recording.session))
+                }) {
+                    chat.session = Some(session);
+                }
+                // Reports arrive in bursts, and each one used to reload the
+                // sidebar.
+                cx.emit(RuntimeEvent::HistoryChanged {
+                    sessions: Vec::new(),
+                });
             })
-            .ok()
-            .flatten()
+            .ok();
+            drop(done);
         })
+        .detach();
     }
 
-    /// Reads the session a chat's CLI is in now, once the sessions it went
-    /// into so far are recorded, and gives it: `recording`'s, or else
-    /// `current`. Marks the chat active when `touch` is set (see
+    /// Reads the session chat `id`'s CLI is in now, once the sessions it went
+    /// into so far are recorded, and gives it: the last one recorded, or else
+    /// the chat's. Marks the chat active when `touch` is set (see
     /// `read_sessions`).
-    pub fn read_current(
+    pub(crate) fn read_current(
         &mut self,
-        recording: Option<Recording>,
-        current: Option<i64>,
+        id: i64,
         touch: bool,
         cx: &mut Context<Self>,
     ) -> Task<Option<i64>> {
+        let Some(chat) = self.chats.iter().find(|chat| chat.id == id) else {
+            return Task::ready(None);
+        };
+        let (recording, current) = (chat.recording.clone(), chat.session);
         cx.spawn(async move |this, cx| {
             let session = match recording {
                 Some(recording) => {
@@ -250,7 +293,7 @@ impl Runtime {
     }
 
     /// Reads the session a chat's CLI was in: its last, or else `session`.
-    pub fn read_last_session(
+    pub(crate) fn read_last_session(
         &mut self,
         chat_id: i64,
         session: Option<i64>,
@@ -338,19 +381,9 @@ impl Runtime {
         .detach();
     }
 
-    /// Starts looking for the sessions of `chats`' Codex CLIs, each with its
-    /// id, its terminal's report name and its process, among the files those
-    /// keep open, unless there are none. Gives the lookup, which marks the
-    /// chats it looks at, and what it finds: each chat's id, report name,
-    /// transcript and Codex's id for the session.
-    #[expect(
-        clippy::type_complexity,
-        reason = "what the lookup found is handed back as it was found"
-    )]
-    pub fn find_codex_sessions<'a>(
-        &mut self,
-        chats: impl IntoIterator<Item = (i64, String, Pid, &'a mut Codex)>,
-    ) -> Option<(Lookup, smol::Task<Vec<(i64, String, PathBuf, String)>>)> {
+    /// Codex writes its session files as it goes, so the sessions of its
+    /// terminals are looked for whenever those change.
+    pub(crate) fn find_codex_sessions(&mut self, cx: &mut Context<Self>) {
         // Each chat's report name identifies this terminal, not just its row:
         // A chat can restart its terminal while the lookup runs.
         //
@@ -359,12 +392,20 @@ impl Runtime {
         // generation lets a result that has been superseded be dropped rather
         // than move a chat back to the session it has already left.
         let mut looked_at = Vec::new();
-        let lookup =
-            self.lifecycle
-                .look_up_codex(chats.into_iter().map(|(id, report, pid, codex)| {
-                    looked_at.push((id, report, pid));
-                    codex
-                }))?;
+        let chats = self.chats.iter_mut().filter_map(|chat| {
+            if chat.agent != Agent::Codex {
+                return None;
+            }
+            let pid = chat.terminal.as_ref()?.terminal.read(cx).pid();
+            if !pid.may_be_running() {
+                return None;
+            }
+            looked_at.push((chat.id, chat.report.clone(), pid));
+            Some(&mut chat.codex)
+        });
+        let Some(lookup) = self.lifecycle.look_up_codex(chats) else {
+            return;
+        };
         // Looking through a process's open files, and reading the first line
         // of the newest one, doesn't belong on the window's thread.
         let found = smol::unblock(move || {
@@ -376,17 +417,48 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>()
         });
-        Some((lookup, found))
+        cx.spawn(async move |this, cx| {
+            let found = found.await;
+            this.update(cx, |this, cx| {
+                for (id, report, path, agent_id) in found {
+                    // A chat with this id now is another chat, or the same
+                    // one with a newer terminal: either way the result is
+                    // about a process that has gone. The same goes for a
+                    // lookup that a newer one has already replaced.
+                    let current = this
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == id && chat.report == report)
+                        .is_some_and(|chat| {
+                            chat.codex.looked_up_by(lookup)
+                                && chat.transcript.as_ref() != Some(&path)
+                        });
+                    if !current {
+                        continue;
+                    }
+                    this.record_sessions(id, vec![(agent_id, path, None)], cx);
+                }
+                let mut closing = Vec::new();
+                for chat in &mut this.chats {
+                    if chat.codex.looked_up(lookup) {
+                        closing.push(chat.id);
+                    }
+                }
+                // One closed while its CLI was exiting may not be reaped yet,
+                // so its session is read once it is, and nothing else runs in
+                // that session until then.
+                for id in closing {
+                    this.suspend(id, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     #[doc(hidden)]
     pub fn reports(&self) -> &Reports {
         &self.following.reports
-    }
-
-    #[doc(hidden)]
-    pub fn reports_mut(&mut self) -> &mut Reports {
-        &mut self.following.reports
     }
 
     #[doc(hidden)]
@@ -417,7 +489,7 @@ pub(crate) fn reported_sessions(
 /// Records the sessions a chat's CLI reported last, and reads `sessions`
 /// along with the ones those reports moved the chat into or out of. One
 /// transcript that can't be read doesn't stop the others.
-pub fn import_chat(
+pub(crate) fn import_chat(
     store: &Store,
     reports: &mut Reports,
     id: i64,

@@ -4,7 +4,6 @@
 //! thread and reads what the CLIs wrote last itself.
 
 use super::*;
-use agentshub_runtime::import_chat;
 
 impl Workspace {
     /// Stops every CLI, saves what is queued, and reads the sessions the
@@ -109,16 +108,12 @@ impl Workspace {
         );
         // A session saved by now may not have reached its chat, whose callback
         // can't run anymore, but it is the chat's last.
-        let chats = self.chats.iter().map(|chat| chat.id);
-        let chats: Vec<i64> = chats
-            .chain(
-                self.runtime
-                    .read(cx)
-                    .lifecycle()
-                    .stopping()
-                    .map(|(id, ..)| id),
-            )
-            .chain(self.runtime.read(cx).reading_last().iter().copied())
+        let runtime = self.runtime.read(cx);
+        let chats: Vec<i64> = runtime
+            .open_chats()
+            .map(|chat| chat.id)
+            .chain(runtime.lifecycle().stopping().map(|(id, ..)| id))
+            .chain(runtime.reading_last().iter().copied())
             .filter(|id| !removed.contains(id))
             .collect();
         for id in chats {
@@ -146,30 +141,16 @@ impl Workspace {
         }
         // Discover Codex's last session before its process disappears. A
         // queued watcher callback cannot run once we're released.
-        for chat in self.chats.iter().filter(|chat| !removed.contains(&chat.id)) {
-            if chat.agent == Agent::Codex
-                && let Some(terminal) = &chat.pane.terminal
-                && let Some((agent_id, path)) =
-                    sessions::codex_session(&terminal.terminal.read(cx).pid())
-            {
-                match smol::block_on(
-                    store.record_session(chat.id, chat.agent, agent_id, path, None),
-                ) {
-                    Ok(recorded) => sessions.push(recorded.session_id),
-                    Err(err) => eprintln!("can't record the last Codex session: {err}"),
-                }
-            }
-        }
+        sessions.extend(self.runtime.read(cx).record_codex_sessions(&removed, cx));
         // The CLIs are killed on threads of their own, which the app would
         // otherwise exit before they are done with.
-        let reaped: Vec<_> = self
-            .chats
-            .iter()
-            .filter_map(|chat| chat.pane.terminal.as_ref())
-            .map(|terminal| terminal.terminal.read(cx).shutdown())
+        let runtime = self.runtime.read(cx);
+        let reaped: Vec<_> = runtime
+            .open_chats()
+            .filter_map(|chat| runtime.terminal(chat.id))
+            .map(|terminal| terminal.read(cx).shutdown())
             .chain(
-                self.runtime
-                    .read(cx)
+                runtime
                     .lifecycle()
                     .stopping()
                     .map(|(_, reaped, _)| reaped.clone()),
@@ -180,7 +161,7 @@ impl Workspace {
                     .values()
                     .map(|shell| shell.terminal.read(cx).shutdown()),
             )
-            .chain(self.runtime.read(cx).lifecycle().removal_waits().cloned())
+            .chain(runtime.lifecycle().removal_waits().cloned())
             .collect();
         terminal::wait_reaped(reaped);
         #[cfg(target_os = "linux")]
@@ -199,21 +180,8 @@ impl Workspace {
                 eprintln!("can't remove a worktree on shutdown: {err:#}");
             }
         }
-        for chat in self.chats.iter().filter(|chat| !removed.contains(&chat.id)) {
-            let imported = self.runtime.update(cx, |runtime, _| {
-                import_chat(
-                    &store,
-                    runtime.reports_mut(),
-                    chat.id,
-                    chat.agent,
-                    &chat.report,
-                    chat.session.into_iter().collect(),
-                )
-            });
-            if let Err(err) = imported {
-                eprintln!("can't import chat {} on shutdown: {err}", chat.id);
-            }
-        }
+        self.runtime
+            .update(cx, |runtime, _| runtime.import_chats(&removed));
         sessions.sort_unstable();
         sessions.dedup();
         for id in sessions {

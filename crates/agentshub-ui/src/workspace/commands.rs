@@ -5,31 +5,13 @@ use super::*;
 impl Workspace {
     /// The shown chat as the catalog lists it.
     pub(super) fn active_entry<'a>(&'a self, cx: &'a App) -> Option<&'a store::Chat> {
-        let id = self.active?;
+        let id = self.runtime.read(cx).active()?;
         self.runtime
             .read(cx)
             .projects()
             .iter()
             .flat_map(|project| &project.chats)
             .find(|chat| chat.id == id)
-    }
-
-    /// Whether a chat, or its project, is archived.
-    pub(super) fn is_archived(&self, id: i64, cx: &App) -> bool {
-        self.runtime.read(cx).projects().iter().any(|project| {
-            project.chats.iter().any(|chat| {
-                chat.id == id && (chat.archived_at.is_some() || project.archived_at.is_some())
-            })
-        })
-    }
-
-    /// Whether chat `id`'s project is being removed.
-    pub(super) fn is_removing(&self, id: i64, cx: &App) -> bool {
-        let runtime = self.runtime.read(cx);
-        runtime.projects().iter().any(|project| {
-            runtime.lifecycle().is_removing_project(project.id)
-                && project.chats.iter().any(|chat| chat.id == id)
-        })
     }
 
     pub(super) fn open_search(
@@ -88,10 +70,14 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(chat) = self.chats.iter().find(|chat| Some(chat.id) == self.active) {
-            chat.pane
-                .history
-                .update(cx, |history, cx| history.toggle(cx));
+        let history = self
+            .runtime
+            .read(cx)
+            .active()
+            .and_then(|id| self.panes.get(&id))
+            .map(|pane| pane.history.clone());
+        if let Some(history) = history {
+            history.update(cx, |history, cx| history.toggle(cx));
             cx.notify();
         }
     }
@@ -127,7 +113,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.active {
+        if let Some(id) = self.runtime.read(cx).active() {
             self.confirm_delete_chat(id, window, cx);
         }
     }
@@ -138,7 +124,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.active {
+        if let Some(id) = self.runtime.read(cx).active() {
             self.confirm_archive_chat(id, window, cx);
         }
     }
@@ -172,7 +158,12 @@ impl Workspace {
         for checkout in &self.checkouts {
             checkout.cancel();
         }
-        let ids = self.chats.iter().map(|chat| chat.id).collect();
+        let ids = self
+            .runtime
+            .read(cx)
+            .open_chats()
+            .map(|chat| chat.id)
+            .collect();
         self.close_chats(ids, window, cx);
     }
 
@@ -184,51 +175,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let store = self.runtime.read(cx).store();
-        let asked: Vec<_> = self
-            .chats
-            .iter()
-            .map(|chat| {
-                let last_prompt = chat.session.map(|session| store.last_prompt(session));
-                let transcript = chat.transcript.clone();
-                (
-                    chat.id,
-                    chat.report.clone(),
-                    chat.session,
-                    transcript,
-                    last_prompt,
-                )
-            })
-            .collect();
+        let idle = self
+            .runtime
+            .update(cx, |runtime, cx| runtime.idle_chats(cx));
         cx.spawn_in(window, async move |this, cx| {
-            let mut found = Vec::new();
-            for (id, report, session, transcript, last_prompt) in asked {
-                let last_prompt = match last_prompt {
-                    Some(last_prompt) => last_prompt.await,
-                    None => Ok((false, None)),
-                };
-                let kept =
-                    smol::unblock(move || transcript.is_some_and(|path| path.exists())).await;
-                found.push((id, report, session, kept, last_prompt));
-            }
-            this.update_in(cx, |this, window, cx| {
-                // One that restarted, or went into another session, meanwhile
-                // isn't what was read.
-                let ids = found
-                    .into_iter()
-                    .filter(|(id, report, session, kept, last_prompt)| {
-                        this.chats
-                            .iter()
-                            .find(|chat| {
-                                chat.id == *id && chat.report == *report && chat.session == *session
-                            })
-                            .is_some_and(|chat| Self::at_rest(chat, *kept, last_prompt, cx))
-                    })
-                    .map(|(id, ..)| id)
-                    .collect();
-                this.close_chats(ids, window, cx);
-            })
-            .ok();
+            let ids = idle.await;
+            this.update_in(cx, |this, window, cx| this.close_chats(ids, window, cx))
+                .ok();
         })
         .detach();
     }
@@ -244,7 +197,7 @@ impl Workspace {
         }
         // Settings in front of the chat keep the keyboard whatever closes,
         // as does the sidebar beside it.
-        let chat_focused = self.active.is_some()
+        let chat_focused = self.runtime.read(cx).active().is_some()
             && !self.settings_shown
             && self.chat_focus.contains_focused(window, cx);
         let focused_shell = self
@@ -252,7 +205,7 @@ impl Workspace {
             .filter(|(_, shell)| shell.view.focus_handle(cx).contains_focused(window, cx))
             .map(|(cwd, _)| cwd);
         for id in ids {
-            self.suspend(id, cx);
+            self.apply(Intent::Suspend(id), cx);
         }
         let shell = self.shown_shell(cx);
         match focused_shell {
@@ -265,7 +218,9 @@ impl Workspace {
             },
             // The shown chat went, its terminal and header with it, and the
             // keyboard with them.
-            None if chat_focused && self.active.is_none() => self.focus_chat(window, cx),
+            None if chat_focused && self.runtime.read(cx).active().is_none() => {
+                self.focus_chat(window, cx)
+            }
             // The shell still shows and keeps the keyboard, or the keyboard
             // was elsewhere.
             Some(_) | None => {}
@@ -360,7 +315,7 @@ impl Workspace {
                 )
             })
             .collect();
-        let active = self.active;
+        let active = self.runtime.read(cx).active();
         let workspace = cx.weak_entity();
         let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
             menu = menu.min_w(px(300.)).max_w(px(400.)).scrollable(true);
@@ -446,7 +401,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.sidebar.read(cx).next_needing_you(self.active) {
+        let active = self.runtime.read(cx).active();
+        match self.sidebar.read(cx).next_needing_you(active) {
             Some(id) => self.open_chat(id, window, cx),
             None => window.push_notification("No agent needs you", cx),
         }

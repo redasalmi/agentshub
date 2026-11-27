@@ -74,9 +74,9 @@ pub fn open_window(
         // was out of the user's sight.
         workspace.update(cx, |_, cx| {
             cx.observe_window_activation(window, |workspace, window, cx| {
-                if window.is_window_active() {
-                    workspace.withdraw_seen(true, cx);
-                } else {
+                let active = window.is_window_active();
+                workspace.set_focused(active, cx);
+                if !active {
                     workspace.release_modifiers(cx);
                 }
             })

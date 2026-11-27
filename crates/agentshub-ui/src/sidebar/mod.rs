@@ -565,18 +565,6 @@ impl Sidebar {
         self.running.get(&id).copied()
     }
 
-    /// Which chat `id` is, for telling the user about it away from the
-    /// sidebar: its title and its project's name.
-    pub fn describe(&self, id: i64) -> Option<String> {
-        self.projects.iter().find_map(|project| {
-            let chat = project.chats.iter().find(|chat| chat.id == id)?;
-            Some(match &chat.title {
-                Some(title) => format!("{title} · {}", project.name),
-                None => format!("New chat in {}", project.name),
-            })
-        })
-    }
-
     fn project_of(&self, chat_id: i64) -> Option<i64> {
         self.projects
             .iter()

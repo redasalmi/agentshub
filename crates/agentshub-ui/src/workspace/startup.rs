@@ -78,8 +78,12 @@ impl Workspace {
             }
             RuntimeEvent::HistoryChanged { sessions } => this.refresh_after(sessions, cx),
             RuntimeEvent::Notice(message) => this.say(message.clone(), cx),
-            RuntimeEvent::Reported(report) => this.read_reports(report, cx),
-            RuntimeEvent::CodexChanged => this.find_codex_sessions(cx),
+            RuntimeEvent::ChatStarted(id) => this.chat_started(*id, cx),
+            RuntimeEvent::ChatExited(id) => this.chat_exited(*id, cx),
+            RuntimeEvent::ChatEnded(id) => this.chat_ended(*id, cx),
+            RuntimeEvent::StatusChanged(_) => this.sync_sidebar(cx),
+            RuntimeEvent::ActiveChanged(active) => this.active_changed(*active, cx),
+            RuntimeEvent::TurnTick => cx.notify(),
         });
 
         // The workspace outlives its window (see `tray`), so it's released
@@ -88,7 +92,11 @@ impl Workspace {
 
         let theme = cx.observe_global::<Theme>(|this, cx| {
             let colors = appearance::terminal_colors(cx);
-            this.terminals().set_colors(cx, colors);
+            this.runtime
+                .update(cx, |runtime, cx| runtime.set_colors(colors, cx));
+            for shell in this.shells.values() {
+                shell.terminal.read(cx).set_colors(colors);
+            }
         });
 
         // Nothing has the keyboard once what had it is gone, such as the
@@ -113,10 +121,8 @@ impl Workspace {
             settings_view,
             runtime,
             _runtime_events: runtime_events,
-            chats: Vec::new(),
-            active: None,
+            panes: HashMap::new(),
             _sidebar_events: sidebar_events,
-            turn_tick: None,
             reveal_numbers: None,
             installed: None,
             _installed_lookup: None,
@@ -134,6 +140,10 @@ impl Workspace {
             sidebar_width: px(cx.global::<Settings>().sidebar_width),
             importing: false,
         };
+        let colors = appearance::terminal_colors(cx);
+        this.runtime
+            .update(cx, |runtime, cx| runtime.set_colors(colors, cx));
+        this.set_focused(window.is_window_active(), cx);
         let projects = this.runtime.read(cx).projects().to_vec();
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx));

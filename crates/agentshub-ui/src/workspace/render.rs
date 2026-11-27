@@ -23,8 +23,10 @@ impl Render for Workspace {
             return render_broken(reason, cx);
         }
         let active = self
-            .active
-            .and_then(|id| self.chats.iter().find(|chat| chat.id == id));
+            .runtime
+            .read(cx)
+            .active()
+            .filter(|id| self.panes.contains_key(id));
 
         h_flex()
             .size_full()

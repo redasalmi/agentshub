@@ -340,7 +340,7 @@ impl Workspace {
                     .iter()
                     .any(|chat| Some(chat.id) == id && chat.archived_at.is_some())
             }),
-            chat_open: self.chats.iter().any(|chat| Some(chat.id) == id),
+            chat_open: id.is_some_and(|id| self.runtime.read(cx).chat(id).is_some()),
             window: has_window,
             id: added,
         };
@@ -364,15 +364,17 @@ impl Workspace {
             Added::Unknown(err) => say(self, format!("Couldn't start the chat: {err}"), cx),
             Added::Listed => self.refresh(cx),
             Added::Start(id) => {
-                let window = window.expect("a chat starts in a window");
                 let cwd = worktree
                     .as_ref()
                     .map_or(&project, |(worktree, _)| &worktree.folder);
                 // Its first session report adds its first session.
-                if !self.start_chat(id, agent, cwd, None, window, cx) {
+                if !self.runtime.update(cx, |runtime, cx| {
+                    runtime.start_chat(id, agent, cwd, None, cx)
+                }) {
                     self.delete_chat(id, worktree, cx);
                 } else if self.runtime.read(cx).lifecycle().navigations() == asked.navigations {
-                    self.activate(id, window, cx);
+                    self.runtime
+                        .update(cx, |runtime, cx| runtime.activate(id, cx));
                     // The sidebar doesn't list the new chat yet, so it can't
                     // find its project by itself.
                     self.sidebar

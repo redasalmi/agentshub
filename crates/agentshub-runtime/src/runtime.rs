@@ -7,9 +7,11 @@ use agentshub_app::catalog::Catalog;
 use agentshub_app::settings::Settings;
 use agentshub_core::lifecycle::Lifecycle;
 use agentshub_core::store::{Change, Imported, Project, Store};
-use gpui_kit::{Context, EventEmitter, SharedString};
+use gpui_kit::{Context, EventEmitter, SharedString, Task};
 
+use crate::chats::ChatRuntime;
 use crate::sessions::Following;
+use crate::terminal::Colors;
 use crate::{Intent, RuntimeEvent};
 
 /// What runs behind the window, and outlives it: the database, the projects
@@ -23,6 +25,18 @@ pub struct Runtime {
     pub(crate) lifecycle: Lifecycle,
     /// The sessions the CLIs report, and the ones Codex's files show.
     pub(crate) following: Following,
+    /// Open chats, including exited terminals and history whose CLI couldn't
+    /// start. Running processes keep running while another chat is shown,
+    /// until the user closes them.
+    pub(crate) chats: Vec<ChatRuntime>,
+    /// The chat that is shown.
+    pub(crate) active: Option<i64>,
+    /// Whether the user can see the shown chat (see `Intent::SetFocused`).
+    pub(crate) focused: bool,
+    /// Brings the shown chat's turn up to date while it's under way.
+    pub(crate) turn_tick: Option<Task<()>>,
+    /// What the chats' terminals are painted in, once the window says.
+    pub(crate) colors: Option<Colors>,
     /// The lock that keeps a second instance off the database.
     _lock: Option<fs::File>,
     /// Why the database can't be used: it didn't open, or another Agents Hub
@@ -50,6 +64,11 @@ impl Runtime {
             catalog: Catalog::new(projects),
             lifecycle: Lifecycle::default(),
             following: Following::new(cx),
+            chats: Vec::new(),
+            active: None,
+            focused: false,
+            turn_tick: None,
+            colors: None,
             _lock: lock,
             broken: broken.map(SharedString::from),
             startup: Some((settings, imported)),
@@ -79,12 +98,20 @@ impl Runtime {
     pub fn apply(&mut self, intent: Intent, cx: &mut Context<Self>) {
         match intent {
             Intent::Change(change) => self.change(change, cx),
+            Intent::OpenChat(id) => self.open_chat(id, cx),
+            Intent::RestartChat(id) => self.restart(id, cx),
+            Intent::CloseChat(id) => self.close_chat(id, cx),
+            Intent::StopChat(id) => {
+                self.stop_chat(id, cx);
+            }
+            Intent::Suspend(id) => self.suspend(id, cx),
+            Intent::SetFocused(focused) => self.set_focused(focused, cx),
         }
     }
 
     /// Shows `change` at once, and saves it. The projects are listed as saved
     /// once every change shown is, which takes back one that couldn't be.
-    fn change(&mut self, change: Change, cx: &mut Context<Self>) {
+    pub(crate) fn change(&mut self, change: Change, cx: &mut Context<Self>) {
         let saved = apply_change(&mut self.catalog, &self.store, change);
         cx.emit(RuntimeEvent::CatalogChanged);
         cx.spawn(async move |this, cx| {

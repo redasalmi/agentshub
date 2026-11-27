@@ -13,7 +13,7 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.active else {
+        let Some(id) = self.runtime.read(cx).active() else {
             return;
         };
         let Some((current, _)) = crate::chat::editor_choices(cx) else {
@@ -27,10 +27,10 @@ impl Workspace {
     /// can't.
     pub(super) fn open_chat_in(&self, editor: Editor, id: i64, cx: &mut Context<Self>) {
         let Some(folder) = self
-            .chats
-            .iter()
-            .find(|chat| chat.id == id)
-            .map(|chat| chat.cwd.clone())
+            .runtime
+            .read(cx)
+            .chat(id)
+            .map(|chat| chat.cwd.to_path_buf())
         else {
             return;
         };

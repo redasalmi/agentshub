@@ -3,11 +3,9 @@
 use super::*;
 
 impl Workspace {
-    pub(super) fn active_cwd(&self) -> Option<&Path> {
-        self.chats
-            .iter()
-            .find(|chat| Some(chat.id) == self.active)
-            .map(|chat| chat.cwd.as_path())
+    pub(super) fn active_cwd(&self, cx: &App) -> Option<PathBuf> {
+        let runtime = self.runtime.read(cx);
+        Some(runtime.chat(runtime.active()?)?.cwd.to_path_buf())
     }
 
     /// The folder of the shell that shows: the selected project, or the
@@ -15,15 +13,12 @@ impl Workspace {
     /// without a project selected, the shown chat's folder, or the home one.
     pub(super) fn shell_cwd(&self, cx: &App) -> Option<PathBuf> {
         let selected = self.sidebar.read(cx).selected();
-        let shows_chat_of = |project: &store::Project| {
-            project
-                .chats
-                .iter()
-                .any(|chat| Some(chat.id) == self.active)
-        };
+        let active = self.runtime.read(cx).active();
+        let shows_chat_of =
+            |project: &store::Project| project.chats.iter().any(|chat| Some(chat.id) == active);
         match selected {
             Some(project) if !shows_chat_of(project) => Some(project.path.clone()),
-            _ => self.active_cwd().map(Path::to_path_buf),
+            _ => self.active_cwd(cx),
         }
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
     }
@@ -92,13 +87,11 @@ impl Workspace {
     /// does while the settings cover them or the window is closed to the tray.
     pub(super) fn sync_terminals(&self, cx: &App) {
         let shown = !self.hidden && !self.settings_shown;
-        let chat = self.active.filter(|_| shown);
-        for each in &self.chats {
-            if let Some(terminal) = &each.pane.terminal {
-                terminal
-                    .terminal
-                    .read(cx)
-                    .set_visible(Some(each.id) == chat);
+        let runtime = self.runtime.read(cx);
+        let chat = runtime.active().filter(|_| shown);
+        for each in runtime.open_chats() {
+            if let Some(terminal) = runtime.terminal(each.id) {
+                terminal.read(cx).set_visible(Some(each.id) == chat);
             }
         }
         let shell = self.shown_shell(cx).map(|(cwd, _)| cwd).filter(|_| shown);
@@ -114,7 +107,7 @@ impl Workspace {
     pub fn set_hidden(&mut self, hidden: bool, cx: &mut App) {
         self.hidden = hidden;
         self.sync_terminals(cx);
-        self.withdraw_seen(cx.active_window().is_some(), cx);
+        self.set_focused(cx.active_window().is_some(), cx);
     }
 
     /// Shows the shell of the selected project, starting it if it isn't
@@ -184,7 +177,7 @@ impl Workspace {
         self.sync_terminals(cx);
         // Closing the settings shows the chat, which no activation reports
         // while the window already has the focus.
-        self.withdraw_seen(window.is_window_active(), cx);
+        self.set_focused(window.is_window_active(), cx);
         cx.notify();
     }
 

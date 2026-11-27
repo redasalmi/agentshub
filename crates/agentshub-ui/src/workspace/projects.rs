@@ -367,7 +367,8 @@ impl Workspace {
                 runtime.lifecycle_mut().cancel_opening(chat.id)
             });
             let reaped = self
-                .stop_chat(chat.id, cx)
+                .runtime
+                .update(cx, |runtime, cx| runtime.stop_chat(chat.id, cx))
                 .or_else(|| self.runtime.read(cx).lifecycle().reaping(chat.id));
             let worktree = chat
                 .worktree

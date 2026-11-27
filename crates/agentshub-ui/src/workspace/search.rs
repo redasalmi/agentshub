@@ -140,7 +140,7 @@ impl Workspace {
                 Pick::Run(Box::new(ShowArchived)),
             ));
         }
-        if !self.chats.is_empty() {
+        if self.runtime.read(cx).open_chats().next().is_some() {
             commands.push(
                 run(
                     "Close the idle chats",

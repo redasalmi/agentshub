@@ -11,12 +11,18 @@ pub enum RuntimeEvent {
     HistoryChanged { sessions: Vec<i64> },
     /// Something to tell the user in a notification.
     Notice(String),
-    /// The CLI of the terminal with this report name reported the sessions
-    /// it went into, which `Runtime::read_reports` takes out.
-    #[doc(hidden)]
-    Reported(String),
-    /// Codex wrote its session files, so the sessions of its CLIs are looked
-    /// for with `Runtime::find_codex_sessions`.
-    #[doc(hidden)]
-    CodexChanged,
+    /// Chat `id` opened, with its terminal if its CLI started, so its pane
+    /// can be built.
+    ChatStarted(i64),
+    /// Chat `id`'s CLI exited, and its terminal stays with what it wrote.
+    ChatExited(i64),
+    /// Chat `id` closed, and its terminal with it.
+    ChatEnded(i64),
+    /// What chat `id`'s CLI does changed.
+    StatusChanged(i64),
+    /// The chat now shown, or that none is. Showing the chat already shown
+    /// says so too, since it is asked for again.
+    ActiveChanged(Option<i64>),
+    /// The shown chat's turn went on another second.
+    TurnTick,
 }
