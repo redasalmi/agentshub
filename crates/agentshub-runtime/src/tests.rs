@@ -1,12 +1,17 @@
 use std::fs;
+use std::time::{Duration, Instant};
 
 use agentshub_app::catalog::Catalog;
 use agentshub_core::agent::Agent;
+use agentshub_core::format::{Turn, duration};
+use agentshub_core::lifecycle::Lifecycle;
 use agentshub_core::reports::Reports;
 use agentshub_core::store::{Change, Db, Store};
 use agentshub_core::transcript;
+use agentshub_core::worktree::{Removal, Worktree};
 use serde_json::json;
 
+use crate::chats::take_and_remove;
 use crate::runtime::apply_change;
 use crate::sessions::{import_chat, reported_sessions};
 
@@ -189,4 +194,58 @@ fn shutdown_continues_importing_after_one_transcript_fails() {
     assert_eq!(db.items(session, 100).unwrap()[0].payload["text"], "kept");
     reports.remove();
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn times_turns_from_busy_to_at_rest() {
+    let start = Instant::now();
+    let later = start + Duration::from_secs(90);
+    let since = Some(Turn::Since(start));
+    let took = Some(Turn::Took(Duration::from_secs(5)));
+    assert_eq!(Turn::after(None, false, true, start), since);
+    // A new prompt starts over.
+    assert_eq!(Turn::after(took, false, true, start), since);
+    // Waiting on the user, or back at work, is still the same turn.
+    assert_eq!(Turn::after(since, true, true, later), since);
+    assert_eq!(
+        Turn::after(since, true, false, later),
+        Some(Turn::Took(Duration::from_secs(90)))
+    );
+    // At rest, the last turn stays.
+    assert_eq!(Turn::after(took, false, false, later), took);
+    assert_eq!(Turn::after(None, false, false, later), None);
+}
+
+#[test]
+fn gives_durations_in_two_units() {
+    let of = |seconds| duration(Duration::from_secs(seconds));
+    assert_eq!(of(0), "0s");
+    assert_eq!(of(59), "59s");
+    assert_eq!(of(60), "1m 00s");
+    assert_eq!(of(192), "3m 12s");
+    assert_eq!(of(3599), "59m 59s");
+    assert_eq!(of(3840), "1h 04m");
+}
+
+#[test]
+fn a_pending_worktree_removal_is_done_once() {
+    let dir = std::env::temp_dir().join(format!("agentshub-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&dir).unwrap();
+    let root = dir.join("gone");
+    let worktree = Worktree {
+        root: root.clone(),
+        folder: root,
+    };
+    let mut lifecycle = Lifecycle::default();
+    let job = lifecycle.track_removal(&worktree, &dir, Vec::new());
+    // Whichever of its task and shutdown comes first removes it.
+    assert_eq!(take_and_remove(&job).unwrap().unwrap(), Removal::Removed);
+    assert!(take_and_remove(&job).is_none());
+    assert!(
+        lifecycle
+            .take_removals()
+            .iter()
+            .all(|job| take_and_remove(job).is_none())
+    );
+    fs::remove_dir_all(dir).ok();
 }

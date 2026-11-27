@@ -44,7 +44,7 @@ use agentshub_core::worktree::{self, Worktree};
 #[cfg(target_os = "linux")]
 use agentshub_platform::scope;
 use agentshub_runtime::terminal::{self, Exited, Pty, StatusChanged, Terminal};
-use agentshub_runtime::{Intent, Recording, Runtime, RuntimeEvent};
+use agentshub_runtime::{Intent, Recording, Runtime, RuntimeEvent, take_and_remove};
 
 mod actions;
 mod catalog;
@@ -150,11 +150,6 @@ pub struct Workspace {
     sidebar_width: Pixels,
     /// Whether a database to import is being picked or checked.
     importing: bool,
-}
-
-/// Takes the worktree out of `job` and removes it, unless it was taken.
-fn take_and_remove(job: &Mutex<Option<(Worktree, PathBuf)>>) -> Option<Result<worktree::Removal>> {
-    agentshub_core::lifecycle::take_and_remove(job, worktree::remove)
 }
 
 /// What dragging the sidebar's edge carries, and draws: nothing, since the
