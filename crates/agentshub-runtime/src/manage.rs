@@ -1,9 +1,10 @@
 //! Managing the projects and chats: adding, removing, archiving and closing
 //! them, the database file behind them, and the settings.
 
+use std::fs;
 use std::path::PathBuf;
 
-use gpui_kit::Context;
+use gpui_kit::{AppContext as _, Context};
 
 use agentshub_app::alerts;
 use agentshub_core::lifecycle::Deleted;
@@ -26,6 +27,106 @@ pub(crate) fn pick_idle(states: &[ChatState]) -> Vec<i64> {
 }
 
 impl Runtime {
+    /// Adds folders as projects, in the order given at the top of the list,
+    /// and selects the first. A folder that already is a project is selected
+    /// where it is.
+    pub(crate) fn add_folders(&self, folders: Vec<PathBuf>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            // Each one goes on top, so the last goes in first.
+            let folders = cx
+                .background_spawn(async move {
+                    folders
+                        .into_iter()
+                        .rev()
+                        .map(|path| fs::canonicalize(&path).unwrap_or(path))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let Ok(added) = this.update(cx, |this, _| {
+                folders
+                    .into_iter()
+                    .map(|path| (path.clone(), this.store.add_project(path)))
+                    .collect::<Vec<_>>()
+            }) else {
+                return;
+            };
+            let mut first = None;
+            for (path, added) in added {
+                match added.await {
+                    Ok(id) => first = Some(id),
+                    Err(err) => {
+                        let message = format!("Couldn't add {}: {err}", path.display());
+                        this.update(cx, |_, cx| cx.emit(RuntimeEvent::Notice(message)))
+                            .ok();
+                    }
+                }
+            }
+            let Some(id) = first else {
+                return;
+            };
+            // Selecting it looks up what can start in it, so it is listed
+            // first.
+            this.update(cx, |this, cx| {
+                this.catalog.select_when_listed(id);
+                cx.emit(RuntimeEvent::HistoryChanged {
+                    sessions: Vec::new(),
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Copies the database to `path`, so the history can live outside the
+    /// one file agentshub reads.
+    pub(crate) fn export(&self, path: PathBuf, cx: &mut Context<Self>) {
+        let exported = self.store.export(path.clone());
+        cx.spawn(async move |this, cx| {
+            let message = match exported.await {
+                Ok(()) => format!("Exported the database to {}", path.display()),
+                Err(err) => format!("Couldn't export the database: {err}"),
+            };
+            this.update(cx, |_, cx| cx.emit(RuntimeEvent::Notice(message)))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Checks the database at `path` and copies it, for the window to show
+    /// what it holds before it replaces this one (see
+    /// `RuntimeEvent::ImportChecked`).
+    pub(crate) fn check_import(&self, path: PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            // Checking and copying a large database takes a while.
+            let checked = smol::unblock({
+                let path = path.clone();
+                move || store::prepare_import(&path)
+            })
+            .await;
+            let unshown = checked.as_ref().ok().map(|(pending, _)| pending.clone());
+            let told = this.update(cx, |_, cx| {
+                cx.emit(RuntimeEvent::ImportChecked { path, checked })
+            });
+            if told.is_err()
+                && let Some(pending) = unshown
+            {
+                pending.discard();
+            }
+        })
+        .detach();
+    }
+
+    /// Puts a checked database in place of this one, and has the app restart
+    /// to use it.
+    pub(crate) fn confirm_import(&self, pending: &store::PendingImport, cx: &mut Context<Self>) {
+        match pending.confirm() {
+            Ok(()) => cx.emit(RuntimeEvent::Restart),
+            Err(err) => cx.emit(RuntimeEvent::Notice(format!(
+                "Couldn't import the database: {err:#}"
+            ))),
+        }
+    }
+
     /// The ids of a project's chats.
     pub fn chats_of(&self, project: i64) -> Vec<i64> {
         self.projects()

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use agentshub_core::lifecycle::Reaped;
+use agentshub_core::store::{PendingImport, Project};
 use agentshub_core::worktree::Worktree;
 use gpui_kit::SharedString;
 
@@ -66,4 +67,14 @@ pub enum RuntimeEvent {
     /// The project in this folder is being removed, so the window stops its
     /// shell.
     RemovingProject(PathBuf),
+    /// The database at `path` was checked to import: the copy of it that
+    /// `Intent::ConfirmImport` puts in place, and the projects it holds, or
+    /// why it can't be imported. The window asks the user, and discards the
+    /// copy if they turn it down or it can't ask.
+    ImportChecked {
+        path: PathBuf,
+        checked: anyhow::Result<(PendingImport, Vec<Project>)>,
+    },
+    /// The database was replaced, so the app restarts to use it.
+    Restart,
 }

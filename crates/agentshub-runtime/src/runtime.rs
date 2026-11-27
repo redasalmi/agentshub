@@ -21,7 +21,7 @@ use crate::{Intent, RuntimeEvent};
 pub struct Runtime {
     pub(crate) store: Store,
     /// The projects and chats, including the changes not saved yet.
-    catalog: Catalog,
+    pub(crate) catalog: Catalog,
     /// The chats on their way in or out, the ones being deleted, and which
     /// of them may take the view.
     pub(crate) lifecycle: Lifecycle,
@@ -138,6 +138,10 @@ impl Runtime {
             Intent::CloseChats(ids) => self.close_chats(ids, cx),
             Intent::CloseIdle(check) => self.close_idle(check, cx),
             Intent::CloseAll => self.close_all(cx),
+            Intent::AddFolders(folders) => self.add_folders(folders, cx),
+            Intent::Export(path) => self.export(path, cx),
+            Intent::Import(path) => self.check_import(path, cx),
+            Intent::ConfirmImport(pending) => self.confirm_import(&pending, cx),
         }
     }
 

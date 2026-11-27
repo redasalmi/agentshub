@@ -101,6 +101,8 @@ impl Workspace {
                 project,
                 reaped,
             } => this.remove_worktree(worktree, project, reaped.clone(), cx),
+            RuntimeEvent::ImportChecked { path, checked } => this.import_checked(path, checked, cx),
+            RuntimeEvent::Restart => cx.restart(),
             RuntimeEvent::RemovingProject(path) => {
                 // Dropping its terminal kills the shell.
                 this.shells.remove(path);

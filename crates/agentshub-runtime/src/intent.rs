@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use agentshub_core::agent::Agent;
-use agentshub_core::store::Change;
+use agentshub_core::store::{Change, PendingImport};
 use agentshub_core::worktree::Worktree;
 
 use crate::IdleCheck;
@@ -67,4 +67,15 @@ pub enum Intent {
     /// Closes every open chat, stopping its CLI even mid-turn, and the ones
     /// still opening or waiting for their worktree.
     CloseAll,
+    /// Adds folders as projects, in the order given at the top of the list,
+    /// and selects the first.
+    AddFolders(Vec<PathBuf>),
+    /// Copies the database to a file.
+    Export(PathBuf),
+    /// Checks a database to import, and copies it (see
+    /// `RuntimeEvent::ImportChecked`).
+    Import(PathBuf),
+    /// Puts a checked database in place of this one, and has the app
+    /// restart to use it.
+    ConfirmImport(PendingImport),
 }

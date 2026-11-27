@@ -26,8 +26,10 @@ impl Workspace {
             let Some(path) = path else {
                 return;
             };
-            this.update(cx, |this, cx| this.add_folders(&[path], cx))
-                .ok();
+            this.update(cx, |this, cx| {
+                this.apply(Intent::AddFolders(vec![path]), cx)
+            })
+            .ok();
         })
         .detach();
     }
@@ -45,62 +47,7 @@ impl Workspace {
             window.push_notification("Drop a folder to add it as a project", cx);
             return;
         }
-        self.add_folders(&folders, cx);
-    }
-
-    /// Adds folders as projects, in the order given at the top of the list,
-    /// and selects the first. A folder that already is a project is selected
-    /// where it is.
-    fn add_folders(&mut self, folders: &[PathBuf], cx: &mut Context<Self>) {
-        let folders = folders.to_vec();
-        cx.spawn(async move |this, cx| {
-            // Each one goes on top, so the last goes in first.
-            let folders = cx
-                .background_spawn(async move {
-                    folders
-                        .into_iter()
-                        .rev()
-                        .map(|path| fs::canonicalize(&path).unwrap_or(path))
-                        .collect::<Vec<_>>()
-                })
-                .await;
-            let Ok(added) = this.update(cx, |this, cx| {
-                folders
-                    .into_iter()
-                    .map(|path| {
-                        (
-                            path.clone(),
-                            this.runtime.read(cx).store().add_project(path),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            }) else {
-                return;
-            };
-            let mut first = None;
-            for (path, added) in added {
-                match added.await {
-                    Ok(id) => first = Some(id),
-                    Err(err) => {
-                        let message = format!("Couldn't add {}: {err}", path.display());
-                        this.update(cx, |this, cx| this.say(message, cx)).ok();
-                    }
-                }
-            }
-            let Some(id) = first else {
-                return;
-            };
-            // Selecting it looks up what can start in it, so it is listed
-            // first.
-            this.update(cx, |this, cx| {
-                this.runtime.update(cx, |runtime, _| {
-                    runtime.catalog_mut().select_when_listed(id)
-                });
-                this.refresh(cx);
-            })
-            .ok();
-        })
-        .detach();
+        self.apply(Intent::AddFolders(folders), cx);
     }
 
     /// Copies the database where the user asks, so the history can live
@@ -121,16 +68,8 @@ impl Workspace {
                 }
                 _ => return,
             };
-            let Ok(exported) = this.update(cx, |this, cx| {
-                this.runtime.read(cx).store().export(path.clone())
-            }) else {
-                return;
-            };
-            let message = match exported.await {
-                Ok(()) => format!("Exported the database to {}", path.display()),
-                Err(err) => format!("Couldn't export the database: {err}"),
-            };
-            this.update(cx, |this, cx| this.say(message, cx)).ok();
+            this.update(cx, |this, cx| this.apply(Intent::Export(path), cx))
+                .ok();
         })
         .detach();
     }
@@ -164,50 +103,54 @@ impl Workspace {
                 }
                 _ => None,
             };
-            let Some(path) = path else {
-                this.update(cx, |this, _| this.importing = false).ok();
-                return;
-            };
-            // Checking and copying a large database takes a while.
-            let prepared = smol::unblock({
-                let path = path.clone();
-                move || store::prepare_import(&path)
+            this.update(cx, |this, cx| match path {
+                Some(path) => this.apply(Intent::Import(path), cx),
+                None => this.importing = false,
             })
-            .await;
-            // Another import can start once this one is shown: the dialog is
-            // modal, and each check has a copy of its own. The window may have
-            // closed to the tray meanwhile, which the workspace outlives, so
-            // this doesn't wait for it.
-            this.update(cx, |this, _| this.importing = false).ok();
-            let unshown = prepared.as_ref().ok().map(|(pending, _)| pending.clone());
-            let shown = this.update_in(cx, |this, window, cx| match prepared {
-                Ok((pending, projects)) => {
-                    this.confirm_import(&path, pending, projects, window, cx)
-                }
-                Err(err) => window.push_notification(
-                    format!("Couldn't import {}: {err:#}", home_relative(&path)),
-                    cx,
-                ),
-            });
-            // Without a window to confirm it in, the copy is turned down.
-            if shown.is_err()
-                && let Some(pending) = unshown
-            {
-                pending.discard();
-            }
+            .ok();
         })
         .detach();
+    }
+
+    /// Shows what the database checked at `path` holds, or why it can't be
+    /// imported.
+    pub(super) fn import_checked(
+        &mut self,
+        path: &Path,
+        checked: &Result<(store::PendingImport, Vec<store::Project>)>,
+        cx: &mut Context<Self>,
+    ) {
+        // Another import can start once this one is shown: the dialog is
+        // modal, and each check has a copy of its own. The window may have
+        // closed to the tray meanwhile, which the workspace outlives, so this
+        // doesn't wait for it.
+        self.importing = false;
+        let shown = cx.with_window(cx.entity_id(), |window, cx| match checked {
+            Ok((pending, projects)) => {
+                self.confirm_import(path, pending.clone(), projects.clone(), window, cx)
+            }
+            Err(err) => window.push_notification(
+                format!("Couldn't import {}: {err:#}", home_relative(path)),
+                cx,
+            ),
+        });
+        // Without a window to confirm it in, the copy is turned down.
+        if shown.is_none()
+            && let Ok((pending, _)) = checked
+        {
+            pending.discard();
+        }
     }
 
     /// Shows what a checked database holds, and restarts with it in place of
     /// the database once the user confirms.
     fn confirm_import(
-        &mut self,
+        &self,
         path: &Path,
         pending: store::PendingImport,
         projects: Vec<store::Project>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let name = path.file_name().map_or_else(
             || path.display().to_string(),
@@ -226,9 +169,11 @@ impl Workspace {
             .and_then(|path| path.parent().map(home_relative))
             .unwrap_or_default();
         let projects: Rc<[store::Project]> = projects.into();
+        let runtime = self.runtime.downgrade();
         window.open_alert_dialog(cx, move |alert, _, cx| {
             let theme = cx.theme();
             let (confirm, discard) = (pending.clone(), pending.clone());
+            let runtime = runtime.clone();
             alert
                 .confirm()
                 .width(px(520.))
@@ -251,14 +196,11 @@ impl Workspace {
                 )
                 .ok_text("Import and restart")
                 .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    match confirm.confirm() {
-                        Ok(()) => cx.restart(),
-                        Err(err) => window.push_notification(
-                            format!("Couldn't import the database: {err:#}"),
-                            cx,
-                        ),
-                    }
+                .on_ok(move |_, _, cx| {
+                    let confirm = Intent::ConfirmImport(confirm.clone());
+                    runtime
+                        .update(cx, |runtime, cx| runtime.apply(confirm, cx))
+                        .ok();
                     true
                 })
                 // The checked copy is gone once confirmed, so this only
