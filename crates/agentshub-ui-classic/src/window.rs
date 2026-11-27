@@ -2,13 +2,12 @@
 
 use gpui_kit::*;
 
-use crate::tray;
 use crate::workspace::Workspace;
 use agentshub_runtime::{Intent, Runtime};
-use agentshub_ui_kit::appearance;
+use agentshub_ui_kit::{appearance, frontend};
 
 /// What a window opens on.
-pub enum Contents {
+pub(crate) enum Contents {
     /// The workspace of the window that was closed to the tray.
     Workspace(Entity<Workspace>),
     /// A new workspace.
@@ -17,37 +16,14 @@ pub enum Contents {
 
 /// Opens the window on `contents`, a workspace on `runtime`, with the
 /// `bounds` it was closed with, if any.
-pub fn open_window(
+pub(crate) fn open_window(
     runtime: Entity<Runtime>,
     contents: Contents,
     bounds: Option<WindowBounds>,
     cx: &mut App,
 ) -> Entity<Workspace> {
-    let options = WindowOptions {
-        window_bounds: Some(
-            bounds.unwrap_or_else(|| WindowBounds::centered(size(px(1280.), px(800.)), cx)),
-        ),
-        titlebar: Some(TitlebarOptions {
-            title: Some("Agents Hub".into()),
-            ..Default::default()
-        }),
-        // Wayland has no per-window icon: the compositor looks up
-        // agentshub.desktop by this id and uses its Icon=.
-        app_id: Some("agentshub".into()),
-        // The workspace draws the title bar, with the search in it.
-        window_decorations: Some(WindowDecorations::Client),
-        ..Default::default()
-    };
+    let options = frontend::window_options(bounds, cx);
     let (_, workspace) = gpui_kit::open_window(options, cx, |window, cx| {
-        window.on_window_should_close(cx, |window, cx| {
-            tray::remember_bounds(window.window_bounds(), cx);
-            true
-        });
-        // Each window observes the system's mode, as the observer goes with
-        // the window when it's closed to the tray.
-        window
-            .observe_window_appearance(appearance::follow_system)
-            .detach();
         let workspace = match contents {
             Contents::Workspace(workspace) => {
                 runtime.update(cx, |runtime, cx| {
@@ -82,10 +58,7 @@ pub fn open_window(
             })
             .detach();
         });
-        // The workspace loads the settings that pick the mode the first
-        // time. Later, the system may have changed mode while the window was
-        // closed, and the observer only fires on later changes.
-        appearance::follow_system(window, cx);
+        frontend::watch_window(window, cx);
         workspace
     })
     .expect("failed to open window");

@@ -1,25 +1,21 @@
-//! Wiring notification policy to the workspace.
+//! Wiring notification policy to the layout.
 
 use std::rc::Rc;
 
 use gpui_kit::*;
 
-use crate::workspace::Workspace;
+use agentshub_ui_kit::Frontend;
 
-pub(crate) fn init(workspace: &Entity<Workspace>, cx: &mut App) {
-    let workspace = workspace.downgrade();
+pub(crate) fn init(frontend: &Rc<dyn Frontend>, cx: &mut App) {
+    // The runtime shuts the agents down when the layout lets go of it as the
+    // app quits, which the alerts' global would otherwise prevent.
+    let frontend = Rc::downgrade(frontend);
     let open = Rc::new(move |chat: i64, token: Option<String>, cx: &mut App| {
-        let Some(workspace) = workspace.upgrade() else {
+        let Some(frontend) = frontend.upgrade() else {
             return;
         };
         crate::tray::show(token, cx);
-        if let Some(window) = cx.windows().first() {
-            window
-                .update(cx, |_, window, cx| {
-                    workspace.update(cx, |workspace, cx| workspace.open_chat(chat, window, cx))
-                })
-                .ok();
-        }
+        frontend.open_chat(chat, cx);
     });
     agentshub_app::alerts::start(open, cx);
 }

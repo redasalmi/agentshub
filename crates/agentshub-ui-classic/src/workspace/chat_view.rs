@@ -192,7 +192,7 @@ impl Workspace {
                 }
             }
             crate::chat::ToolbarIntent::CloseWindow => {
-                crate::tray::remember_bounds(window.window_bounds(), cx);
+                agentshub_platform::tray::remember_bounds(window.window_bounds(), cx);
                 window.remove_window();
             }
         }

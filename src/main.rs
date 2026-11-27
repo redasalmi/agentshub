@@ -1,4 +1,5 @@
 mod alerts;
+mod tray;
 
 pub use agentshub_app::{bootstrap, settings};
 pub use agentshub_core::{
@@ -7,9 +8,7 @@ pub use agentshub_core::{
 #[cfg(target_os = "linux")]
 pub use agentshub_platform::scope;
 pub use agentshub_platform::{instance, motion, sigterm};
-pub use agentshub_ui_classic::{tray, window, workspace};
 pub use agentshub_ui_kit::{appearance, history};
-pub use window::{Contents, open_window};
 
 use std::borrow::Cow;
 
@@ -72,7 +71,7 @@ fn main() {
         init(cx);
         agentshub_app::editors::look_up(cx);
         agentshub_ui_kit::terminal_view::init(cx);
-        workspace::init(cx);
+        agentshub_ui_classic::workspace::init(cx);
         // The tray decides whether closing the window quits.
         cx.set_quit_mode(QuitMode::Explicit);
         quit_on_sigterm(cx);
@@ -81,10 +80,10 @@ fn main() {
             let opened = bootstrap::open().await;
             cx.update(|cx| {
                 let runtime = cx.new(|cx| Runtime::new(opened, cx));
-                let workspace = open_window(runtime.clone(), Contents::New, None, cx);
-                alerts::init(&workspace, cx);
+                let frontend = agentshub_ui_classic::open(runtime.clone(), cx);
+                alerts::init(&frontend, cx);
                 motion::watch_desktop_motion(cx, appearance::apply_motion);
-                tray::init(runtime, workspace, cx);
+                tray::init(runtime, frontend, cx);
                 cx.observe_global::<settings::Settings>(tray::sync).detach();
                 instance::serve(instance, cx, tray::show);
             });
