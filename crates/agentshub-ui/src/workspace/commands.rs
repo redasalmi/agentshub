@@ -323,7 +323,7 @@ impl Workspace {
                     let count = chats.iter().filter(|chat| chat.3.group() == group).count();
                     menu = menu.item(
                         PopupMenuItem::element(move |_, cx| {
-                            sidebar::group_heading(group, count, tone, cx).into_any_element()
+                            group_heading(group, count, tone, cx).into_any_element()
                         })
                         .disabled(true),
                     );
@@ -337,7 +337,7 @@ impl Workspace {
                             .min_w_0()
                             .py_1()
                             .gap(px(10.))
-                            .child(sidebar::dot(tone, cx))
+                            .child(dot(tone, cx))
                             .child(
                                 v_flex()
                                     .flex_1()

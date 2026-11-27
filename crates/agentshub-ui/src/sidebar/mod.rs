@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as ExtraIcon;
@@ -15,10 +15,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use agentshub_app::settings::Settings;
-use agentshub_core::status::{Need, Status};
+use agentshub_core::status::Status;
 use agentshub_core::store::{Chat, Project};
 
-use crate::theme::{self as appearance, Tint};
+use agentshub_ui_kit::status::{Filter, POP, Tone, badge, dot};
+use agentshub_ui_kit::theme::{self as appearance, Tint};
+use agentshub_ui_kit::widgets::{heading, path_line};
 
 actions!(sidebar, [NewChat]);
 
@@ -33,12 +35,10 @@ pub use agentshub_core::format::{activity, age, home_relative};
 use rail::{key_number, project_mark};
 pub use rail::{names_width, rail};
 
-pub use status::{badge, dot, live_dot};
 use status::{name_of, popping_dot};
 use text::summary;
-pub use text::{marks, path_line, subtitle};
+pub use text::{marks, subtitle};
 use widgets::section;
-pub use widgets::{group_heading, heading};
 
 /// How often the ages of the chats are brought up to date.
 const AGE_INTERVAL: Duration = Duration::from_secs(60);
@@ -71,26 +71,10 @@ const ROW_HEIGHT: Pixels = px(34.);
 const MARK_SIZE: Pixels = px(22.);
 /// The bar beside the selected project, on the rail's edge.
 const BAR_WIDTH: Pixels = px(3.);
-/// A chat's status glyph, and the room it takes in a row.
-const GLYPH_SIZE: Pixels = px(14.);
-/// A working glyph's rotation. One slow turn still reads as motion when it
-/// advances a step at a time, and a cap this low keeps the whole-window frame
-/// it costs to a small share of a core.
-const SPIN_PERIOD: Duration = Duration::from_millis(2500);
-const SPIN_FPS: f32 = 8.;
-/// How many seconds a working glyph takes to step round under reduced motion.
-const REDUCED_SPIN_STEPS: u64 = 8;
-/// The working glyph, drawn rather than taken from the icon set: a quiet ring
-/// with a bright head reads better than a uniform arc when it steps.
-const WORKING_GLYPH: &[u8] = include_bytes!("../../../../assets/working.svg");
 
 /// How the selection bar and the filter's thumb travel to what was picked: a
 /// quick spring that overshoots a little before it settles.
 const SLIDE: SpringConfig = SpringConfig::new(420., 32., 1.);
-/// How long a status glyph that has just come to need the user pops for, and
-/// how much bigger it gets at its fullest.
-const POP: Duration = Duration::from_millis(420);
-const POP_GROWTH: f32 = 0.35;
 /// How long each archived chat waits after the one above it to fade in when
 /// the archive opens.
 const STAGGER: Duration = Duration::from_millis(30);
@@ -138,136 +122,12 @@ pub enum SidebarEvent {
     ShowProjectNames(bool),
 }
 
-/// Which of the selected project's chats the list shows.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub enum Filter {
-    #[default]
-    All,
-    /// The ones whose agent waits on the user, finished or failed.
-    NeedsYou,
-    /// The ones whose agent runs.
-    Running,
-}
-
-impl Filter {
-    pub const ALL: [Self; 3] = [Self::All, Self::NeedsYou, Self::Running];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::NeedsYou => "Needs you",
-            Self::Running => "Running",
-        }
-    }
-
-    fn admits(self, running: Option<Option<Status>>) -> bool {
-        match self {
-            Self::All => true,
-            Self::NeedsYou => Tone::of(running).needs_you(),
-            Self::Running => running.is_some(),
-        }
-    }
-}
-
 /// Which shortcut numbers the sidebar shows, while the modifier that opens
 /// them is held: Alt for the chats, Ctrl for the projects.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Held {
     Chats,
     Projects,
-}
-
-/// What a chat's dot says about its agent.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tone {
-    /// Not running: a saved session.
-    Saved,
-    /// Running without saying what it does.
-    Running,
-    Idle,
-    Working,
-    NeedsYou(Option<Need>),
-    Done,
-    Error,
-}
-
-impl Tone {
-    /// `running` is `None` for a chat whose agent doesn't run, and
-    /// `Some(None)` for one that runs but hasn't said what it's doing.
-    pub fn of(running: Option<Option<Status>>) -> Self {
-        match running {
-            None => Self::Saved,
-            Some(None) => Self::Running,
-            Some(Some(Status::Idle)) => Self::Idle,
-            Some(Some(Status::Working)) => Self::Working,
-            Some(Some(Status::Blocked(need))) => Self::NeedsYou(need),
-            Some(Some(Status::Done)) => Self::Done,
-            Some(Some(Status::Error)) => Self::Error,
-        }
-    }
-
-    pub fn needs_you(self) -> bool {
-        matches!(self, Self::NeedsYou(_) | Self::Done | Self::Error)
-    }
-
-    /// Where the running list puts a chat: an agent that can't go on without
-    /// the user first, one at rest last.
-    fn urgency(self) -> u8 {
-        match self {
-            Self::NeedsYou(_) => 0,
-            Self::Error => 1,
-            Self::Done => 2,
-            Self::Working => 3,
-            Self::Running => 4,
-            Self::Idle => 5,
-            Self::Saved => 6,
-        }
-    }
-
-    /// The heading of the running list's group this tone is in.
-    pub fn group(self) -> &'static str {
-        match self {
-            tone if tone.needs_you() => "Needs you",
-            Self::Working => "Working",
-            Self::Idle => "Idle",
-            _ => "Running",
-        }
-    }
-
-    /// What the agent is doing, in a few words.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Saved => "saved",
-            Self::Running => "running",
-            Self::Idle => "idle",
-            Self::Working => "working",
-            Self::NeedsYou(Some(Need::Permission)) => "needs permission",
-            Self::NeedsYou(Some(Need::Question)) => "has a question",
-            Self::NeedsYou(Some(Need::Auth)) => "needs you to sign in",
-            Self::NeedsYou(None) => "waiting for you",
-            Self::Done => "done",
-            Self::Error => "stopped on an error",
-        }
-    }
-
-    /// The status color, for the tones that have one.
-    pub fn tint(self, cx: &App) -> Option<Tint> {
-        let palette = appearance::palette(cx);
-        match self {
-            Self::Working => Some(palette.info),
-            Self::NeedsYou(_) => Some(palette.warning),
-            Self::Done => Some(palette.success),
-            Self::Error => Some(palette.danger),
-            Self::Saved | Self::Running | Self::Idle => None,
-        }
-    }
-
-    /// The color of a label about this tone.
-    pub fn text_color(self, cx: &App) -> Hsla {
-        self.tint(cx)
-            .map(|tint| tint.text)
-            .unwrap_or(cx.theme().muted_foreground)
-    }
 }
 
 /// `row` growing into the list from nothing, or, when it `leaves`, folding

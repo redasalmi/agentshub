@@ -19,15 +19,12 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::appearance;
-use crate::history::History;
 use crate::palette::{self, Entry, Lead, Pick};
 use crate::settings::{SettingsIntent, SettingsView};
 use crate::sidebar::{
-    self, Held, MAX_SIDEBAR_WIDTH, MIN_MAIN_WIDTH, MIN_SIDEBAR_WIDTH, Sidebar, SidebarEvent, Tone,
+    self, Held, MAX_SIDEBAR_WIDTH, MIN_MAIN_WIDTH, MIN_SIDEBAR_WIDTH, Sidebar, SidebarEvent,
     home_relative, rail_room,
 };
-use crate::terminal_view::{self, TerminalView};
 use agentshub_app::alerts;
 use agentshub_app::settings::{
     Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, DEFAULT_TERMINAL_FONT_SIZE, Motion,
@@ -38,6 +35,11 @@ use agentshub_core::status::Status;
 use agentshub_core::store::{self, Change};
 use agentshub_runtime::terminal::Terminal;
 use agentshub_runtime::{Intent, Runtime, RuntimeEvent};
+use agentshub_ui_kit::appearance;
+use agentshub_ui_kit::history::History;
+use agentshub_ui_kit::status::{Tone, dot};
+use agentshub_ui_kit::terminal_view::{self, TerminalView};
+use agentshub_ui_kit::widgets::{group_heading, path_line};
 
 mod actions;
 mod catalog;

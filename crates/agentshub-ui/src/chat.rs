@@ -23,11 +23,12 @@ use agentshub_core::agent::Agent;
 use agentshub_core::editors::{self, Editor, Found};
 use agentshub_core::format::{Turn, capitalized, duration};
 
-use crate::history::History;
 use crate::settings::ShowShortcuts;
-use crate::sidebar::{self, Tone};
-use crate::terminal_view::TerminalView;
-use crate::theme as appearance;
+use agentshub_ui_kit::history::History;
+use agentshub_ui_kit::status::{Tone, badge, dot, live_dot};
+use agentshub_ui_kit::terminal_view::TerminalView;
+use agentshub_ui_kit::theme as appearance;
+use agentshub_ui_kit::widgets::{heading, path_line};
 
 actions!(
     chat,
@@ -312,12 +313,7 @@ fn shell_panel(
                             .text_color(theme.muted_foreground)
                             .child("Shell"),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(sidebar::path_line(&shell.cwd, cx)),
-                    )
+                    .child(div().flex_1().min_w_0().child(path_line(&shell.cwd, cx)))
                     .child({
                         let close = Rc::clone(&on);
                         Button::new("close-shell")
@@ -414,7 +410,7 @@ impl ChatSheet {
                                     .flex_none()
                                     .child(format!("{} · ", self.agent.label())),
                             )
-                            .child(sidebar::path_line(&self.cwd, cx)),
+                            .child(path_line(&self.cwd, cx)),
                     ),
             )
             .child(
@@ -617,9 +613,9 @@ fn status_pill(tone: Tone, turn: Option<Turn>, spin: bool, cx: &App) -> impl Int
         .text_xs()
         .font_medium()
         .child(if spin {
-            sidebar::live_dot(tone, cx)
+            live_dot(tone, cx)
         } else {
-            sidebar::dot(tone, cx)
+            dot(tone, cx)
         })
         .child(h_flex().gap_1().child(label).when_some(time, |this, time| {
             this.child(
@@ -910,7 +906,7 @@ impl EmptyState {
                                         h_flex()
                                             .justify_between()
                                             .pb_1()
-                                            .child(sidebar::heading("Recent", cx))
+                                            .child(heading("Recent", cx))
                                             .children(
                                                 crate::palette::shortcut(&OpenSearch, window).map(
                                                     |keys| {
@@ -936,7 +932,7 @@ impl EmptyState {
                                             .rounded(theme.radius)
                                             .cursor_pointer()
                                             .hover(|style| style.bg(theme.accent))
-                                            .child(sidebar::dot(recent.tone, cx))
+                                            .child(dot(recent.tone, cx))
                                             .child(
                                                 div()
                                                     .flex_1()
@@ -993,8 +989,8 @@ impl Toolbar {
         let working = self.running.contains(&Tone::Working);
         let count = match (needing, self.running.len()) {
             (0, 0) => None,
-            (0, open) => Some(sidebar::badge(open, false, working, cx)),
-            (needing, _) => Some(sidebar::badge(needing, true, false, cx)),
+            (0, open) => Some(badge(open, false, working, cx)),
+            (needing, _) => Some(badge(needing, true, false, cx)),
         };
         let menu = self.menu.clone();
         let on = Rc::clone(&self.on);

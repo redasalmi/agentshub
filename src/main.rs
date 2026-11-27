@@ -7,7 +7,8 @@ pub use agentshub_core::{
 #[cfg(target_os = "linux")]
 pub use agentshub_platform::scope;
 pub use agentshub_platform::{instance, motion, sigterm};
-pub use agentshub_ui::{appearance, history, tray, window, workspace};
+pub use agentshub_ui::{tray, window, workspace};
+pub use agentshub_ui_kit::{appearance, history};
 pub use window::{Contents, open_window};
 
 use std::borrow::Cow;
@@ -70,7 +71,7 @@ fn main() {
     application().with_assets(Assets).run(move |cx| {
         init(cx);
         agentshub_app::editors::look_up(cx);
-        agentshub_ui::terminal_view::init(cx);
+        agentshub_ui_kit::terminal_view::init(cx);
         workspace::init(cx);
         // The tray decides whether closing the window quits.
         cx.set_quit_mode(QuitMode::Explicit);

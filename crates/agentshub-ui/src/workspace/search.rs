@@ -8,11 +8,11 @@ use gpui_kit::component::{ActiveTheme as _, IconName};
 use gpui_kit::*;
 
 use crate::palette::{self, Entry, Lead, Pick};
-use crate::sidebar::Filter;
-use crate::terminal_view;
 use agentshub_app::settings::{DEFAULT_TERMINAL_FONT_SIZE, Settings, ThemeFamily};
 use agentshub_core::store::Change;
 use agentshub_runtime::Intent;
+use agentshub_ui_kit::status::Filter;
+use agentshub_ui_kit::terminal_view;
 
 use super::palette_model::PaletteLists;
 use super::{

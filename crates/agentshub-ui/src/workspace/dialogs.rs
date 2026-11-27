@@ -173,7 +173,7 @@ impl Workspace {
                 .child(
                     v_flex()
                         .gap_3()
-                        .child(sidebar::path_line(&project_path, cx))
+                        .child(path_line(&project_path, cx))
                         .map(|content| {
                             if none_installed {
                                 return content.child(div().text_sm().child(

@@ -118,6 +118,7 @@ dependencies = [
  "agentshub-platform",
  "agentshub-runtime",
  "agentshub-ui",
+ "agentshub-ui-kit",
  "gpui-kit",
 ]
 
@@ -192,19 +193,31 @@ dependencies = [
  "agentshub-core",
  "agentshub-platform",
  "agentshub-runtime",
- "anyhow",
- "fontdb",
+ "agentshub-ui-kit",
  "gpui-kit",
  "jiff",
  "ksni",
- "libghostty-vt",
  "raw-window-handle",
- "serde_json",
- "smol",
  "uuid",
  "wayland-client",
  "wayland-protocols",
  "zbus 5.19.0",
+]
+
+[[package]]
+name = "agentshub-ui-kit"
+version = "0.19.1"
+dependencies = [
+ "agentshub-app",
+ "agentshub-core",
+ "agentshub-platform",
+ "agentshub-runtime",
+ "anyhow",
+ "fontdb",
+ "gpui-kit",
+ "libghostty-vt",
+ "serde_json",
+ "smol",
 ]
 
 [[package]]

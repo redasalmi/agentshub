@@ -63,25 +63,6 @@ pub(super) fn initials(name: &str) -> String {
     letters.to_lowercase()
 }
 
-/// `path` on one line, cut from its start when it doesn't fit, since its end
-/// says the most, and whole in a tooltip.
-pub fn path_line(path: &Path, cx: &App) -> Stateful<Div> {
-    let theme = cx.theme();
-    let shown = home_relative(path);
-    let whole = SharedString::from(path.display().to_string());
-    div()
-        .id(SharedString::from(format!("path:{whole}")))
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis_start()
-        .text_xs()
-        .font_family(theme.mono_font_family.clone())
-        .text_color(theme.muted_foreground)
-        .tooltip(move |window, cx| Tooltip::new(whole.clone()).build(window, cx))
-        .child(shown)
-}
-
 /// How many agents need the user, work, sit idle, or haven't said.
 pub(super) fn summary<'a>(running: impl Iterator<Item = &'a Option<Status>>) -> String {
     let (mut working, mut need_you, mut idle, mut unknown) = (0, 0, 0, 0);

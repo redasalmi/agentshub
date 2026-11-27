@@ -2,10 +2,10 @@
 
 use gpui_kit::*;
 
-use crate::appearance;
 use crate::tray;
 use crate::workspace::Workspace;
 use agentshub_runtime::{Intent, Runtime};
+use agentshub_ui_kit::appearance;
 
 /// What a window opens on.
 pub enum Contents {

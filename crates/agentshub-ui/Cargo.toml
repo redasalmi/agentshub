@@ -16,13 +16,9 @@ agentshub-platform = { path = "../agentshub-platform", version = "0.19.1" }
 agentshub-app = { path = "../agentshub-app", version = "0.19.1" }
 agentshub-core = { path = "../agentshub-core", version = "0.19.1" }
 agentshub-runtime = { path = "../agentshub-runtime", version = "0.19.1" }
-anyhow = "1"
-fontdb = "0.23"
+agentshub-ui-kit = { path = "../agentshub-ui-kit", version = "0.19.1" }
 gpui-kit = "0.8.0"
 jiff = "0.2.38"
-libghostty-vt = "0.2.2"
-serde_json = "1"
-smol = "2"
 
 [lints]
 workspace = true

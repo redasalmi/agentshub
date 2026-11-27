@@ -7,7 +7,8 @@ use gpui_kit::component::IconName;
 use gpui_kit::*;
 
 use crate::palette::{Entry, Lead, Pick};
-use crate::sidebar::{self, Tone, home_relative};
+use crate::sidebar::{self, home_relative};
+use agentshub_ui_kit::status::Tone;
 
 use super::{Workspace, start_entries};
 

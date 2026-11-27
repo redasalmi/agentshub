@@ -12,8 +12,8 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::sidebar::{self, Filter, Tone};
 use agentshub_core::agent::Agent;
+use agentshub_ui_kit::status::{Filter, Tone, dot};
 
 const WIDTH: Pixels = px(640.);
 const MARGIN_TOP: Pixels = px(96.);
@@ -298,7 +298,7 @@ fn row(
                     .flex()
                     .justify_center()
                     .map(|this| match &lead {
-                        Lead::Tone(tone) => this.child(sidebar::dot(*tone, cx)),
+                        Lead::Tone(tone) => this.child(dot(*tone, cx)),
                         Lead::Icon(icon) => {
                             this.child(Icon::new(*icon).small().text_color(theme.muted_foreground))
                         }
