@@ -22,7 +22,8 @@ pub struct Row {
 }
 
 /// The selected chat and the group it was in when it was selected, so that
-/// it doesn't jump away while the user reads it.
+/// it doesn't jump away while the user reads it. It holds only while the
+/// chat rests idle: anything its agent does next lists it where that goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Kept {
     pub chat: i64,
@@ -60,13 +61,16 @@ pub fn rows(
     let mut rows: Vec<Row> = chats
         .iter()
         .filter(|&&(.., project)| filter.is_none_or(|wanted| wanted == project))
-        .map(|&(chat, tone, exited, pinned, archived, _)| Row {
-            chat,
-            group: match kept {
-                Some(kept) if kept.chat == chat => kept.group,
-                _ => group_of(tone, exited, archived),
-            },
-            pinned,
+        .map(|&(chat, tone, exited, pinned, archived, _)| {
+            let group = group_of(tone, exited, archived);
+            Row {
+                chat,
+                group: match kept {
+                    Some(kept) if kept.chat == chat && group == Group::Idle => kept.group,
+                    _ => group,
+                },
+                pinned,
+            }
         })
         .collect();
     rows.sort_by_key(|row| (row.group, !row.pinned));
@@ -163,5 +167,35 @@ mod tests {
             rows(&chats, None, Some(kept))[0].group,
             Group::ReadyToReview
         );
+    }
+
+    #[test]
+    fn a_kept_chat_that_needs_you_leaves_its_group() {
+        let kept = Kept {
+            chat: 7,
+            group: Group::ReadyToReview,
+        };
+        for (tone, exited) in [
+            (Tone::NeedsYou(None), false),
+            (Tone::Error, false),
+            (Tone::Idle, true),
+        ] {
+            let chats = [(7, tone, exited, false, false, 1)];
+            assert_eq!(
+                rows(&chats, None, Some(kept))[0].group,
+                Group::NeedsYou,
+                "{tone:?}, exited: {exited}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kept_chat_at_work_again_leaves_its_group() {
+        let chats = [chat(7, Tone::Working)];
+        let kept = Kept {
+            chat: 7,
+            group: Group::ReadyToReview,
+        };
+        assert_eq!(rows(&chats, None, Some(kept))[0].group, Group::Working);
     }
 }
