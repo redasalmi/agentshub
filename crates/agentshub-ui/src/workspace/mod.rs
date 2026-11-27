@@ -69,8 +69,6 @@ mod terminals;
 pub use actions::*;
 pub(crate) use format::plural;
 
-use agentshub_core::lifecycle::Deleted;
-
 /// How many of the chats last worked in show while no chat is open.
 const RECENT_CHATS: usize = 5;
 

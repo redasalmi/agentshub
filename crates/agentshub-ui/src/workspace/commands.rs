@@ -149,20 +149,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A chat waiting for its last session to be read, or for its stopped
-        // CLI to be reaped, would start once that's done, and so would a new
-        // chat once its worktree is checked out. The checkouts stay listed, so
-        // shutdown still removes what they make if the app quits first.
-        self.runtime
-            .update(cx, |runtime, _| runtime.lifecycle_mut().close_all());
-        self.runtime.read(cx).cancel_checkouts();
-        let ids = self
-            .runtime
-            .read(cx)
-            .open_chats()
-            .map(|chat| chat.id)
-            .collect();
-        self.close_chats(ids, window, cx);
+        self.apply_closing(Intent::CloseAll, window, cx);
     }
 
     /// Closes the chats whose CLI sits at rest with nothing the user would
@@ -177,8 +164,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let check = check.await;
             this.update_in(cx, |this, window, cx| {
-                let ids = this.runtime.read(cx).idle_chats(check, cx);
-                this.close_chats(ids, window, cx);
+                this.apply_closing(Intent::CloseIdle(check), window, cx)
             })
             .ok();
         })
@@ -189,6 +175,12 @@ impl Workspace {
         if ids.is_empty() {
             return;
         }
+        self.apply_closing(Intent::CloseChats(ids), window, cx);
+    }
+
+    /// Asks the runtime for `intent`, which closes chats, and moves the
+    /// keyboard on from what had it if that went with them.
+    pub(super) fn apply_closing(&mut self, intent: Intent, window: &mut Window, cx: &mut App) {
         // Settings in front of the chat keep the keyboard whatever closes,
         // as does the sidebar beside it.
         let chat_focused = self.runtime.read(cx).active().is_some()
@@ -198,9 +190,7 @@ impl Workspace {
             .shown_shell(cx)
             .filter(|(_, shell)| shell.view.focus_handle(cx).contains_focused(window, cx))
             .map(|(cwd, _)| cwd);
-        for id in ids {
-            self.apply(Intent::Suspend(id), cx);
-        }
+        self.apply(intent, cx);
         let shell = self.shown_shell(cx);
         match focused_shell {
             // The shell under the shown chat follows the selected project once

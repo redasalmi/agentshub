@@ -309,94 +309,11 @@ impl Workspace {
                         .ok_text("Remove")
                         .ok_variant(ButtonVariant::Danger)
                         .on_ok(move |_, _, cx| {
-                            this.update(cx, |this, cx| this.remove_project(id, cx)).ok();
+                            this.update(cx, |this, cx| this.apply(Intent::RemoveProject(id), cx))
+                                .ok();
                             true
                         })
                 });
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Stops a project's agents and shell, and removes it with its chats.
-    /// The worktrees of its chats go once that is saved, and until then, its
-    /// chats can't be opened, nor a chat added to it start.
-    fn remove_project(&mut self, id: i64, cx: &mut Context<Self>) {
-        let Some(path) = self
-            .runtime
-            .read(cx)
-            .projects()
-            .iter()
-            .find(|project| project.id == id)
-            .map(|project| project.path.clone())
-        else {
-            return;
-        };
-        if !self.runtime.update(cx, |runtime, _| {
-            runtime.lifecycle_mut().remove_project(id, path.clone())
-        }) {
-            return;
-        }
-        // The listing has the chats asked for before it, including one still
-        // being added, which the sidebar doesn't list yet.
-        let listed = self.runtime.read(cx).store().projects();
-        cx.spawn(async move |this, cx| {
-            let project = listed
-                .await
-                .inspect_err(|err| eprintln!("can't list the projects: {err}"))
-                .unwrap_or_default()
-                .into_iter()
-                .find(|project| project.id == id && project.path == path);
-            this.update(cx, |this, cx| match project {
-                Some(project) => this.remove_listed(project, cx),
-                None => this
-                    .runtime
-                    .update(cx, |runtime, _| runtime.lifecycle_mut().project_removed(id)),
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn remove_listed(&mut self, project: store::Project, cx: &mut Context<Self>) {
-        let id = project.id;
-        let chats: Vec<i64> = project.chats.iter().map(|chat| chat.id).collect();
-        for chat in project.chats {
-            self.runtime.update(cx, |runtime, _| {
-                runtime.lifecycle_mut().cancel_opening(chat.id)
-            });
-            let reaped = self
-                .runtime
-                .update(cx, |runtime, cx| runtime.stop_chat(chat.id, cx))
-                .or_else(|| self.runtime.read(cx).lifecycle().reaping(chat.id));
-            let worktree = chat
-                .worktree
-                .map(|worktree| (worktree, project.path.clone()));
-            self.runtime.update(cx, |runtime, _| {
-                runtime
-                    .lifecycle_mut()
-                    .mark_deleting(chat.id, worktree, reaped)
-            });
-        }
-        // Dropping its terminal kills the shell.
-        self.shells.remove(&project.path);
-        self.sync_terminals(cx);
-        let removed = self
-            .runtime
-            .read(cx)
-            .store()
-            .remove_project(id, project.path.clone());
-        cx.spawn(async move |this, cx| {
-            let removed = removed.await;
-            this.update(cx, |this, cx| {
-                this.runtime
-                    .update(cx, |runtime, _| runtime.lifecycle_mut().project_removed(id));
-                if let Err(err) = &removed {
-                    eprintln!("can't remove project {id}: {err:#}");
-                    this.say(format!("Couldn't remove the project: {err}"), cx);
-                }
-                this.finish_deleting(&chats, removed.is_ok(), cx);
             })
             .ok();
         })

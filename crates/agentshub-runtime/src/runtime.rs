@@ -131,6 +131,13 @@ impl Runtime {
             } => self.start_new_chat(project, agent, title, worktree, cx),
             Intent::StartAgent { project, agent } => self.start_agent(project, agent, cx),
             Intent::LookUpInstalled(project) => self.look_up_installed(project, cx),
+            Intent::RemoveProject(id) => self.remove_project(id, cx),
+            Intent::ArchiveProject(id) => self.archive_project(id, cx),
+            Intent::ArchiveChat(id) => self.archive_chat(id, cx),
+            Intent::DeleteChat { chat, worktree } => self.delete_chat(chat, worktree, cx),
+            Intent::CloseChats(ids) => self.close_chats(ids, cx),
+            Intent::CloseIdle(check) => self.close_idle(check, cx),
+            Intent::CloseAll => self.close_all(cx),
         }
     }
 

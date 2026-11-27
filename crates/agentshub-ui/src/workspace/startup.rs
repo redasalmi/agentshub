@@ -93,8 +93,18 @@ impl Workspace {
             RuntimeEvent::SelectProject(id) => this
                 .sidebar
                 .update(cx, |sidebar, cx| sidebar.select(*id, cx)),
-            RuntimeEvent::DeletingNewChat { chat, worktree } => {
-                this.delete_chat(*chat, worktree.clone(), cx)
+            RuntimeEvent::Undoable { message, undo } => {
+                this.offer_undo(message.clone(), undo.clone(), cx)
+            }
+            RuntimeEvent::RemovingWorktree {
+                worktree,
+                project,
+                reaped,
+            } => this.remove_worktree(worktree, project, reaped.clone(), cx),
+            RuntimeEvent::RemovingProject(path) => {
+                // Dropping its terminal kills the shell.
+                this.shells.remove(path);
+                this.sync_terminals(cx);
             }
         });
 

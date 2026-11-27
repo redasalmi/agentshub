@@ -56,12 +56,14 @@ pub struct ChatState<'a> {
 }
 
 /// What `Runtime::check_idle` read of each open chat: its id, report name
-/// and session, whether its transcript exists, and its session's last prompt.
+/// and session, whether its transcript exists, and its session's last
+/// prompt, if it could be read.
+#[derive(Clone)]
 #[expect(
     clippy::type_complexity,
     reason = "what was read is handed back as it was read"
 )]
-pub struct IdleCheck(Vec<(i64, String, Option<i64>, bool, Result<(bool, Option<i64>)>)>);
+pub struct IdleCheck(Vec<(i64, String, Option<i64>, bool, Option<(bool, Option<i64>)>)>);
 
 /// A chat's backend state: what its CLI is doing and which session it is in.
 pub(crate) struct ChatRuntime {
@@ -147,7 +149,7 @@ pub fn take_and_remove(
 fn loses_nothing(
     chat: &ChatRuntime,
     kept: bool,
-    last_prompt: &Result<(bool, Option<i64>)>,
+    last_prompt: &Option<(bool, Option<i64>)>,
     cx: &App,
 ) -> bool {
     chat.terminal.as_ref().is_some_and(|terminal| {
@@ -155,12 +157,12 @@ fn loses_nothing(
             .terminal
             .read(cx)
             .input()
-            .sent(|| last_prompt.as_ref().ok().and_then(|(_, at)| *at))
+            .sent(|| last_prompt.and_then(|(_, at)| at))
     })
         // Without its transcript, a session with a prompt can't be resumed,
         // and the CLI holds the only copy of it. Claude deletes transcripts
         // that went untouched for 30 days.
-        && (kept || matches!(last_prompt, Ok((false, _))))
+        && (kept || matches!(last_prompt, Some((false, _))))
 }
 
 impl Runtime {
@@ -643,8 +645,7 @@ impl Runtime {
 
     /// Kills the chat's CLI, if it has one, and closes the chat. The channel
     /// closes once the CLI has been reaped.
-    #[doc(hidden)]
-    pub fn stop_chat(&mut self, id: i64, cx: &mut Context<Self>) -> Option<Reaped> {
+    pub(crate) fn stop_chat(&mut self, id: i64, cx: &mut Context<Self>) -> Option<Reaped> {
         let index = self.chats.iter().position(|chat| chat.id == id)?;
         let chat = self.chats.remove(index);
         let reaped = chat
@@ -681,8 +682,8 @@ impl Runtime {
             let mut found = Vec::new();
             for (id, report, session, transcript, last_prompt) in asked {
                 let last_prompt = match last_prompt {
-                    Some(last_prompt) => last_prompt.await,
-                    None => Ok((false, None)),
+                    Some(last_prompt) => last_prompt.await.ok(),
+                    None => Some((false, None)),
                 };
                 let kept =
                     smol::unblock(move || transcript.is_some_and(|path| path.exists())).await;
@@ -695,7 +696,7 @@ impl Runtime {
     /// The chats `check` found at rest with nothing the user would miss, the
     /// shown one included, which can be closed and opened again on the same
     /// session.
-    pub fn idle_chats(&self, check: IdleCheck, cx: &App) -> Vec<i64> {
+    pub(crate) fn idle_chats(&self, check: IdleCheck, cx: &App) -> Vec<i64> {
         // One that restarted, or went into another session, meanwhile isn't
         // what was read.
         let read: Vec<_> = check

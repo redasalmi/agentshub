@@ -89,8 +89,11 @@ impl Workspace {
                         .ok_text("Delete")
                         .ok_variant(ButtonVariant::Danger)
                         .on_ok(move |_, _, cx| {
-                            this.update(cx, |this, cx| this.delete_chat(id, worktree.clone(), cx))
-                                .ok();
+                            let worktree = worktree.clone();
+                            this.update(cx, |this, cx| {
+                                this.apply(Intent::DeleteChat { chat: id, worktree }, cx)
+                            })
+                            .ok();
                             true
                         })
                 });
@@ -100,57 +103,10 @@ impl Workspace {
         .detach();
     }
 
-    /// Stops a chat's agent and deletes the chat. Its worktree goes once that
-    /// is saved, and until then, the chat can't be opened.
-    pub(super) fn delete_chat(
-        &mut self,
-        id: i64,
-        worktree: Option<(Worktree, PathBuf)>,
-        cx: &mut Context<Self>,
-    ) {
-        self.runtime
-            .update(cx, |runtime, _| runtime.lifecycle_mut().cancel_opening(id));
-        let reaped = self
-            .runtime
-            .update(cx, |runtime, cx| runtime.stop_chat(id, cx))
-            .or_else(|| self.runtime.read(cx).lifecycle().reaping(id));
-        self.runtime.update(cx, |runtime, _| {
-            runtime.lifecycle_mut().mark_deleting(id, worktree, reaped)
-        });
-        let deleted = self.runtime.read(cx).store().delete_chat(id);
-        cx.spawn(async move |this, cx| {
-            let deleted = deleted.await;
-            this.update(cx, |this, cx| {
-                if let Err(err) = &deleted {
-                    eprintln!("can't delete chat {id}: {err:#}");
-                    this.say(format!("Couldn't delete the chat: {err}"), cx);
-                }
-                this.finish_deleting(&[id], deleted.is_ok(), cx);
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Lets `chats` be opened again, once deleting them is done, and if they
-    /// were deleted, removes their worktrees.
-    pub(super) fn finish_deleting(&mut self, chats: &[i64], deleted: bool, cx: &mut Context<Self>) {
-        for (id, Deleted { worktree, reaped }) in self.runtime.update(cx, |runtime, _| {
-            runtime.lifecycle_mut().finish_deleting_all(chats, deleted)
-        }) {
-            // Its notification can't open it anymore.
-            alerts::withdraw(id, cx);
-            if let Some((worktree, project)) = &worktree {
-                self.remove_worktree(worktree, project, reaped, cx);
-            }
-        }
-        self.refresh(cx);
-    }
-
     /// Stops the shells running in the worktree a chat ran in, and has the
     /// runtime remove it once they and its CLI, if it had one, have been
     /// reaped.
-    fn remove_worktree(
+    pub(super) fn remove_worktree(
         &mut self,
         worktree: &Worktree,
         project: &Path,
@@ -218,26 +174,7 @@ impl Workspace {
     /// Closes a chat and archives it. Opening it again brings it back and
     /// resumes its session.
     pub(super) fn archive_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        self.runtime
-            .update(cx, |runtime, _| runtime.lifecycle_mut().cancel_opening(id));
-        self.close_chats(vec![id], window, cx);
-        self.change(
-            Change::ArchiveChat {
-                chat: id,
-                archived: true,
-            },
-            cx,
-        );
-        alerts::withdraw(id, cx);
-        self.offer_undo(
-            "Archived the chat.",
-            Change::ArchiveChat {
-                chat: id,
-                archived: false,
-            },
-            window,
-            cx,
-        );
+        self.apply_closing(Intent::ArchiveChat(id), window, cx);
     }
 
     /// Archives a project, closing its chats, and asks first if any of their
@@ -248,7 +185,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ids = self.chats_of(id, cx);
+        let ids = self.runtime.read(cx).chats_of(id);
         let working = self
             .runtime
             .read(cx)
@@ -299,12 +236,7 @@ impl Workspace {
         else {
             return;
         };
-        let ids = self.chats_of(id, cx);
-        for id in &ids {
-            self.runtime
-                .update(cx, |runtime, _| runtime.lifecycle_mut().cancel_opening(*id));
-        }
-        self.close_chats(ids.clone(), window, cx);
+        self.apply_closing(Intent::ArchiveProject(id), window, cx);
         // Dropping their terminals kills the shells, as removing the project
         // does: its own, and the ones in its chats' worktrees.
         let shells = self.shells.len();
@@ -313,39 +245,6 @@ impl Workspace {
         if self.shells.len() != shells {
             self.sync_terminals(cx);
         }
-        self.runtime
-            .update(cx, |runtime, _| runtime.lifecycle_mut().archive_project());
-        self.change(
-            Change::ArchiveProject {
-                project: id,
-                archived: true,
-            },
-            cx,
-        );
-        for id in ids {
-            alerts::withdraw(id, cx);
-        }
-        self.offer_undo(
-            "Archived the project.",
-            Change::ArchiveProject {
-                project: id,
-                archived: false,
-            },
-            window,
-            cx,
-        );
-    }
-
-    /// The ids of a project's chats.
-    pub(super) fn chats_of(&self, project_id: i64, cx: &App) -> Vec<i64> {
-        self.sidebar
-            .read(cx)
-            .projects()
-            .iter()
-            .filter(|project| project.id == project_id)
-            .flat_map(|project| &project.chats)
-            .map(|chat| chat.id)
-            .collect()
     }
 
     /// Shows `change` at once, and saves it. The projects are listed as saved

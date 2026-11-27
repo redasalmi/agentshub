@@ -440,7 +440,7 @@ impl Runtime {
                     self.remove_worktree(worktree, project, Vec::new(), cx);
                 }
             }
-            Added::Delete(id) => cx.emit(RuntimeEvent::DeletingNewChat { chat: id, worktree }),
+            Added::Delete(id) => self.delete_chat(id, worktree, cx),
             Added::Unknown(err) => cx.emit(RuntimeEvent::Notice(format!(
                 "Couldn't start the chat: {err}"
             ))),
@@ -453,7 +453,7 @@ impl Runtime {
                     .map_or(&project, |(worktree, _)| &worktree.folder);
                 // Its first session report adds its first session.
                 if !self.start_chat(id, agent, cwd, None, cx) {
-                    cx.emit(RuntimeEvent::DeletingNewChat { chat: id, worktree });
+                    self.delete_chat(id, worktree, cx);
                 } else if self.lifecycle.navigations() == asked.navigations {
                     // The sidebar doesn't list the new chat yet, so it can't
                     // find its project by itself.
@@ -524,8 +524,7 @@ impl Runtime {
     /// Stops the worktrees being checked out for new chats, as closing all
     /// the chats does. They stay listed, so shutdown still removes what they
     /// make if the app quits first.
-    #[doc(hidden)]
-    pub fn cancel_checkouts(&self) {
+    pub(crate) fn cancel_checkouts(&self) {
         for checkout in &self.checkouts {
             checkout.cancel();
         }

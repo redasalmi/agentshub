@@ -2,8 +2,11 @@
 
 use std::path::PathBuf;
 
+use agentshub_core::lifecycle::Reaped;
 use agentshub_core::worktree::Worktree;
 use gpui_kit::SharedString;
+
+use crate::Intent;
 
 /// Something the runtime changed, or has to tell the user, for the window to
 /// show.
@@ -16,6 +19,9 @@ pub enum RuntimeEvent {
     HistoryChanged { sessions: Vec<i64> },
     /// Something to tell the user in a notification.
     Notice(String),
+    /// Something to tell the user in a notification with a button that
+    /// undoes it, by asking for `undo`.
+    Undoable { message: String, undo: Intent },
     /// Chat `id` opened, with its terminal if its CLI started, so its pane
     /// can be built.
     ChatStarted(i64),
@@ -48,11 +54,16 @@ pub enum RuntimeEvent {
     /// A new chat is shown in project `id`, which the sidebar selects: it
     /// doesn't list the chat yet, so it can't find its project by itself.
     SelectProject(i64),
-    /// A chat added for a new chat can't stay: its project is being removed,
-    /// or its CLI couldn't start. The window deletes it, with its `worktree`,
-    /// as it deletes the ones the user does.
-    DeletingNewChat {
-        chat: i64,
-        worktree: Option<(Worktree, PathBuf)>,
+    /// A deleted chat's worktree, in `project`'s folder, is to be removed.
+    /// The window stops the shells running in it, and has the runtime remove
+    /// it once they and the chat's CLI, if it had one (`reaped`), have been
+    /// reaped (see `Runtime::remove_worktree`).
+    RemovingWorktree {
+        worktree: Worktree,
+        project: PathBuf,
+        reaped: Option<Reaped>,
     },
+    /// The project in this folder is being removed, so the window stops its
+    /// shell.
+    RemovingProject(PathBuf),
 }

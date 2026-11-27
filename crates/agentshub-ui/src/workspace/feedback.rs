@@ -28,32 +28,27 @@ impl Workspace {
         });
     }
 
-    /// Says `message` with a button that makes the `undo` change.
-    pub(super) fn offer_undo(
-        &self,
-        message: &'static str,
-        undo: Change,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Says `message` with a button that asks the runtime for `undo`,
+    /// unless the window is closed to the tray.
+    pub(super) fn offer_undo(&self, message: String, undo: Intent, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
-        window.push_notification(
-            Notification::new()
-                .message(message)
-                .action(move |_, _, cx| {
-                    let (this, undo) = (this.clone(), undo.clone());
-                    Button::new("undo").label("Undo").on_click(cx.listener(
-                        move |note, _, window, cx| {
-                            this.update(cx, |this, cx| this.change(undo.clone(), cx))
-                                .ok();
-                            note.dismiss(window, cx);
-                        },
-                    ))
-                })
-                // A button keeps it up unless it's told otherwise.
-                .autohide(true),
-            cx,
-        );
+        let notification = Notification::new()
+            .message(message)
+            .action(move |_, _, cx| {
+                let (this, undo) = (this.clone(), undo.clone());
+                Button::new("undo").label("Undo").on_click(cx.listener(
+                    move |note, _, window, cx| {
+                        this.update(cx, |this, cx| this.apply(undo.clone(), cx))
+                            .ok();
+                        note.dismiss(window, cx);
+                    },
+                ))
+            })
+            // A button keeps it up unless it's told otherwise.
+            .autohide(true);
+        cx.with_window(cx.entity_id(), |window, cx| {
+            window.push_notification(notification, cx)
+        });
     }
 
     /// Focuses the shown chat's CLI, or the workspace if it has none running
