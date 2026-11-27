@@ -26,6 +26,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_new_chat_dialog_for(project_id, None, String::new(), window, cx);
+    }
+
+    fn open_new_chat_dialog_for(
+        &mut self,
+        project_id: i64,
+        agent: Option<Agent>,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project) = self
             .runtime
             .read(cx)
@@ -49,9 +60,14 @@ impl Workspace {
                     return;
                 }
                 match found {
-                    Some(Ok((agents, in_git))) => {
-                        this.show_new_chat_dialog(project, agents, in_git, window, cx)
-                    }
+                    Some(Ok((agents, in_git))) => this.show_new_chat_dialog(
+                        project,
+                        agents,
+                        in_git,
+                        (agent, name),
+                        window,
+                        cx,
+                    ),
                     Some(Err(err)) => window.push_notification(format!("{err:#}"), cx),
                     None => {}
                 }
@@ -65,6 +81,7 @@ impl Workspace {
         project: store::Project,
         agents: Vec<Agent>,
         in_git: bool,
+        (agent, name): (Option<Agent>, String),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -84,8 +101,11 @@ impl Workspace {
             worktree_by_default: cx.global::<Settings>().worktree_by_default,
             projects,
             project: project.id,
+            agent,
+            name,
         };
         let workspace = cx.weak_entity();
+        let reopen = cx.weak_entity();
         dialogs::new_chat(
             window,
             cx,
@@ -102,6 +122,13 @@ impl Workspace {
                             },
                             cx,
                         )
+                    })
+                    .ok();
+            },
+            move |project, agent, name, window, cx| {
+                reopen
+                    .update(cx, |this, cx| {
+                        this.open_new_chat_dialog_for(project, agent, name, window, cx)
                     })
                     .ok();
             },
