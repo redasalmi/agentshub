@@ -63,6 +63,7 @@ fn filter_menu(
     let mut menu = menu
         .min_w(FILTER_MENU_WIDTH)
         .max_w(FILTER_MENU_WIDTH)
+        .scrollable(true)
         .item(
             PopupMenuItem::element(move |_, cx| {
                 h_flex()
