@@ -8,7 +8,7 @@ mod intent;
 mod runtime;
 mod sessions;
 
-pub use chats::{ChatState, take_and_remove};
+pub use chats::{ChatState, IdleCheck, take_and_remove};
 pub use event::RuntimeEvent;
 pub use intent::Intent;
 pub use runtime::Runtime;

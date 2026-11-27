@@ -54,6 +54,14 @@ pub struct ChatState<'a> {
     pub notice: Option<&'a SharedString>,
 }
 
+/// What `Runtime::check_idle` read of each open chat: its id, report name
+/// and session, whether its transcript exists, and its session's last prompt.
+#[expect(
+    clippy::type_complexity,
+    reason = "what was read is handed back as it was read"
+)]
+pub struct IdleCheck(Vec<(i64, String, Option<i64>, bool, Result<(bool, Option<i64>)>)>);
+
 /// A chat's backend state: what its CLI is doing and which session it is in.
 pub(crate) struct ChatRuntime {
     pub(crate) id: i64,
@@ -654,10 +662,9 @@ impl Runtime {
         reaped
     }
 
-    /// Finds the chats whose CLI sits at rest with nothing the user would
-    /// miss (see `at_rest`), the shown one included, which can be closed and
-    /// opened again on the same session.
-    pub fn idle_chats(&self, cx: &mut Context<Self>) -> Task<Vec<i64>> {
+    /// Reads what tells whether each open chat's CLI sits at rest with
+    /// nothing the user would miss (see `at_rest`), for `idle_chats`.
+    pub fn check_idle(&self) -> impl Future<Output = IdleCheck> + use<> {
         let asked: Vec<_> = self
             .chats
             .iter()
@@ -673,7 +680,7 @@ impl Runtime {
                 )
             })
             .collect();
-        cx.spawn(async move |this, cx| {
+        async move {
             let mut found = Vec::new();
             for (id, report, session, transcript, last_prompt) in asked {
                 let last_prompt = match last_prompt {
@@ -684,24 +691,29 @@ impl Runtime {
                     smol::unblock(move || transcript.is_some_and(|path| path.exists())).await;
                 found.push((id, report, session, kept, last_prompt));
             }
-            this.update(cx, |this, cx| {
-                // One that restarted, or went into another session, meanwhile
-                // isn't what was read.
-                found
-                    .into_iter()
-                    .filter(|(id, report, session, kept, last_prompt)| {
-                        this.chats
-                            .iter()
-                            .find(|chat| {
-                                chat.id == *id && chat.report == *report && chat.session == *session
-                            })
-                            .is_some_and(|chat| at_rest(chat, *kept, last_prompt, cx))
+            IdleCheck(found)
+        }
+    }
+
+    /// The chats `check` found at rest with nothing the user would miss, the
+    /// shown one included, which can be closed and opened again on the same
+    /// session.
+    pub fn idle_chats(&self, check: IdleCheck, cx: &App) -> Vec<i64> {
+        // One that restarted, or went into another session, meanwhile isn't
+        // what was read.
+        check
+            .0
+            .into_iter()
+            .filter(|(id, report, session, kept, last_prompt)| {
+                self.chats
+                    .iter()
+                    .find(|chat| {
+                        chat.id == *id && chat.report == *report && chat.session == *session
                     })
-                    .map(|(id, ..)| id)
-                    .collect()
+                    .is_some_and(|chat| at_rest(chat, *kept, last_prompt, cx))
             })
-            .unwrap_or_default()
-        })
+            .map(|(id, ..)| id)
+            .collect()
     }
 
     /// The session a chat's Codex CLI is in, looked for among the files its

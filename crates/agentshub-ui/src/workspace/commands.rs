@@ -175,13 +175,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let idle = self
-            .runtime
-            .update(cx, |runtime, cx| runtime.idle_chats(cx));
+        let check = self.runtime.read(cx).check_idle();
         cx.spawn_in(window, async move |this, cx| {
-            let ids = idle.await;
-            this.update_in(cx, |this, window, cx| this.close_chats(ids, window, cx))
-                .ok();
+            let check = check.await;
+            this.update_in(cx, |this, window, cx| {
+                let ids = this.runtime.read(cx).idle_chats(check, cx);
+                this.close_chats(ids, window, cx);
+            })
+            .ok();
         })
         .detach();
     }
