@@ -25,6 +25,7 @@ const SHELL_SHARE: &str = "shell_share";
 const MOTION: &str = "motion";
 const TERMINAL_FONT_SIZE: &str = "terminal_font_size";
 const EDITOR: &str = "editor";
+const LAYOUT: &str = "layout";
 
 /// A setting as the database keeps it, which a setter gives with its key.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -170,6 +171,30 @@ impl Motion {
     }
 }
 
+/// How the window lays out the projects and their chats.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Layout {
+    #[default]
+    Classic,
+    Triage,
+}
+
+impl Layout {
+    pub const ALL: [Self; 2] = [Self::Classic, Self::Triage];
+
+    /// How the database spells it.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Triage => "triage",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|layout| layout.key() == key)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Settings {
     /// Whether closing the window leaves the app running in the tray.
@@ -199,6 +224,8 @@ pub struct Settings {
     pub terminal_font_size: f32,
     /// The editor chats open their folder in, when the user picked one.
     pub editor: Option<Editor>,
+    /// The layout the window opened in.
+    pub layout: Layout,
 }
 
 impl Default for Settings {
@@ -217,6 +244,7 @@ impl Default for Settings {
             motion: Motion::default(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             editor: None,
+            layout: Layout::default(),
         }
     }
 }
@@ -264,6 +292,9 @@ impl Settings {
                 .filter(|size| (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(size))
                 .unwrap_or(defaults.terminal_font_size),
             editor: read::<String>(saved, EDITOR).and_then(|key| Editor::from_key(&key)),
+            layout: read::<String>(saved, LAYOUT)
+                .and_then(|key| Layout::from_key(&key))
+                .unwrap_or(defaults.layout),
         }
     }
 }
@@ -271,8 +302,8 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::{
-        APPEARANCE, Appearance, CLOSE_TO_TRAY, EDITOR, MOTION, Motion, SHELL_SHARE, SIDEBAR_WIDTH,
-        Settings, ThemeFamily,
+        APPEARANCE, Appearance, CLOSE_TO_TRAY, EDITOR, LAYOUT, Layout, MOTION, Motion, SHELL_SHARE,
+        SIDEBAR_WIDTH, Settings, ThemeFamily,
     };
     use agentshub_core::editors::Editor;
     use agentshub_core::store::Db;
@@ -301,6 +332,35 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.set_text(EDITOR, "notepad").unwrap();
         assert_eq!(Settings::load(&db.settings().unwrap()).editor, None);
+    }
+
+    #[test]
+    fn the_layout_is_classic_by_default() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(
+            Settings::load(&db.settings().unwrap()).layout,
+            Layout::Classic
+        );
+    }
+
+    #[test]
+    fn the_layout_reads_triage() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_text(LAYOUT, "triage").unwrap();
+        assert_eq!(
+            Settings::load(&db.settings().unwrap()).layout,
+            Layout::Triage
+        );
+    }
+
+    #[test]
+    fn an_unknown_layout_is_classic() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_text(LAYOUT, "tabs").unwrap();
+        assert_eq!(
+            Settings::load(&db.settings().unwrap()).layout,
+            Layout::Classic
+        );
     }
 
     #[test]

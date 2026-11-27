@@ -120,6 +120,13 @@ impl Settings {
         (THEME, Value::Text(value.key()))
     }
 
+    /// The window keeps the layout it opened in, so this only saves the one
+    /// the app opens in next.
+    #[must_use = "the setting is saved only once the runtime is asked to save it"]
+    pub fn set_layout(value: Layout) -> (&'static str, Value) {
+        (LAYOUT, Value::Text(value.key()))
+    }
+
     #[must_use = "the setting is saved only once the runtime is asked to save it"]
     pub fn set_editor(value: Editor, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
