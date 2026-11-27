@@ -3,6 +3,7 @@
 
 pub mod actions;
 pub mod appearance;
+pub mod editor;
 pub mod history;
 pub mod status;
 pub mod terminal_view;

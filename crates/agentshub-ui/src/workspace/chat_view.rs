@@ -64,7 +64,7 @@ impl Workspace {
             active: runtime.active().is_some(),
             earlier,
             history_open,
-            editors: crate::chat::editor_choices(cx),
+            editors: agentshub_ui_kit::editor::editor_choices(cx),
             focus: self.chat_focus.clone(),
             on,
             save,

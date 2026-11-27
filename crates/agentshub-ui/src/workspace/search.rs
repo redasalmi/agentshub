@@ -87,7 +87,7 @@ impl Workspace {
                 IconName::SquareTerminal,
                 Box::new(ToggleShell),
             ));
-            if let Some((current, _)) = crate::chat::editor_choices(cx) {
+            if let Some((current, _)) = agentshub_ui_kit::editor::editor_choices(cx) {
                 commands.push(
                     Entry::new(
                         format!("Open this chat's folder in {}", current.editor.name()),
