@@ -32,7 +32,6 @@ use crate::sidebar::{
 };
 use crate::terminal_view::{self, TerminalView};
 use agentshub_app::alerts::{self, Alert};
-use agentshub_app::bootstrap::Opened;
 use agentshub_app::settings::{
     Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, DEFAULT_TERMINAL_FONT_SIZE, Motion,
     Settings, ThemeFamily,
@@ -46,13 +45,12 @@ use agentshub_core::worktree::{self, Worktree};
 #[cfg(target_os = "linux")]
 use agentshub_platform::scope;
 use agentshub_runtime::terminal::{self, Exited, Pty, StatusChanged, Terminal};
+use agentshub_runtime::{Intent, Runtime, RuntimeEvent};
 
 mod actions;
 mod catalog;
 mod chat_view;
 mod chats;
-
-use agentshub_app::catalog::Catalog;
 mod codex;
 mod commands;
 mod dialogs;
@@ -81,7 +79,7 @@ pub(crate) use session::import_chat;
 #[cfg(test)]
 pub(crate) use session::reported_sessions;
 
-use agentshub_core::lifecycle::{Added, Codex, Deleted, Lifecycle, Reaped, Saved, Saving};
+use agentshub_core::lifecycle::{Added, Codex, Deleted, Reaped, Saved, Saving};
 
 /// How many of the chats last worked in show while no chat is open.
 const RECENT_CHATS: usize = 5;
@@ -107,18 +105,16 @@ pub fn init(cx: &mut App) {
 pub struct Workspace {
     sidebar: Entity<Sidebar>,
     settings_view: Entity<SettingsView>,
-    store: Store,
-    /// The projects and chats, including the changes not saved yet.
-    catalog: Catalog,
+    /// The store, the projects and chats, and the chats on their way in or
+    /// out, which outlive the window.
+    runtime: Entity<Runtime>,
+    _runtime_events: Subscription,
     /// Open chats, including exited terminals and history whose CLI couldn't
     /// start. Running processes keep running while another chat is shown,
     /// until the user closes them.
     chats: Vec<Chat>,
     /// The chat that is shown.
     active: Option<i64>,
-    /// The chats on their way in or out, the ones being deleted, and which
-    /// of them may take the view.
-    lifecycle: Lifecycle,
     reports: Reports,
     codex_watcher: Option<notify::RecommendedWatcher>,
     /// What the watcher looks at: Codex's session folder, or while it doesn't
@@ -142,9 +138,6 @@ pub struct Workspace {
     palette_start: Option<(i64, palette::Sections)>,
     _theme: Subscription,
     _focus_lost: Subscription,
-    /// Why the workspace can't be used: the database didn't open, or another
-    /// Agents Hub holds the lock.
-    broken: Option<SharedString>,
     /// The sessions whose transcript is being read, which shutdown reads
     /// itself since it can't wait for them. A session is in it once per read
     /// under way, so it stays until the last of them is done.
@@ -157,8 +150,6 @@ pub struct Workspace {
     /// chat once git is done, or by shutdown, so none is left without a chat
     /// to remove it.
     checkouts: Vec<worktree::Checkout>,
-    /// The lock that keeps a second instance off the database.
-    _lock: Option<fs::File>,
     /// The projects' shells, by folder, for quick commands next to their
     /// chats. Nothing about them is saved, and they run until they exit or
     /// the app quits.

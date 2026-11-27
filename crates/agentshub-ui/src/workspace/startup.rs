@@ -7,15 +7,8 @@ impl Workspace {
         clippy::too_many_lines,
         reason = "creates every part of the workspace and the tasks that feed it"
     )]
-    pub fn new(opened: Opened, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let Opened {
-            store,
-            lock,
-            imported,
-            settings,
-            projects,
-            broken,
-        } = opened;
+    pub fn new(runtime: Entity<Runtime>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (settings, imported) = runtime.update(cx, |runtime, _| runtime.take_startup());
         // Said once the window is up, since its notifications aren't yet.
         if let Some(imported) = imported {
             let message = match imported {
@@ -78,6 +71,14 @@ impl Workspace {
                 SidebarEvent::Selected => this.project_selected(window, cx),
             });
 
+        let runtime_events = cx.subscribe(&runtime, |this, _, event, cx| match event {
+            RuntimeEvent::CatalogChanged => {
+                this.sync_catalog(cx);
+                this.refresh(cx);
+            }
+            RuntimeEvent::Notice(message) => this.say(message.clone(), cx),
+        });
+
         let (reports, reported) = Reports::new();
         let report_events = cx.spawn(async move |this, cx| {
             while let Ok(key) = reported.recv().await {
@@ -121,11 +122,10 @@ impl Workspace {
         let mut this = Self {
             sidebar,
             settings_view,
-            store,
-            catalog: Catalog::new(projects.clone()),
+            runtime,
+            _runtime_events: runtime_events,
             chats: Vec::new(),
             active: None,
-            lifecycle: Lifecycle::default(),
             reports,
             codex_watcher,
             codex_watch: None,
@@ -140,11 +140,9 @@ impl Workspace {
             palette_start: None,
             _theme: theme,
             _focus_lost: focus_lost,
-            broken: broken.map(SharedString::from),
             reading: Vec::new(),
             reading_last: Vec::new(),
             checkouts: Vec::new(),
-            _lock: lock,
             shells: HashMap::new(),
             settings_shown: false,
             running_menu: None,
@@ -156,6 +154,7 @@ impl Workspace {
             importing: false,
         };
         this.update_codex_watch();
+        let projects = this.runtime.read(cx).projects().to_vec();
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_projects(projects, cx));
         this.catch_up(cx);
@@ -165,7 +164,7 @@ impl Workspace {
     /// Reads what the CLIs wrote since the transcripts were last read, so
     /// that the search finds it without each chat having to be opened first.
     fn catch_up(&self, cx: &mut Context<Self>) {
-        let behind = self.store.transcripts_behind();
+        let behind = self.runtime.read(cx).store().transcripts_behind();
         cx.spawn(async move |this, cx| {
             match behind.await {
                 Ok(sessions) => this

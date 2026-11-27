@@ -69,6 +69,7 @@ impl Runtime {
         self.broken.as_ref()
     }
 
+    /// Does what a view asked for.
     pub fn apply(&mut self, intent: Intent, cx: &mut Context<Self>) {
         match intent {
             Intent::Change(change) => self.change(change, cx),
@@ -110,6 +111,11 @@ impl Runtime {
     #[doc(hidden)]
     pub fn lifecycle_mut(&mut self) -> &mut Lifecycle {
         &mut self.lifecycle
+    }
+
+    #[doc(hidden)]
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
     }
 
     #[doc(hidden)]

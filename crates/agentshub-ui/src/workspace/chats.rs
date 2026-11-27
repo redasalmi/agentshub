@@ -46,8 +46,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // The sidebar doesn't list a chat just added yet.
-        let listed = self.store.projects();
-        let asked = self.asked();
+        let listed = self.runtime.read(cx).store().projects();
+        let asked = self.asked(cx);
         cx.spawn_in(window, async move |this, cx| {
             // The worktree Agents Hub made for the chat, and its project's
             // folder.
@@ -75,7 +75,7 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 // The user may have shown something else meanwhile, or opened
                 // another dialog, which the question would be out of place in.
-                if this.asked() != asked || window.has_active_dialog(cx) {
+                if this.asked(cx) != asked || window.has_active_dialog(cx) {
                     return;
                 }
                 let this = cx.entity().downgrade();
@@ -107,12 +107,15 @@ impl Workspace {
         worktree: Option<(Worktree, PathBuf)>,
         cx: &mut Context<Self>,
     ) {
-        self.lifecycle.cancel_opening(id);
+        self.runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().cancel_opening(id));
         let reaped = self
             .stop_chat(id, cx)
-            .or_else(|| self.lifecycle.reaping(id));
-        self.lifecycle.mark_deleting(id, worktree, reaped);
-        let deleted = self.store.delete_chat(id);
+            .or_else(|| self.runtime.read(cx).lifecycle().reaping(id));
+        self.runtime.update(cx, |runtime, _| {
+            runtime.lifecycle_mut().mark_deleting(id, worktree, reaped)
+        });
+        let deleted = self.runtime.read(cx).store().delete_chat(id);
         cx.spawn(async move |this, cx| {
             let deleted = deleted.await;
             this.update(cx, |this, cx| {
@@ -130,8 +133,9 @@ impl Workspace {
     /// Lets `chats` be opened again, once deleting them is done, and if they
     /// were deleted, removes their worktrees.
     pub(super) fn finish_deleting(&mut self, chats: &[i64], deleted: bool, cx: &mut Context<Self>) {
-        for (id, Deleted { worktree, reaped }) in self.lifecycle.finish_deleting_all(chats, deleted)
-        {
+        for (id, Deleted { worktree, reaped }) in self.runtime.update(cx, |runtime, _| {
+            runtime.lifecycle_mut().finish_deleting_all(chats, deleted)
+        }) {
             // Its notification can't open it anymore.
             alerts::withdraw(id, cx);
             if let Some((worktree, project)) = &worktree {
@@ -180,7 +184,8 @@ impl Workspace {
     /// Closes a chat and archives it. Opening it again brings it back and
     /// resumes its session.
     pub(super) fn archive_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        self.lifecycle.cancel_opening(id);
+        self.runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().cancel_opening(id));
         self.close_chats(vec![id], window, cx);
         self.change(
             Change::ArchiveChat {
@@ -261,7 +266,8 @@ impl Workspace {
         };
         let ids = self.chats_of(id, cx);
         for id in &ids {
-            self.lifecycle.cancel_opening(*id);
+            self.runtime
+                .update(cx, |runtime, _| runtime.lifecycle_mut().cancel_opening(*id));
         }
         self.close_chats(ids.clone(), window, cx);
         // Dropping their terminals kills the shells, as removing the project
@@ -272,7 +278,8 @@ impl Workspace {
         if self.shells.len() != shells {
             self.sync_terminals(cx);
         }
-        self.lifecycle.archive_project();
+        self.runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().archive_project());
         self.change(
             Change::ArchiveProject {
                 project: id,
@@ -309,24 +316,7 @@ impl Workspace {
     /// Shows `change` at once, and saves it. The projects are listed as saved
     /// once every change shown is, which takes back one that couldn't be.
     pub(super) fn change(&mut self, change: Change, cx: &mut Context<Self>) {
-        self.catalog.change(&change);
-        self.sync_catalog(cx);
-        let saved = self.store.change(change);
-        cx.spawn(async move |this, cx| {
-            let saved = saved.await;
-            this.update(cx, |this, cx| {
-                this.catalog.saved();
-                if let Err(err) = saved {
-                    eprintln!("can't save a change: {err:#}");
-                    this.say(
-                        format!("Couldn't save the change, so it is undone: {err}"),
-                        cx,
-                    );
-                }
-                this.refresh(cx);
-            })
-            .ok();
-        })
-        .detach();
+        self.runtime
+            .update(cx, |runtime, cx| runtime.apply(Intent::Change(change), cx));
     }
 }

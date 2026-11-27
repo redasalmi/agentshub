@@ -12,6 +12,7 @@ pub use window::{Contents, open_window};
 
 use std::borrow::Cow;
 
+use agentshub_runtime::Runtime;
 use gpui_kit::*;
 
 use sigterm::quit_on_sigterm;
@@ -78,7 +79,8 @@ fn main() {
         cx.spawn(async move |cx| {
             let opened = bootstrap::open().await;
             cx.update(|cx| {
-                let workspace = open_window(Contents::New(Box::new(opened)), None, cx);
+                let runtime = cx.new(|cx| Runtime::new(opened, cx));
+                let workspace = open_window(Contents::New(runtime), None, cx);
                 alerts::init(&workspace, cx);
                 motion::watch_desktop_motion(cx, appearance::apply_motion);
                 tray::init(workspace, cx);

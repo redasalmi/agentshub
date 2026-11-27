@@ -23,7 +23,7 @@ impl Workspace {
         let Some(path) = path else {
             return;
         };
-        let asked = self.ask_for_chat();
+        let asked = self.ask_for_chat(cx);
         if !cx.global::<Settings>().worktree_by_default {
             self.new_chat(
                 project_id,
@@ -56,7 +56,7 @@ impl Workspace {
                 ),
                 // Starting it in the project's folder would have it share
                 // that with other chats, which the settings asked to avoid.
-                Err(err) if this.lifecycle.closed_all() == asked.closed_all => {
+                Err(err) if this.runtime.read(cx).lifecycle().closed_all() == asked.closed_all => {
                     window.push_notification(format!("{err:#}"), cx)
                 }
                 Err(_) => {}
@@ -69,15 +69,16 @@ impl Workspace {
     /// Asking for a new chat is itself a request to show something, so it
     /// supersedes the chats still opening and the new chats still on their
     /// way for earlier requests, which start in the background.
-    pub(super) fn ask_for_chat(&mut self) -> Asked {
-        self.lifecycle.ask();
-        self.asked()
+    pub(super) fn ask_for_chat(&mut self, cx: &mut App) -> Asked {
+        self.runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().ask());
+        self.asked(cx)
     }
 
-    pub(super) fn asked(&self) -> Asked {
+    pub(super) fn asked(&self, cx: &App) -> Asked {
         Asked {
-            navigations: self.lifecycle.navigations(),
-            closed_all: self.lifecycle.closed_all(),
+            navigations: self.runtime.read(cx).lifecycle().navigations(),
+            closed_all: self.runtime.read(cx).lifecycle().closed_all(),
         }
     }
 
@@ -102,7 +103,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // All the chats were closed meanwhile, this one with them.
-        if self.lifecycle.closed_all() != asked.closed_all {
+        if self.runtime.read(cx).lifecycle().closed_all() != asked.closed_all {
             return;
         }
         if !worktree {
@@ -149,10 +150,12 @@ impl Workspace {
                 window.remove_notification1::<CopyingProject>(copying, cx);
                 match &created {
                     // All the chats were closed meanwhile, this one with them.
-                    Ok((worktree, _)) if this.lifecycle.closed_all() != closed_all => {
+                    Ok((worktree, _))
+                        if this.runtime.read(cx).lifecycle().closed_all() != closed_all =>
+                    {
                         this.remove_worktree(worktree, &project, None, cx)
                     }
-                    Err(_) if this.lifecycle.closed_all() != closed_all => {}
+                    Err(_) if this.runtime.read(cx).lifecycle().closed_all() != closed_all => {}
                     Ok((worktree, unreadable)) => {
                         if let Some(message) = unreadable {
                             window.push_notification(message.clone(), cx);
@@ -183,9 +186,12 @@ impl Workspace {
             {
                 let app: &mut AsyncApp = cx;
                 let job = this
-                    .update(app, |this, _| {
-                        this.lifecycle
-                            .track_removal(&worktree, &project, Vec::new())
+                    .update(app, |this, cx| {
+                        this.runtime.update(cx, |runtime, _| {
+                            runtime
+                                .lifecycle_mut()
+                                .track_removal(&worktree, &project, Vec::new())
+                        })
                     })
                     .unwrap_or_else(|_| Arc::new(Mutex::new(Some((worktree, project)))));
                 if let Some(Err(err)) = smol::unblock(move || take_and_remove(&job)).await {
@@ -218,14 +224,20 @@ impl Workspace {
         let worktree = worktree.cloned();
         // The project may have been archived while the chat's worktree was
         // checked out. Adding the chat brings it back, as opening one does.
-        let added =
-            self.store
-                .add_chat(project_id, project.clone(), agent, worktree.clone(), title);
-        let saving = self.lifecycle.save(
+        let added = self.runtime.read(cx).store().add_chat(
             project_id,
-            worktree.map(|worktree| (worktree, project.clone())),
+            project.clone(),
+            agent,
+            worktree.clone(),
+            title,
         );
-        let store = self.store.clone();
+        let saving = self.runtime.update(cx, |runtime, _| {
+            runtime.lifecycle_mut().save(
+                project_id,
+                worktree.map(|worktree| (worktree, project.clone())),
+            )
+        });
+        let store = self.runtime.read(cx).store().clone();
         let new = PendingChat {
             project_id,
             agent,
@@ -240,9 +252,12 @@ impl Workspace {
             // saved, nothing else says its project was being removed.
             let kept = match added {
                 Ok(Some(id)) => loop {
-                    let Ok((deletions, chat)) =
-                        this.read_with(cx, |this, _| (this.lifecycle.deletions(), store.chat(id)))
-                    else {
+                    let Ok((deletions, chat)) = this.read_with(cx, |this, cx| {
+                        (
+                            this.runtime.read(cx).lifecycle().deletions(),
+                            store.chat(id),
+                        )
+                    }) else {
                         return;
                     };
                     let kept = chat
@@ -250,7 +265,7 @@ impl Workspace {
                         .map(|chat| chat.is_some())
                         .map_err(|err| err.to_string());
                     if this
-                        .read_with(cx, |this, _| this.lifecycle.deletions())
+                        .read_with(cx, |this, cx| this.runtime.read(cx).lifecycle().deletions())
                         .is_ok_and(|now| now != deletions)
                     {
                         continue;
@@ -307,7 +322,7 @@ impl Workspace {
         let id = added.as_ref().ok().copied().flatten();
         // A listing since it was saved shows it, so it may have been opened,
         // archived or deleted from there meanwhile.
-        let projects = self.catalog.projects();
+        let projects = self.runtime.read(cx).projects();
         let saved = Saved {
             kept,
             closed_all: asked.closed_all,
@@ -324,7 +339,9 @@ impl Workspace {
             window: has_window,
             id: added,
         };
-        let (added, worktree) = self.lifecycle.added(saving, saved);
+        let (added, worktree) = self.runtime.update(cx, |runtime, _| {
+            runtime.lifecycle_mut().added(saving, saved)
+        });
         match added {
             Added::Lost => {
                 if let Some((worktree, project)) = &worktree {
@@ -349,7 +366,7 @@ impl Workspace {
                 // Its first session report adds its first session.
                 if !self.start_chat(id, agent, cwd, None, window, cx) {
                     self.delete_chat(id, worktree, cx);
-                } else if self.lifecycle.navigations() == asked.navigations {
+                } else if self.runtime.read(cx).lifecycle().navigations() == asked.navigations {
                     self.activate(id, window, cx);
                     // The sidebar doesn't list the new chat yet, so it can't
                     // find its project by itself.
@@ -393,9 +410,11 @@ impl Workspace {
             cx.notify();
         }
         let folder = worktree.root.clone();
-        let job = self
-            .lifecycle
-            .track_removal(worktree, project, waits.clone());
+        let job = self.runtime.update(cx, |runtime, _| {
+            runtime
+                .lifecycle_mut()
+                .track_removal(worktree, project, waits.clone())
+        });
         cx.spawn(async move |this, cx| {
             // What the CLI and the shells write as they exit, like a shell's
             // history, would otherwise go to a folder being deleted.

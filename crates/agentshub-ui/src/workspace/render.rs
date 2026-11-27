@@ -19,7 +19,7 @@ impl Render for Workspace {
                 .into_any_element()
         });
         let theme = cx.theme();
-        if let Some(reason) = self.broken.clone() {
+        if let Some(reason) = self.runtime.read(cx).broken().cloned() {
             return render_broken(reason, cx);
         }
         let active = self

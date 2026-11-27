@@ -8,7 +8,9 @@ impl Workspace {
     pub fn show_settings(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_shown = shown;
         // A chat still opening mustn't take the view from the settings.
-        self.lifecycle.show_settings(shown);
+        self.runtime.update(cx, |runtime, _| {
+            runtime.lifecycle_mut().show_settings(shown)
+        });
         if shown {
             self.focus_handle.focus(window, cx);
         } else {
@@ -26,7 +28,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let saved = Settings::set_appearance(&self.store, value, cx);
+        let store = self.runtime.read(cx).store().clone();
+        let saved = Settings::set_appearance(&store, value, cx);
         self.save_setting(saved, cx);
         appearance::apply(window, cx);
         cx.notify();
@@ -40,7 +43,8 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let saved = Settings::set_project_names(&self.store, show, cx);
+        let store = self.runtime.read(cx).store().clone();
+        let saved = Settings::set_project_names(&store, show, cx);
         self.save_setting(saved, cx);
         self.sidebar.update(cx, |_, cx| cx.notify());
         cx.notify();
@@ -90,13 +94,15 @@ impl Workspace {
     /// Makes the terminals' text `by` points bigger, or smaller when negative.
     pub(super) fn zoom_terminals(&mut self, by: f32, _: &mut Window, cx: &mut Context<Self>) {
         let size = cx.global::<Settings>().terminal_font_size + by;
-        let saved = Settings::set_terminal_font_size(&self.store, size, cx);
+        let store = self.runtime.read(cx).store().clone();
+        let saved = Settings::set_terminal_font_size(&store, size, cx);
         self.save_setting(saved, cx);
         cx.notify();
     }
 
     pub(super) fn set_motion(&mut self, value: Motion, _: &mut Window, cx: &mut Context<Self>) {
-        let saved = Settings::set_motion(&self.store, value, cx);
+        let store = self.runtime.read(cx).store().clone();
+        let saved = Settings::set_motion(&store, value, cx);
         self.save_setting(saved, cx);
         appearance::apply_motion(cx);
         cx.notify();
@@ -108,7 +114,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let saved = Settings::set_theme(&self.store, value, cx);
+        let store = self.runtime.read(cx).store().clone();
+        let saved = Settings::set_theme(&store, value, cx);
         self.save_setting(saved, cx);
         appearance::apply(window, cx);
         cx.notify();
@@ -128,23 +135,28 @@ impl Workspace {
             SettingsIntent::SetMotion(value) => self.set_motion(value, window, cx),
             SettingsIntent::Zoom(by) => self.zoom_terminals(by, window, cx),
             SettingsIntent::SetCloseToTray(value) => {
-                let saved = Settings::set_close_to_tray(&self.store, value, cx);
+                let store = self.runtime.read(cx).store().clone();
+                let saved = Settings::set_close_to_tray(&store, value, cx);
                 self.save_setting(saved, cx);
             }
             SettingsIntent::SetWorktreeByDefault(value) => {
-                let saved = Settings::set_worktree_by_default(&self.store, value, cx);
+                let store = self.runtime.read(cx).store().clone();
+                let saved = Settings::set_worktree_by_default(&store, value, cx);
                 self.save_setting(saved, cx);
             }
             SettingsIntent::SetEditor(value) => {
-                let saved = Settings::set_editor(&self.store, value, cx);
+                let store = self.runtime.read(cx).store().clone();
+                let saved = Settings::set_editor(&store, value, cx);
                 self.save_setting(saved, cx);
             }
             SettingsIntent::SetNotificationPopups(value) => {
-                let saved = Settings::set_notification_popups(&self.store, value, cx);
+                let store = self.runtime.read(cx).store().clone();
+                let saved = Settings::set_notification_popups(&store, value, cx);
                 self.save_setting(saved, cx);
             }
             SettingsIntent::SetNotificationSound(value) => {
-                let saved = Settings::set_notification_sound(&self.store, value, cx);
+                let store = self.runtime.read(cx).store().clone();
+                let saved = Settings::set_notification_sound(&store, value, cx);
                 self.save_setting(saved, cx);
             }
             SettingsIntent::TestNotifications => alerts::test(cx),

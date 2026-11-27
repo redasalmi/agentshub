@@ -4,9 +4,10 @@ use super::*;
 
 impl Workspace {
     /// The shown chat as the catalog lists it.
-    pub(super) fn active_entry<'a>(&'a self, _cx: &'a App) -> Option<&'a store::Chat> {
+    pub(super) fn active_entry<'a>(&'a self, cx: &'a App) -> Option<&'a store::Chat> {
         let id = self.active?;
-        self.catalog
+        self.runtime
+            .read(cx)
             .projects()
             .iter()
             .flat_map(|project| &project.chats)
@@ -14,8 +15,8 @@ impl Workspace {
     }
 
     /// Whether a chat, or its project, is archived.
-    pub(super) fn is_archived(&self, id: i64, _cx: &App) -> bool {
-        self.catalog.projects().iter().any(|project| {
+    pub(super) fn is_archived(&self, id: i64, cx: &App) -> bool {
+        self.runtime.read(cx).projects().iter().any(|project| {
             project.chats.iter().any(|chat| {
                 chat.id == id && (chat.archived_at.is_some() || project.archived_at.is_some())
             })
@@ -23,9 +24,10 @@ impl Workspace {
     }
 
     /// Whether chat `id`'s project is being removed.
-    pub(super) fn is_removing(&self, id: i64, _cx: &App) -> bool {
-        self.catalog.projects().iter().any(|project| {
-            self.lifecycle.is_removing_project(project.id)
+    pub(super) fn is_removing(&self, id: i64, cx: &App) -> bool {
+        let runtime = self.runtime.read(cx);
+        runtime.projects().iter().any(|project| {
+            runtime.lifecycle().is_removing_project(project.id)
                 && project.chats.iter().any(|chat| chat.id == id)
         })
     }
@@ -165,7 +167,8 @@ impl Workspace {
         // CLI to be reaped, would start once that's done, and so would a new
         // chat once its worktree is checked out. The checkouts stay listed, so
         // shutdown still removes what they make if the app quits first.
-        self.lifecycle.close_all();
+        self.runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().close_all());
         for checkout in &self.checkouts {
             checkout.cancel();
         }
@@ -181,11 +184,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let store = self.runtime.read(cx).store();
         let asked: Vec<_> = self
             .chats
             .iter()
             .map(|chat| {
-                let last_prompt = chat.session.map(|session| self.store.last_prompt(session));
+                let last_prompt = chat.session.map(|session| store.last_prompt(session));
                 let transcript = chat.transcript.clone();
                 (
                     chat.id,

@@ -52,7 +52,8 @@ impl Workspace {
         }
         // Selecting a project is asking to show something, so a new chat or
         // New Chat dialog asked for before doesn't take the view from it.
-        self.lifecycle.navigate();
+        self.runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().navigate());
         self.sync_terminals(cx);
         self.look_up_installed(cx);
         cx.notify();
@@ -133,7 +134,7 @@ impl Workspace {
         // Removing the project stopped its shell, and nothing would stop
         // another one started before it is gone.
         let selected = self.sidebar.read(cx).selected().map(|project| project.id);
-        if selected.is_some_and(|id| self.lifecycle.is_removing_project(id)) {
+        if selected.is_some_and(|id| self.runtime.read(cx).lifecycle().is_removing_project(id)) {
             return;
         }
         let Some(cwd) = self.shell_cwd(cx) else {

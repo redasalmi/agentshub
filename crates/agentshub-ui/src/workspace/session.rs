@@ -42,12 +42,11 @@ impl Workspace {
         };
         chat.recording = Some(recording.clone());
         let (agent, report) = (chat.agent, chat.report.clone());
+        let store = self.runtime.read(cx).store();
         let recorded: Vec<_> = sessions
             .into_iter()
             .map(|(agent_id, path, reason)| {
-                let recorded =
-                    self.store
-                        .record_session(chat_id, agent, agent_id.clone(), path, reason);
+                let recorded = store.record_session(chat_id, agent, agent_id.clone(), path, reason);
                 async move { (agent_id, recorded.await) }
             })
             .collect();
@@ -128,8 +127,12 @@ impl Workspace {
 
     /// The session a chat's CLI is in, as listed once the sessions asked to
     /// be recorded so far are, which the chat may not know of yet: its last.
-    pub(super) fn last_session(&self, chat_id: i64) -> impl Future<Output = Option<i64>> + use<> {
-        let sessions = self.store.sessions(chat_id);
+    pub(super) fn last_session(
+        &self,
+        chat_id: i64,
+        cx: &App,
+    ) -> impl Future<Output = Option<i64>> + use<> {
+        let sessions = self.runtime.read(cx).store().sessions(chat_id);
         async move {
             let mut sessions = sessions
                 .await
@@ -146,7 +149,7 @@ impl Workspace {
         session: Option<i64>,
         cx: &mut Context<Self>,
     ) {
-        let last = self.last_session(chat_id);
+        let last = self.last_session(chat_id, cx);
         self.reading_last.push(chat_id);
         cx.spawn(async move |this, cx| {
             let session = last.await.or(session);
@@ -171,7 +174,7 @@ impl Workspace {
         touch: bool,
         cx: &mut Context<Self>,
     ) -> Task<()> {
-        let store = self.store.clone();
+        let store = self.runtime.read(cx).store().clone();
         self.reading.extend(&sessions);
         cx.spawn(async move |this, cx| {
             if sessions.is_empty() {

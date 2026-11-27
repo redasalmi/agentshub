@@ -12,24 +12,28 @@ impl Workspace {
     /// The same, reloading the expanded sessions whose transcript read, in
     /// `changed`, found something.
     pub(super) fn refresh_after(&mut self, changed: &[i64], cx: &mut Context<Self>) {
-        if self.catalog.unsaved() == 0 {
-            let listed = self.store.projects();
+        if self.runtime.read(cx).catalog().unsaved() == 0 {
+            let listed = self.runtime.read(cx).store().projects();
             let listing = cx.spawn(async move |this, cx| {
                 let listed = listed.await;
                 this.update(cx, |this, cx| {
                     // A change shown since is listed once it's saved.
-                    if this.catalog.unsaved() > 0 {
+                    if this.runtime.read(cx).catalog().unsaved() > 0 {
                         return;
                     }
                     let shell = this.shell_cwd(cx);
                     match listed {
                         Ok(projects) => {
-                            this.catalog.listed(projects);
+                            this.runtime
+                                .update(cx, |runtime, _| runtime.catalog_mut().listed(projects));
                             this.sync_catalog(cx);
                         }
                         Err(err) => eprintln!("can't list the projects: {err}"),
                     }
-                    if let Some(id) = this.catalog.take_selected() {
+                    if let Some(id) = this
+                        .runtime
+                        .update(cx, |runtime, _| runtime.catalog_mut().take_selected())
+                    {
                         this.sidebar
                             .update(cx, |sidebar, cx| sidebar.select(id, cx));
                     }
@@ -43,7 +47,8 @@ impl Workspace {
                 })
                 .ok();
             });
-            self.catalog.listing(listing);
+            self.runtime
+                .update(cx, |runtime, _| runtime.catalog_mut().listing(listing));
         }
         for chat in &self.chats {
             let current = chat.current_session();
@@ -120,7 +125,7 @@ impl Workspace {
 
         let hold = alerts::hold(id, cx);
         let read = read.unwrap_or_else(|| self.read_current(id, false, cx));
-        let store = self.store.clone();
+        let store = self.runtime.read(cx).store().clone();
         cx.spawn(async move |this, cx| {
             let session = read.await;
             let items = match session {

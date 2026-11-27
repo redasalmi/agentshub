@@ -11,7 +11,7 @@ impl Workspace {
         reason = "the states a chat can be in when opened, checked in order"
     )]
     pub fn open_chat(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.lifecycle.is_deleting(id) || self.is_removing(id, cx) {
+        if self.runtime.read(cx).lifecycle().is_deleting(id) || self.is_removing(id, cx) {
             return;
         }
         if self.is_archived(id, cx) {
@@ -20,18 +20,20 @@ impl Workspace {
         // Reading a chat's last session takes long enough for another chat
         // to be asked for meanwhile. This is the request that a completion
         // compares itself with.
-        let request = self.lifecycle.request(id);
+        let request = self
+            .runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().request(id));
         if self.chats.iter().any(|chat| chat.id == id) {
             self.activate(id, window, cx);
             return;
         }
         // A CLI that was stopped to free what it held opens again once it's
         // gone, so the two never run in one session.
-        if let Some(reaped) = self.lifecycle.reaping(id) {
+        if let Some(reaped) = self.runtime.read(cx).lifecycle().reaping(id) {
             cx.spawn_in(window, async move |this, cx| {
                 reaped.recv().await.ok();
                 this.update_in(cx, |this, window, cx| {
-                    if this.lifecycle.is_requested(id) {
+                    if this.runtime.read(cx).lifecycle().is_requested(id) {
                         this.open_chat(id, window, cx);
                     }
                 })
@@ -42,14 +44,17 @@ impl Workspace {
         }
         // Clicks that arrive while the session is read would start a second
         // CLI in the same chat. A read that was cancelled starts it after all.
-        if !self.lifecycle.open(id) {
+        if !self
+            .runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().open(id))
+        {
             return;
         }
 
         // The last session decides how the CLI starts, so it's read first: the
         // CLI may have gone on without agentshub. Transcripts can be large
         // enough that this can't happen while the window waits.
-        let store = self.store.clone();
+        let store = self.runtime.read(cx).store().clone();
         cx.spawn_in(window, async move |this, cx| {
             let read = async {
                 let mut sessions = store.sessions(id).await?;
@@ -99,7 +104,10 @@ impl Workspace {
             if this
                 .update_in(cx, |this, window, cx| {
                     // The chats may have been closed meanwhile.
-                    if !this.lifecycle.opened(id) {
+                    if !this
+                        .runtime
+                        .update(cx, |runtime, _| runtime.lifecycle_mut().opened(id))
+                    {
                         return;
                     }
                     // The chat may have been deleted, or opened elsewhere, meanwhile,
@@ -114,8 +122,9 @@ impl Workspace {
                         Ok((None, ..)) => {
                             // If the chat is gone, the one it took over the
                             // view from still shows when it opens.
-                            if let Some(overtaken) = this.lifecycle.give_back(id, request)
-                                && this.chats.iter().any(|chat| chat.id == overtaken)
+                            if let Some(overtaken) = this.runtime.update(cx, |runtime, _| {
+                                runtime.lifecycle_mut().give_back(id, request)
+                            }) && this.chats.iter().any(|chat| chat.id == overtaken)
                             {
                                 this.activate(overtaken, window, cx);
                             }
@@ -135,7 +144,10 @@ impl Workspace {
                         Some(last) if last.prompted => {
                             let (session, lost) = (
                                 last.id,
-                                this.store.lose_transcript(last.id, TRANSCRIPT_GONE),
+                                this.runtime
+                                    .read(cx)
+                                    .store()
+                                    .lose_transcript(last.id, TRANSCRIPT_GONE),
                             );
                             cx.background_spawn(async move {
                                 if let Err(err) = lost.await {
@@ -152,11 +164,11 @@ impl Workspace {
                     // A chat the user selected while this one was being read
                     // keeps the view. This one still starts, but in the
                     // background, so its completion can't steal focus.
-                    let show = this.lifecycle.is_requested(id);
+                    let show = this.runtime.read(cx).lifecycle().is_requested(id);
                     // Two CLIs in one session would append to the same transcript,
                     // so a session another chat is running can't be resumed here.
                     if let Some(last) = resumed
-                        && this.live_elsewhere(id, agent, last)
+                        && this.live_elsewhere(id, agent, last, cx)
                     {
                         this.block_chat(
                             id,
@@ -185,7 +197,11 @@ impl Workspace {
             {
                 // The window closed meanwhile, so the chat isn't started, but
                 // it can be opened again.
-                this.update(cx, |this, _| this.lifecycle.opened(id)).ok();
+                this.update(cx, |this, cx| {
+                    this.runtime
+                        .update(cx, |runtime, _| runtime.lifecycle_mut().opened(id))
+                })
+                .ok();
             }
         })
         .detach();

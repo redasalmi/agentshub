@@ -82,7 +82,7 @@ impl Workspace {
         // Without a running CLI, even its last session belongs in history.
         let current = terminal.as_ref().and(session.map(|session| session.id));
         let transcript = session.map(|session| session.transcript_path.clone());
-        let store = self.store.clone();
+        let store = self.runtime.read(cx).store().clone();
         let history = cx.new(|cx| {
             // Without a terminal, the history is all there is to show.
             let mut history = History::new(Rc::new(store), id, terminal.is_none());
@@ -117,6 +117,7 @@ impl Workspace {
         chat_id: i64,
         agent: Agent,
         session: &store::Session,
+        cx: &App,
     ) -> bool {
         self.chats.iter().any(|chat| {
             chat.id != chat_id
@@ -127,7 +128,11 @@ impl Workspace {
                         && chat.recording.as_ref().is_some_and(|recording| {
                             !recording.done.is_closed() && recording.agent_id == session.agent_id
                         }))
-        }) || self.lifecycle.stopped_elsewhere(chat_id, session.id)
+        }) || self
+            .runtime
+            .read(cx)
+            .lifecycle()
+            .stopped_elsewhere(chat_id, session.id)
     }
 
     /// Shows a chat whose CLI wasn't started, with the reason above the
@@ -364,18 +369,23 @@ impl Workspace {
         session: Option<i64>,
         cx: &mut Context<Self>,
     ) {
-        self.lifecycle.stop(id, reaped.clone(), session);
-        let last = self.last_session(id);
+        self.runtime.update(cx, |runtime, _| {
+            runtime.lifecycle_mut().stop(id, reaped.clone(), session)
+        });
+        let last = self.last_session(id, cx);
         cx.spawn(async move |this, cx| {
             let session = last.await.or(session);
-            this.update(cx, |this, _| {
-                this.lifecycle.stopped_in(id, &reaped, session)
+            this.update(cx, |this, cx| {
+                this.runtime.update(cx, |runtime, _| {
+                    runtime.lifecycle_mut().stopped_in(id, &reaped, session)
+                })
             })
             .ok();
             // What the CLI writes as it exits is part of the session.
             reaped.recv().await.ok();
             this.update(cx, |this, cx| {
-                this.lifecycle.reaped(id, &reaped);
+                this.runtime
+                    .update(cx, |runtime, _| runtime.lifecycle_mut().reaped(id, &reaped));
                 this.read_sessions(session.into_iter().collect(), false, cx)
                     .detach();
             })
@@ -390,7 +400,8 @@ impl Workspace {
         }
         alerts::withdraw(id, cx);
         self.active = Some(id);
-        self.lifecycle.shown(id);
+        self.runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().shown(id));
         self.settings_shown = false;
         self.focus_chat(window, cx);
         self.sync_terminals(cx);

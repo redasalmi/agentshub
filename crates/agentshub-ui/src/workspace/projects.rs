@@ -64,10 +64,15 @@ impl Workspace {
                         .collect::<Vec<_>>()
                 })
                 .await;
-            let Ok(added) = this.update(cx, |this, _| {
+            let Ok(added) = this.update(cx, |this, cx| {
                 folders
                     .into_iter()
-                    .map(|path| (path.clone(), this.store.add_project(path)))
+                    .map(|path| {
+                        (
+                            path.clone(),
+                            this.runtime.read(cx).store().add_project(path),
+                        )
+                    })
                     .collect::<Vec<_>>()
             }) else {
                 return;
@@ -88,7 +93,9 @@ impl Workspace {
             // Selecting it looks up what can start in it, so it is listed
             // first.
             this.update(cx, |this, cx| {
-                this.catalog.select_when_listed(id);
+                this.runtime.update(cx, |runtime, _| {
+                    runtime.catalog_mut().select_when_listed(id)
+                });
                 this.refresh(cx);
             })
             .ok();
@@ -114,7 +121,9 @@ impl Workspace {
                 }
                 _ => return,
             };
-            let Ok(exported) = this.update(cx, |this, _| this.store.export(path.clone())) else {
+            let Ok(exported) = this.update(cx, |this, cx| {
+                this.runtime.read(cx).store().export(path.clone())
+            }) else {
                 return;
             };
             let message = match exported.await {
@@ -265,8 +274,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // The sidebar doesn't list a chat just added yet.
-        let listed = self.store.projects();
-        let asked = self.asked();
+        let listed = self.runtime.read(cx).store().projects();
+        let asked = self.asked(cx);
         cx.spawn_in(window, async move |this, cx| {
             let has_worktrees = listed
                 .await
@@ -287,7 +296,7 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 // The user may have shown something else meanwhile, or opened
                 // another dialog, which the question would be out of place in.
-                if this.asked() != asked || window.has_active_dialog(cx) {
+                if this.asked(cx) != asked || window.has_active_dialog(cx) {
                     return;
                 }
                 let this = cx.entity().downgrade();
@@ -315,7 +324,8 @@ impl Workspace {
     /// chats can't be opened, nor a chat added to it start.
     fn remove_project(&mut self, id: i64, cx: &mut Context<Self>) {
         let Some(path) = self
-            .catalog
+            .runtime
+            .read(cx)
             .projects()
             .iter()
             .find(|project| project.id == id)
@@ -323,12 +333,14 @@ impl Workspace {
         else {
             return;
         };
-        if !self.lifecycle.remove_project(id, path.clone()) {
+        if !self.runtime.update(cx, |runtime, _| {
+            runtime.lifecycle_mut().remove_project(id, path.clone())
+        }) {
             return;
         }
         // The listing has the chats asked for before it, including one still
         // being added, which the sidebar doesn't list yet.
-        let listed = self.store.projects();
+        let listed = self.runtime.read(cx).store().projects();
         cx.spawn(async move |this, cx| {
             let project = listed
                 .await
@@ -338,7 +350,9 @@ impl Workspace {
                 .find(|project| project.id == id && project.path == path);
             this.update(cx, |this, cx| match project {
                 Some(project) => this.remove_listed(project, cx),
-                None => this.lifecycle.project_removed(id),
+                None => this
+                    .runtime
+                    .update(cx, |runtime, _| runtime.lifecycle_mut().project_removed(id)),
             })
             .ok();
         })
@@ -349,23 +363,34 @@ impl Workspace {
         let id = project.id;
         let chats: Vec<i64> = project.chats.iter().map(|chat| chat.id).collect();
         for chat in project.chats {
-            self.lifecycle.cancel_opening(chat.id);
+            self.runtime.update(cx, |runtime, _| {
+                runtime.lifecycle_mut().cancel_opening(chat.id)
+            });
             let reaped = self
                 .stop_chat(chat.id, cx)
-                .or_else(|| self.lifecycle.reaping(chat.id));
+                .or_else(|| self.runtime.read(cx).lifecycle().reaping(chat.id));
             let worktree = chat
                 .worktree
                 .map(|worktree| (worktree, project.path.clone()));
-            self.lifecycle.mark_deleting(chat.id, worktree, reaped);
+            self.runtime.update(cx, |runtime, _| {
+                runtime
+                    .lifecycle_mut()
+                    .mark_deleting(chat.id, worktree, reaped)
+            });
         }
         // Dropping its terminal kills the shell.
         self.shells.remove(&project.path);
         self.sync_terminals(cx);
-        let removed = self.store.remove_project(id, project.path.clone());
+        let removed = self
+            .runtime
+            .read(cx)
+            .store()
+            .remove_project(id, project.path.clone());
         cx.spawn(async move |this, cx| {
             let removed = removed.await;
             this.update(cx, |this, cx| {
-                this.lifecycle.project_removed(id);
+                this.runtime
+                    .update(cx, |runtime, _| runtime.lifecycle_mut().project_removed(id));
                 if let Err(err) = &removed {
                     eprintln!("can't remove project {id}: {err:#}");
                     this.say(format!("Couldn't remove the project: {err}"), cx);

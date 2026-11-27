@@ -291,7 +291,7 @@ impl Workspace {
         sections.insert(PALETTE_START, (start_heading.into(), start));
         let sections = palette::open(
             sections,
-            Some(self.message_search(places)),
+            Some(self.message_search(places, cx)),
             on_pick,
             window,
             cx,
@@ -301,8 +301,8 @@ impl Workspace {
 
     /// Finds what was said in the chats, off the UI thread. `places` says
     /// where each chat is, to show beside what was found in it.
-    fn message_search(&self, places: HashMap<i64, SharedString>) -> palette::Search {
-        let store = self.store.clone();
+    fn message_search(&self, places: HashMap<i64, SharedString>, cx: &App) -> palette::Search {
+        let store = self.runtime.read(cx).store().clone();
         let places = Rc::new(places);
         Rc::new(move |query, cx| {
             let hits = store.search(query);

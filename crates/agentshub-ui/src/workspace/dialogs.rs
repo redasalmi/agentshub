@@ -67,7 +67,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self
-            .catalog
+            .runtime
+            .read(cx)
             .projects()
             .iter()
             .find(|project| project.id == project_id)
@@ -76,8 +77,8 @@ impl Workspace {
             return;
         };
         let path = project.path.clone();
-        let asked = self.ask_for_chat();
-        let store = self.store.clone();
+        let asked = self.ask_for_chat(cx);
+        let store = self.runtime.read(cx).store().clone();
         self._new_chat_lookup = Some(cx.spawn_in(window, async move |this, cx| {
             // Only the agents whose CLI is installed can start. Chats of the
             // others stay as they are. A chat can have a worktree of its own
@@ -98,7 +99,7 @@ impl Workspace {
                 // The user may have asked for something else meanwhile, opened
                 // another dialog, or removed the project and had its id given
                 // to another.
-                if this.asked() != asked
+                if this.asked(cx) != asked
                     || window.has_active_dialog(cx)
                     || !matches!(current, Ok(Some(path)) if path == project.path)
                 {
@@ -146,7 +147,7 @@ impl Workspace {
                 let worktree = use_worktree.get();
                 workspace
                     .update(cx, |this, cx| {
-                        let asked = this.ask_for_chat();
+                        let asked = this.ask_for_chat(cx);
                         this.new_chat(
                             project_id,
                             agent,

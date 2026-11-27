@@ -66,18 +66,21 @@ impl Workspace {
         // generation lets a result that has been superseded be dropped rather
         // than move a chat back to the session it has already left.
         let mut chats = Vec::new();
-        let looked_at = self.chats.iter_mut().filter_map(|chat| {
-            if chat.agent != Agent::Codex {
-                return None;
-            }
-            let pid = chat.pane.terminal.as_ref()?.terminal.read(cx).pid();
-            if !pid.may_be_running() {
-                return None;
-            }
-            chats.push((chat.id, chat.report.clone(), pid));
-            Some(&mut chat.codex)
+        let lookup = self.runtime.update(cx, |runtime, cx| {
+            let looked_at = self.chats.iter_mut().filter_map(|chat| {
+                if chat.agent != Agent::Codex {
+                    return None;
+                }
+                let pid = chat.pane.terminal.as_ref()?.terminal.read(cx).pid();
+                if !pid.may_be_running() {
+                    return None;
+                }
+                chats.push((chat.id, chat.report.clone(), pid));
+                Some(&mut chat.codex)
+            });
+            runtime.lifecycle_mut().look_up_codex(looked_at)
         });
-        let Some(lookup) = self.lifecycle.look_up_codex(looked_at) else {
+        let Some(lookup) = lookup else {
             return;
         };
         cx.spawn(async move |this, cx| {

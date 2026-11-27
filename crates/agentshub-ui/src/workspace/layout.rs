@@ -87,8 +87,9 @@ impl Workspace {
 
     pub(super) fn save_rail(&mut self, cx: &mut Context<Self>) {
         let settings = *cx.global::<Settings>();
-        let width = Settings::set_rail_width(&self.store, settings.rail_width, cx);
-        let names = Settings::set_project_names(&self.store, settings.project_names, cx);
+        let store = self.runtime.read(cx).store().clone();
+        let width = Settings::set_rail_width(&store, settings.rail_width, cx);
+        let names = Settings::set_project_names(&store, settings.project_names, cx);
         self.save_setting(
             async move {
                 width.await?;
@@ -114,7 +115,8 @@ impl Workspace {
 
     pub(super) fn save_shell_share(&mut self, cx: &mut Context<Self>) {
         let share = cx.global::<Settings>().shell_share;
-        let saved = Settings::set_shell_share(&self.store, share, cx);
+        let store = self.runtime.read(cx).store().clone();
+        let saved = Settings::set_shell_share(&store, share, cx);
         self.save_setting(saved, cx);
     }
 
@@ -123,7 +125,8 @@ impl Workspace {
         if cx.global::<Settings>().sidebar_width == width {
             return;
         }
-        let saved = Settings::set_sidebar_width(&self.store, width, cx);
+        let store = self.runtime.read(cx).store().clone();
+        let saved = Settings::set_sidebar_width(&store, width, cx);
         self.save_setting(saved, cx);
     }
 }

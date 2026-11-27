@@ -13,17 +13,20 @@ impl Workspace {
         reason = "the shutdown steps run in order, each on what the last took from the lifecycle"
     )]
     pub(super) fn shutdown(&mut self, cx: &mut App) {
+        let store = self.runtime.read(cx).store().clone();
         // The changes the user made are saved before anything else, so that a
         // chat whose delete is saved can have its worktree removed.
-        self.store.wait_for_writes();
+        store.wait_for_writes();
         // A removal confirmed while its project's chats were being listed
         // isn't saved yet, so it is here, with their worktrees.
-        let removing = self.lifecycle.take_removing();
+        let removing = self
+            .runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().take_removing());
         // Their chats are gone with them, so nothing is read or recorded for
         // them below. Their CLIs are still stopped.
         let mut removed = HashSet::new();
         if !removing.is_empty()
-            && let Ok(projects) = smol::block_on(self.store.projects())
+            && let Ok(projects) = smol::block_on(store.projects())
         {
             for (id, path) in removing {
                 let Some(project) = projects
@@ -32,12 +35,18 @@ impl Workspace {
                 else {
                     continue;
                 };
-                match smol::block_on(self.store.remove_project(id, path.clone())) {
+                match smol::block_on(store.remove_project(id, path.clone())) {
                     Ok(()) => {
                         for chat in &project.chats {
                             removed.insert(chat.id);
                             if let Some(worktree) = &chat.worktree {
-                                self.lifecycle.track_removal(worktree, &path, Vec::new());
+                                self.runtime.update(cx, |runtime, _| {
+                                    runtime.lifecycle_mut().track_removal(
+                                        worktree,
+                                        &path,
+                                        Vec::new(),
+                                    )
+                                });
                             }
                         }
                     }
@@ -46,23 +55,28 @@ impl Workspace {
             }
         }
         let mut deleted_reaped = Vec::new();
-        for (id, deleting) in self.lifecycle.take_deleting() {
+        for (id, deleting) in self
+            .runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().take_deleting())
+        {
             match deleting.worktree {
-                Some((worktree, project))
-                    if matches!(smol::block_on(self.store.chat(id)), Ok(None)) =>
-                {
-                    self.lifecycle.track_removal(
-                        &worktree,
-                        &project,
-                        deleting.reaped.into_iter().collect(),
-                    );
+                Some((worktree, project)) if matches!(smol::block_on(store.chat(id)), Ok(None)) => {
+                    self.runtime.update(cx, |runtime, _| {
+                        runtime.lifecycle_mut().track_removal(
+                            &worktree,
+                            &project,
+                            deleting.reaped.into_iter().collect(),
+                        )
+                    });
                 }
                 _ => deleted_reaped.extend(deleting.reaped),
             }
         }
-        let adding = self.lifecycle.take_adding();
+        let adding = self
+            .runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().take_adding());
         if !adding.is_empty()
-            && let Ok(projects) = smol::block_on(self.store.projects())
+            && let Ok(projects) = smol::block_on(store.projects())
         {
             let taken: HashSet<&Path> = projects
                 .iter()
@@ -71,8 +85,11 @@ impl Workspace {
                 .collect();
             for (worktree, project) in adding {
                 if !taken.contains(worktree.root.as_path()) {
-                    self.lifecycle
-                        .track_removal(&worktree, &project, Vec::new());
+                    self.runtime.update(cx, |runtime, _| {
+                        runtime
+                            .lifecycle_mut()
+                            .track_removal(&worktree, &project, Vec::new())
+                    });
                 }
             }
         }
@@ -82,7 +99,9 @@ impl Workspace {
         // left before were read when they left them.
         let mut sessions = self.reading.clone();
         sessions.extend(
-            self.lifecycle
+            self.runtime
+                .read(cx)
+                .lifecycle()
                 .stopping()
                 .filter(|(id, ..)| !removed.contains(id))
                 .filter_map(|(.., session)| session),
@@ -91,18 +110,30 @@ impl Workspace {
         // can't run anymore, but it is the chat's last.
         let chats = self.chats.iter().map(|chat| chat.id);
         let chats: Vec<i64> = chats
-            .chain(self.lifecycle.stopping().map(|(id, ..)| id))
+            .chain(
+                self.runtime
+                    .read(cx)
+                    .lifecycle()
+                    .stopping()
+                    .map(|(id, ..)| id),
+            )
             .chain(self.reading_last.iter().copied())
             .filter(|id| !removed.contains(id))
             .collect();
         for id in chats {
-            sessions.extend(smol::block_on(self.last_session(id)));
+            sessions.extend(smol::block_on(self.last_session(id, cx)));
         }
         // A chat being opened reads its last session on a thread of its own,
         // which isn't in `reading`, so it is read again here, the way
         // `open_chat` reads it.
-        for id in self.lifecycle.opening().filter(|id| !removed.contains(id)) {
-            let listed = smol::block_on(self.store.sessions(id)).unwrap_or_else(|err| {
+        for id in self
+            .runtime
+            .read(cx)
+            .lifecycle()
+            .opening()
+            .filter(|id| !removed.contains(id))
+        {
+            let listed = smol::block_on(store.sessions(id)).unwrap_or_else(|err| {
                 eprintln!("can't list the sessions of chat {id}: {err}");
                 Vec::new()
             });
@@ -121,8 +152,7 @@ impl Workspace {
                     sessions::codex_session(&terminal.terminal.read(cx).pid())
             {
                 match smol::block_on(
-                    self.store
-                        .record_session(chat.id, chat.agent, agent_id, path, None),
+                    store.record_session(chat.id, chat.agent, agent_id, path, None),
                 ) {
                     Ok(recorded) => sessions.push(recorded.session_id),
                     Err(err) => eprintln!("can't record the last Codex session: {err}"),
@@ -137,7 +167,9 @@ impl Workspace {
             .filter_map(|chat| chat.pane.terminal.as_ref())
             .map(|terminal| terminal.terminal.read(cx).shutdown())
             .chain(
-                self.lifecycle
+                self.runtime
+                    .read(cx)
+                    .lifecycle()
                     .stopping()
                     .map(|(_, reaped, _)| reaped.clone()),
             )
@@ -147,7 +179,7 @@ impl Workspace {
                     .values()
                     .map(|shell| shell.terminal.read(cx).shutdown()),
             )
-            .chain(self.lifecycle.removal_waits().cloned())
+            .chain(self.runtime.read(cx).lifecycle().removal_waits().cloned())
             .collect();
         terminal::wait_reaped(reaped);
         #[cfg(target_os = "linux")]
@@ -158,14 +190,17 @@ impl Workspace {
         worktree::abandon(std::mem::take(&mut self.checkouts));
         // The worktrees of deleted chats, whose tasks won't run anymore. One
         // being removed already is waited for.
-        for job in self.lifecycle.take_removals() {
+        for job in self
+            .runtime
+            .update(cx, |runtime, _| runtime.lifecycle_mut().take_removals())
+        {
             if let Some(Err(err)) = take_and_remove(&job) {
                 eprintln!("can't remove a worktree on shutdown: {err:#}");
             }
         }
         for chat in self.chats.iter().filter(|chat| !removed.contains(&chat.id)) {
             if let Err(err) = import_chat(
-                &self.store,
+                &store,
                 &mut self.reports,
                 chat.id,
                 chat.agent,
@@ -178,12 +213,12 @@ impl Workspace {
         sessions.sort_unstable();
         sessions.dedup();
         for id in sessions {
-            if let Err(err) = smol::block_on(self.store.read_transcript(id)) {
+            if let Err(err) = smol::block_on(store.read_transcript(id)) {
                 eprintln!("can't read session {id} on shutdown: {err}");
             }
         }
         // The sessions recorded here left others, which the store reads.
-        self.store.wait_for_writes();
+        store.wait_for_writes();
         self.reports.remove();
     }
 }

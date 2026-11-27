@@ -35,7 +35,7 @@ impl Workspace {
         let mut chats = Vec::new();
         let mut archived = Vec::new();
         let mut places = HashMap::new();
-        for project in self.catalog.projects() {
+        for project in self.runtime.read(cx).projects() {
             for chat in &project.chats {
                 // An archived project's chats are archived along with it.
                 if let Some(at) = chat.archived_at.or(project.archived_at) {
@@ -94,7 +94,7 @@ impl Workspace {
             .map(|(project, (_, agents))| start_entries(project, &agents))
             .unwrap_or_default();
 
-        for project in self.catalog.projects() {
+        for project in self.runtime.read(cx).projects() {
             if let Some(at) = project.archived_at {
                 archived.push((
                     at,
@@ -117,7 +117,8 @@ impl Workspace {
         let archived: Vec<_> = archived.into_iter().map(|(_, entry)| entry).collect();
 
         let projects = self
-            .catalog
+            .runtime
+            .read(cx)
             .projects()
             .iter()
             .filter(|project| project.archived_at.is_none())
