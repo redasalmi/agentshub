@@ -18,6 +18,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use agentshub_app::settings::Layout;
 use agentshub_core::agent::Agent;
 use agentshub_core::format::{home_relative, plural};
 use agentshub_core::store;
@@ -496,6 +497,73 @@ pub fn import(
     });
 }
 
+/// What restarting into another layout stops, or `None` when no agent runs.
+pub fn restart_body(running: usize) -> Option<String> {
+    match running {
+        0 => None,
+        1 => Some(
+            "This stops the agent running now; its chat picks its conversation up again \
+             when you open it."
+                .to_string(),
+        ),
+        n => Some(format!(
+            "This stops the {n} agents running now; each chat picks its conversation up \
+             again when you open it."
+        )),
+    }
+}
+
+/// Asks whether to restart into `layout` now, with `running` agents to stop.
+/// `on_restart` is called once they confirm; `on_later` when the dialog closes
+/// any other way.
+pub fn restart_for_layout(
+    window: &mut Window,
+    cx: &mut App,
+    layout: Layout,
+    running: usize,
+    on_restart: impl Fn(&mut Window, &mut App) + 'static,
+    on_later: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    let (on_restart, on_later) = (Rc::new(on_restart), Rc::new(on_later));
+    let restarted = Rc::new(Cell::new(false));
+    window.open_alert_dialog(cx, move |alert, _, cx| {
+        let (on_restart, on_later, restarted) = (
+            Rc::clone(&on_restart),
+            Rc::clone(&on_later),
+            Rc::clone(&restarted),
+        );
+        alert
+            .confirm()
+            .title(format!(
+                "Restart Agents Hub to use the {} layout?",
+                layout.label()
+            ))
+            .children(restart_body(running).map(|body| {
+                div()
+                    .text_sm()
+                    .line_height(rems(1.4))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(body)
+            }))
+            .ok_text("Restart now")
+            .cancel_text("Later")
+            .when(running > 0, |alert| alert.ok_variant(ButtonVariant::Danger))
+            .on_ok({
+                let restarted = Rc::clone(&restarted);
+                move |_, window, cx| {
+                    restarted.set(true);
+                    on_restart(window, cx);
+                    true
+                }
+            })
+            .on_close(move |_, window, cx| {
+                if !restarted.get() {
+                    on_later(window, cx);
+                }
+            })
+    });
+}
+
 /// The projects of a database about to be imported, each with its first few
 /// chats.
 fn render_import(projects: &[store::Project], theme: &Theme) -> impl IntoElement {
@@ -563,7 +631,7 @@ fn render_import(projects: &[store::Project], theme: &Theme) -> impl IntoElement
 mod tests {
     use agentshub_core::agent::Agent;
 
-    use super::starting_agent;
+    use super::{restart_body, starting_agent};
 
     #[test]
     fn keeps_the_agent_picked_if_the_project_has_it() {
@@ -575,5 +643,22 @@ mod tests {
         );
         assert_eq!(starting_agent(&agents, None), Some(Agent::Claude));
         assert_eq!(starting_agent(&[], Some(Agent::Pi)), None);
+    }
+
+    #[test]
+    fn restart_body_counts_the_running_agents() {
+        assert_eq!(restart_body(0), None);
+        assert_eq!(
+            restart_body(1).as_deref(),
+            Some(
+                "This stops the agent running now; its chat picks its conversation up again when you open it."
+            )
+        );
+        assert_eq!(
+            restart_body(3).as_deref(),
+            Some(
+                "This stops the 3 agents running now; each chat picks its conversation up again when you open it."
+            )
+        );
     }
 }
