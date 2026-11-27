@@ -365,7 +365,7 @@ pub fn available() -> bool {
 mod tests {
     use super::*;
 
-    fn adopted(desktop_id: &str) -> Vec<String> {
+    fn active_units(pattern: String) -> Vec<String> {
         let Some(bus) = BUS.as_ref() else {
             return Vec::new();
         };
@@ -374,10 +374,7 @@ mod tests {
             PATH,
             Some(MANAGER),
             "ListUnitsByPatterns",
-            &(
-                vec!["active"],
-                vec![format!("app-{PREFIX}-{desktop_id}-*.scope")],
-            ),
+            &(vec!["active"], vec![pattern]),
         )
         .and_then(|reply| reply.body().deserialize::<Vec<Unit>>())
         .map(|units| units.into_iter().map(|(name, ..)| name).collect())
@@ -395,10 +392,15 @@ mod tests {
             .spawn()
             .unwrap();
         adopt(child.id(), &id);
-        let scopes = adopted(&id);
+        let scopes = active_units(format!("app-{PREFIX}-{id}-*.scope"));
+        let leftovers = active_units(format!("{PREFIX}-*.scope"));
         child.kill().ok();
         child.wait().ok();
         assert_eq!(scopes.len(), 1, "{scopes:?}");
-        assert!(!scopes[0].starts_with(PREFIX));
+        assert!(
+            !leftovers.contains(&scopes[0]),
+            "stop_leftovers would stop {}",
+            scopes[0]
+        );
     }
 }

@@ -360,6 +360,12 @@ pub fn open(found: &Found, folder: &Path, adopt: fn(u32, &str)) -> io::Result<()
     let Some((program, args)) = args.split_first() else {
         return Err(io::Error::other("nothing to start"));
     };
+    if !folder.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("the folder {} no longer exists", folder.display()),
+        ));
+    }
     let mut child = Command::new(program)
         .args(args)
         .current_dir(folder)
@@ -380,18 +386,20 @@ pub fn open(found: &Found, folder: &Path, adopt: fn(u32, &str)) -> io::Result<()
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    static ADOPTED: AtomicU32 = AtomicU32::new(0);
+    /// The desktop ids `open` handed a pid to.
+    static ADOPTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-    fn record(pid: u32, _: &str) {
-        ADOPTED.store(pid, Ordering::SeqCst);
+    fn record(pid: u32, desktop_id: &str) {
+        assert_ne!(pid, 0);
+        ADOPTED.lock().unwrap().push(desktop_id.to_owned());
     }
 
     /// An editor that writes its folder and arguments to `out`, then sleeps
     /// `sleep` seconds.
-    fn fake_editor(sleep: u32) -> (Found, PathBuf, PathBuf) {
+    fn fake_editor(sleep: u32, desktop_id: &'static str) -> (Found, PathBuf, PathBuf) {
         let base = temp_dir();
         let script = base.join("editor");
         fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > \"$OUT.part\"\nmv \"$OUT.part\" \"$OUT\"\nsleep \"$SLEEP\"\n").unwrap();
@@ -401,7 +409,7 @@ mod tests {
         fs::create_dir_all(&folder).unwrap();
         let found = Found {
             editor: Editor::Zed,
-            desktop_id: "dev.zed.Zed",
+            desktop_id,
             exec: format!(
                 "env \"OUT={}\" SLEEP={sleep} \"{}\" %U",
                 out.display(),
@@ -426,11 +434,11 @@ mod tests {
 
     #[test]
     fn open_runs_the_editor_in_the_folder() {
-        let (found, folder, out) = fake_editor(0);
+        let (found, folder, out) = fake_editor(0, "test-runs");
         open(&found, &folder, record).unwrap();
         wait_for(&out);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while ADOPTED.load(Ordering::SeqCst) == 0 {
+        while !ADOPTED.lock().unwrap().iter().any(|id| id == "test-runs") {
             assert!(Instant::now() < deadline, "the editor was never adopted");
             thread::sleep(Duration::from_millis(20));
         }
@@ -442,7 +450,7 @@ mod tests {
 
     #[test]
     fn open_returns_before_the_editor_exits() {
-        let (found, folder, out) = fake_editor(3);
+        let (found, folder, out) = fake_editor(3, "test-returns");
         let start = Instant::now();
         open(&found, &folder, record).unwrap();
         assert!(start.elapsed() < Duration::from_secs(1));
@@ -451,8 +459,12 @@ mod tests {
 
     #[test]
     fn open_fails_for_missing_folder() {
-        let (found, _, _) = fake_editor(0);
-        assert!(open(&found, Path::new("/nonexistent/agentshub"), record).is_err());
+        let (found, _, _) = fake_editor(0, "test-missing");
+        let err = open(&found, Path::new("/nonexistent/agentshub"), record).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the folder /nonexistent/agentshub no longer exists"
+        );
     }
 
     fn temp_dir() -> PathBuf {
@@ -676,6 +688,19 @@ mod tests {
                 "--file-forwarding",
                 "com.visualstudio.code",
                 "@@",
+                "/p",
+                "@@"
+            ]
+        );
+        let exec = "/usr/bin/flatpak run --command=zed dev.zed.Zed @@u %U @@";
+        assert_eq!(
+            expand_exec(exec, Path::new("/p")).unwrap(),
+            [
+                "/usr/bin/flatpak",
+                "run",
+                "--command=zed",
+                "dev.zed.Zed",
+                "@@u",
                 "/p",
                 "@@"
             ]
