@@ -555,7 +555,8 @@ pub fn editor_menu(
 }
 
 /// Opens the chat's folder in the default editor; its menu changes which one
-/// that is.
+/// that is. A filled surface, the one ghost buttons take on hover, tells it
+/// apart from the header's plain buttons as a control with a menu.
 fn editor_button(current: &EditorChoice, all: Vec<EditorChoice>, on: On) -> impl IntoElement {
     let editor = current.editor;
     let set: SetEditor = {
@@ -564,11 +565,10 @@ fn editor_button(current: &EditorChoice, all: Vec<EditorChoice>, on: On) -> impl
     };
     let open = format!("Open in {}", editor.name());
     DropdownButton::new("editor")
-        .ghost()
+        .secondary()
         .small()
         .button(
             Button::new("open-editor")
-                .ghost()
                 .small()
                 .child(editor_icon(current.icon.as_ref()))
                 .accessibility_label(open.clone())
