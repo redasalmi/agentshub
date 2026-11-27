@@ -12,6 +12,7 @@ members = [
     "crates/agentshub-runtime",
     "crates/agentshub-ui-classic",
     "crates/agentshub-ui-kit",
+    "crates/agentshub-ui-triage",
 ]
 resolver = "3"
 

@@ -29,6 +29,9 @@ scan crates/agentshub-core/src 'gpui_kit|gpui::|\bWindow\b|\bEntity<|\bContext<'
 scan crates/agentshub-ui-classic/src '\bStore\b|rusqlite|std::fs|std::process|portable_pty|notify::|agentshub_core::(lifecycle|reports|sessions|worktree|process|transcript)|agentshub_ui_triage'
 # ui-kit is what the layouts share; it knows no layout.
 scan crates/agentshub-ui-kit/src '\bStore\b|rusqlite|std::fs|std::process|portable_pty|notify::|agentshub_core::(lifecycle|reports|sessions|worktree|process|transcript)|agentshub_ui_classic|agentshub_ui_triage|agentshub_ui::'
+# ui-triage renders what the runtime holds and names no other layout, under
+# the same limits as ui-classic.
+scan crates/agentshub-ui-triage/src '\bStore\b|rusqlite|std::fs|std::process|portable_pty|notify::|agentshub_core::(lifecycle|reports|sessions|worktree|process|transcript)|agentshub_ui_classic'
 # runtime sits below the UI.
 scan crates/agentshub-runtime/src 'agentshub_ui|crate::ui'
 # platform is an adapter layer.

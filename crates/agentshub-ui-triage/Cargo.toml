@@ -1,0 +1,12 @@
+[package]
+name = "agentshub-ui-triage"
+version = "0.19.1"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[dependencies]
+agentshub-ui-kit = { path = "../agentshub-ui-kit", version = "0.19.1" }
+
+[lints]
+workspace = true

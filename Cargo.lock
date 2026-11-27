@@ -219,6 +219,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentshub-ui-triage"
+version = "0.19.1"
+dependencies = [
+ "agentshub-ui-kit",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
