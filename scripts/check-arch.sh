@@ -24,9 +24,9 @@ scan() {
 
 # core must build and test without the UI framework.
 scan crates/agentshub-core/src 'gpui_kit|gpui::|\bWindow\b|\bEntity<|\bContext<'
-# ui renders what the runtime holds; it does not persist, run processes or
-# touch the filesystem.
-scan crates/agentshub-ui/src '\bStore\b|rusqlite|std::fs|std::process|portable_pty|notify::|agentshub_core::(lifecycle|reports|sessions|worktree|process|transcript)'
+# ui-classic renders what the runtime holds; it does not persist, run
+# processes or touch the filesystem.
+scan crates/agentshub-ui-classic/src '\bStore\b|rusqlite|std::fs|std::process|portable_pty|notify::|agentshub_core::(lifecycle|reports|sessions|worktree|process|transcript)'
 # ui-kit is what the layouts share; it knows no layout.
 scan crates/agentshub-ui-kit/src '\bStore\b|rusqlite|std::fs|std::process|portable_pty|notify::|agentshub_core::(lifecycle|reports|sessions|worktree|process|transcript)|agentshub_ui_classic|agentshub_ui_triage|agentshub_ui::'
 # runtime sits below the UI.

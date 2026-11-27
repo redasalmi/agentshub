@@ -117,7 +117,7 @@ dependencies = [
  "agentshub-core",
  "agentshub-platform",
  "agentshub-runtime",
- "agentshub-ui",
+ "agentshub-ui-classic",
  "agentshub-ui-kit",
  "gpui-kit",
 ]
@@ -186,7 +186,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentshub-ui"
+name = "agentshub-ui-classic"
 version = "0.19.1"
 dependencies = [
  "agentshub-app",

@@ -7,7 +7,7 @@ pub use agentshub_core::{
 #[cfg(target_os = "linux")]
 pub use agentshub_platform::scope;
 pub use agentshub_platform::{instance, motion, sigterm};
-pub use agentshub_ui::{tray, window, workspace};
+pub use agentshub_ui_classic::{tray, window, workspace};
 pub use agentshub_ui_kit::{appearance, history};
 pub use window::{Contents, open_window};
 
