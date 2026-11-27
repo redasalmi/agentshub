@@ -26,10 +26,6 @@ impl Workspace {
                 _ => self.focus_chat(window, cx),
             }
         }
-        // Selecting a project is asking to show something, so a new chat or
-        // New Chat dialog asked for before doesn't take the view from it.
-        self.runtime
-            .update(cx, |runtime, _| runtime.lifecycle_mut().navigate());
         self.look_up_installed(cx);
         cx.notify();
     }
@@ -60,7 +56,7 @@ impl Workspace {
         // The runtime starts no shell in a project being removed, and nothing
         // changes.
         let selected = self.sidebar.read(cx).selected().map(|project| project.id);
-        if selected.is_some_and(|id| self.runtime.read(cx).lifecycle().is_removing_project(id)) {
+        if selected.is_some_and(|id| self.runtime.read(cx).is_removing_project(id)) {
             return;
         }
         self.apply(Intent::ToggleShell, cx);

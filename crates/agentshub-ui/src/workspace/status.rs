@@ -13,42 +13,7 @@ impl Workspace {
     /// The same, reloading the expanded sessions whose transcript read, in
     /// `changed`, found something.
     pub(super) fn refresh_after(&mut self, changed: &[i64], cx: &mut Context<Self>) {
-        if self.runtime.read(cx).catalog().unsaved() == 0 {
-            let listed = self.runtime.read(cx).store().projects();
-            let listing = cx.spawn(async move |this, cx| {
-                let listed = listed.await;
-                this.update(cx, |this, cx| {
-                    // A change shown since is listed once it's saved.
-                    if this.runtime.read(cx).catalog().unsaved() > 0 {
-                        return;
-                    }
-                    let shell = this.shown_shell(cx).map(|(cwd, _)| cwd);
-                    match listed {
-                        Ok(projects) => {
-                            this.runtime
-                                .update(cx, |runtime, cx| runtime.listed(projects, cx));
-                            this.sync_catalog(cx);
-                        }
-                        Err(err) => eprintln!("can't list the projects: {err}"),
-                    }
-                    if let Some(id) = this
-                        .runtime
-                        .update(cx, |runtime, _| runtime.catalog_mut().take_selected())
-                    {
-                        this.sidebar
-                            .update(cx, |sidebar, cx| sidebar.select(id, cx));
-                    }
-                    // Which shell shows depends on the projects' chats (see
-                    // `Runtime::listed`).
-                    if this.shown_shell(cx).map(|(cwd, _)| cwd) != shell {
-                        cx.notify();
-                    }
-                })
-                .ok();
-            });
-            self.runtime
-                .update(cx, |runtime, _| runtime.catalog_mut().listing(listing));
-        }
+        self.apply(Intent::ListProjects, cx);
         let runtime = self.runtime.read(cx);
         let histories: Vec<_> = self
             .panes

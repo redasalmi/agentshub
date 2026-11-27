@@ -8,9 +8,7 @@ impl Workspace {
     pub fn show_settings(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_shown = shown;
         // A chat still opening mustn't take the view from the settings.
-        self.runtime.update(cx, |runtime, _| {
-            runtime.lifecycle_mut().show_settings(shown)
-        });
+        self.apply(Intent::ShowSettings(shown), cx);
         if shown {
             self.focus_handle.focus(window, cx);
         } else {

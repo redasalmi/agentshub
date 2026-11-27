@@ -68,6 +68,9 @@ impl Runtime {
     /// for.
     pub(crate) fn select_project(&mut self, project: Option<i64>, cx: &App) {
         self.selected = project;
+        // Selecting a project is asking to show something, so a new chat or
+        // New Chat dialog asked for before doesn't take the view from it.
+        self.lifecycle.navigate();
         self.sync_terminals(cx);
     }
 
@@ -90,8 +93,7 @@ impl Runtime {
     /// Lists `projects` as the store has them. Which shell shows depends on
     /// the projects' chats, and a new chat shown before they list it got its
     /// project's shell meanwhile.
-    #[doc(hidden)]
-    pub fn listed(&mut self, projects: Vec<Project>, cx: &App) {
+    pub(crate) fn listed(&mut self, projects: Vec<Project>, cx: &App) {
         let shell = self.shell_cwd();
         self.catalog.listed(projects);
         if self.shell_cwd() != shell {

@@ -16,6 +16,9 @@ pub enum RuntimeEvent {
     /// ones whose read found something, which the chats' histories reload
     /// where they show them.
     HistoryChanged { sessions: Vec<i64> },
+    /// The projects and chats were listed again as the database has them
+    /// (see `Intent::ListProjects`).
+    Listed,
     /// Something to tell the user in a notification.
     Notice(String),
     /// Something to tell the user in a notification with a button that

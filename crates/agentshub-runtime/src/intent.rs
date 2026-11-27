@@ -85,7 +85,8 @@ pub enum Intent {
     /// them: if one can't be saved, it lasts until the app quits.
     SaveSettings(Vec<(&'static str, Value)>),
     /// The sidebar selected another project, or none, whose shell the panel
-    /// is for (see `Runtime::shell`).
+    /// is for (see `Runtime::shell`). Selecting one is asking to show it, so
+    /// a chat asked for before doesn't take the view once it opens.
     ProjectSelected(Option<i64>),
     /// Whether the settings cover the terminals, so that none of them builds
     /// frames. The tray covers them too (see `SetHidden`).
@@ -94,6 +95,13 @@ pub enum Intent {
     /// closed, no terminal builds frames, and the user can't see the shown
     /// chat.
     SetHidden(bool),
+    /// The settings show in place of the chat, or the chat again in their
+    /// place. A chat still opening doesn't take the view from the settings.
+    ShowSettings(bool),
+    /// Lists the projects and chats again as the database has them (see
+    /// `RuntimeEvent::Listed`), unless a change shown isn't saved yet:
+    /// saving it lists them.
+    ListProjects,
     /// Shows the shell the panel is for, starting it if it isn't running, or
     /// hides it if it shows and nothing covers it (see `Runtime::shell`).
     ToggleShell,

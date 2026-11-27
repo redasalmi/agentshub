@@ -14,11 +14,11 @@ impl Workspace {
         let terminal = runtime.terminal(id);
         // Without a running CLI, even its last session belongs in history.
         let current = runtime.current_session(id);
-        let store = runtime.store().clone();
+        let source = runtime.history_source();
         let blocked = terminal.is_none();
         let history = cx.new(|cx| {
             // Without a terminal, the history is all there is to show.
-            let mut history = History::new(Rc::new(store), id, blocked);
+            let mut history = History::new(source, id, blocked);
             history.refresh(current, &[], cx);
             history
         });

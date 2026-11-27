@@ -77,6 +77,11 @@ impl Workspace {
                 this.refresh(cx);
             }
             RuntimeEvent::HistoryChanged { sessions } => this.refresh_after(sessions, cx),
+            RuntimeEvent::Listed => {
+                this.sync_catalog(cx);
+                // Which shell shows depends on the projects' chats.
+                cx.notify();
+            }
             RuntimeEvent::Notice(message) => this.say(message.clone(), cx),
             RuntimeEvent::ChatStarted(id) => this.chat_started(*id, cx),
             RuntimeEvent::ChatExited(id) => this.chat_exited(*id, cx),

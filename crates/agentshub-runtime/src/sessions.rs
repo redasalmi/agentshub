@@ -281,7 +281,7 @@ impl Runtime {
 
     /// The session a chat's CLI is in, as listed once the sessions asked to
     /// be recorded so far are, which the chat may not know of yet: its last.
-    pub fn last_session(&self, chat_id: i64) -> impl Future<Output = Option<i64>> + use<> {
+    pub(crate) fn last_session(&self, chat_id: i64) -> impl Future<Output = Option<i64>> + use<> {
         let sessions = self.store.sessions(chat_id);
         async move {
             let mut sessions = sessions
@@ -319,7 +319,7 @@ impl Runtime {
     /// Reads sessions' transcripts on a blocking thread, then shows what
     /// changed. Marks their chats active when `touch` is set, as a finished
     /// turn does but browsing history doesn't.
-    pub fn read_sessions(
+    pub(crate) fn read_sessions(
         &mut self,
         sessions: Vec<i64>,
         touch: bool,

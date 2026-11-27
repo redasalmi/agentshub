@@ -3,13 +3,14 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use agentshub_app::bootstrap::Opened;
 use agentshub_app::catalog::Catalog;
 use agentshub_app::settings::Settings;
 use agentshub_core::agent::Agent;
 use agentshub_core::lifecycle::Lifecycle;
-use agentshub_core::store::{Change, Imported, Project, Store};
+use agentshub_core::store::{Change, HistorySource, Hit, Imported, Project, Store};
 use agentshub_core::worktree;
 use gpui_kit::{Context, EventEmitter, SharedString, Task};
 
@@ -130,6 +131,27 @@ impl Runtime {
         self.hidden
     }
 
+    /// The projects and chats as the database has them, which lists a chat
+    /// just added before the catalog does.
+    pub fn saved_projects(&self) -> impl Future<Output = anyhow::Result<Vec<Project>>> + use<> {
+        self.store.projects()
+    }
+
+    /// Whether project `id` is being removed, which starts nothing in it.
+    pub fn is_removing_project(&self, id: i64) -> bool {
+        self.lifecycle.is_removing_project(id)
+    }
+
+    /// Finds what was said in the chats.
+    pub fn search(&self, query: String) -> impl Future<Output = anyhow::Result<Vec<Hit>>> + use<> {
+        self.store.search(query)
+    }
+
+    /// What a chat's history reads its sessions and their items from.
+    pub fn history_source(&self) -> Rc<dyn HistorySource> {
+        Rc::new(self.store.clone())
+    }
+
     /// Why the database can't be used, if it can't.
     pub fn broken(&self) -> Option<&SharedString> {
         self.broken.as_ref()
@@ -171,6 +193,8 @@ impl Runtime {
             Intent::ProjectSelected(project) => self.select_project(project, cx),
             Intent::SetCovered(covered) => self.set_covered(covered, cx),
             Intent::SetHidden(hidden) => self.set_hidden(hidden, cx),
+            Intent::ShowSettings(shown) => self.lifecycle.show_settings(shown),
+            Intent::ListProjects => self.list_projects(cx),
             Intent::ToggleShell => self.toggle_shell(cx),
             Intent::OpenInEditor { chat, editor } => self.open_in_editor(chat, editor, cx),
         }
@@ -198,29 +222,34 @@ impl Runtime {
         .detach();
     }
 
-    #[doc(hidden)]
-    pub fn store(&self) -> &Store {
-        &self.store
-    }
-
-    #[doc(hidden)]
-    pub fn lifecycle(&self) -> &Lifecycle {
-        &self.lifecycle
-    }
-
-    #[doc(hidden)]
-    pub fn lifecycle_mut(&mut self) -> &mut Lifecycle {
-        &mut self.lifecycle
-    }
-
-    #[doc(hidden)]
-    pub fn catalog(&self) -> &Catalog {
-        &self.catalog
-    }
-
-    #[doc(hidden)]
-    pub fn catalog_mut(&mut self) -> &mut Catalog {
-        &mut self.catalog
+    /// Lists the projects and chats again as the database has them, unless
+    /// a change shown isn't saved yet: they are listed once it is.
+    fn list_projects(&mut self, cx: &mut Context<Self>) {
+        if self.catalog.unsaved() > 0 {
+            return;
+        }
+        let listed = self.store.projects();
+        let listing = cx.spawn(async move |this, cx| {
+            let listed = listed.await;
+            this.update(cx, |this, cx| {
+                // A change shown since is listed once it's saved.
+                if this.catalog.unsaved() > 0 {
+                    return;
+                }
+                match listed {
+                    Ok(projects) => {
+                        this.listed(projects, cx);
+                        cx.emit(RuntimeEvent::Listed);
+                    }
+                    Err(err) => eprintln!("can't list the projects: {err}"),
+                }
+                if let Some(id) = this.catalog.take_selected() {
+                    cx.emit(RuntimeEvent::SelectProject(id));
+                }
+            })
+            .ok();
+        });
+        self.catalog.listing(listing);
     }
 }
 
