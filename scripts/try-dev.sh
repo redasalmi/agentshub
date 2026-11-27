@@ -74,6 +74,12 @@ trap 'exit 130' INT TERM
 data_home=${XDG_DATA_HOME:-$HOME/.local/share}
 [ -d "$data_home/fonts" ] && ln -s "$data_home/fonts" "$work/data/fonts"
 
+# So are the editors installed for you alone and their icons, which the chat
+# header's editor button lists.
+for dir in applications icons; do
+	if [ -d "$data_home/$dir" ]; then ln -s "$data_home/$dir" "$work/data/$dir"; fi
+done
+
 # The agents get your own data folder and session bus back, so they work as
 # they do anywhere else.
 restore=""
