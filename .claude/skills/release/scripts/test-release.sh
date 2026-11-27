@@ -31,7 +31,7 @@ fixture() {
 	remote="$root/remote.git"
 	work="$root/work"
 	export CALLS="$root/calls.log" GH_STATE="$root/gh-runs"
-	git init -q --bare "$remote"
+	git init -q --bare --initial-branch=main "$remote"
 	git clone -q "$repo" "$work"
 	git -C "$work" checkout -q -B main
 	git -C "$work" remote set-url origin "$remote"
