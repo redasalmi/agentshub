@@ -119,6 +119,7 @@ dependencies = [
  "agentshub-runtime",
  "agentshub-ui-classic",
  "agentshub-ui-kit",
+ "agentshub-ui-triage",
  "gpui-kit",
 ]
 
