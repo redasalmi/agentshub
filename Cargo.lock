@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "agentshub"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "agentshub-app",
  "agentshub-core",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "agentshub-app"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "agentshub-core",
  "agentshub-platform",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "agentshub-core"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "image",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "agentshub-platform"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "agentshub-runtime"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "agentshub-app",
  "agentshub-core",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "agentshub-ui-classic"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "agentshub-app",
  "agentshub-core",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "agentshub-ui-kit"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "agentshub-app",
  "agentshub-core",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "agentshub-ui-triage"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "agentshub-core",
  "agentshub-runtime",

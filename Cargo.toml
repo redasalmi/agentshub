@@ -1,6 +1,6 @@
 [package]
 name = "agentshub"
-version = "0.20.0"
+version = "0.20.1"
 edition = "2024"
 rust-version = "1.91"
 
@@ -17,13 +17,13 @@ members = [
 resolver = "3"
 
 [dependencies]
-agentshub-app = { path = "crates/agentshub-app", version = "0.20.0" }
-agentshub-core = { path = "crates/agentshub-core", version = "0.20.0" }
-agentshub-platform = { path = "crates/agentshub-platform", version = "0.20.0" }
-agentshub-runtime = { path = "crates/agentshub-runtime", version = "0.20.0" }
-agentshub-ui-classic = { path = "crates/agentshub-ui-classic", version = "0.20.0" }
-agentshub-ui-kit = { path = "crates/agentshub-ui-kit", version = "0.20.0" }
-agentshub-ui-triage = { path = "crates/agentshub-ui-triage", version = "0.20.0" }
+agentshub-app = { path = "crates/agentshub-app", version = "0.20.1" }
+agentshub-core = { path = "crates/agentshub-core", version = "0.20.1" }
+agentshub-platform = { path = "crates/agentshub-platform", version = "0.20.1" }
+agentshub-runtime = { path = "crates/agentshub-runtime", version = "0.20.1" }
+agentshub-ui-classic = { path = "crates/agentshub-ui-classic", version = "0.20.1" }
+agentshub-ui-kit = { path = "crates/agentshub-ui-kit", version = "0.20.1" }
+agentshub-ui-triage = { path = "crates/agentshub-ui-triage", version = "0.20.1" }
 gpui-kit = "0.8.0"
 
 [lints]

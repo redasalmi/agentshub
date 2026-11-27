@@ -1,13 +1,13 @@
 [package]
 name = "agentshub-runtime"
-version = "0.20.0"
+version = "0.20.1"
 edition = "2024"
 rust-version = "1.91"
 publish = false
 
 [dependencies]
-agentshub-app = { path = "../agentshub-app", version = "0.20.0" }
-agentshub-core = { path = "../agentshub-core", version = "0.20.0" }
+agentshub-app = { path = "../agentshub-app", version = "0.20.1" }
+agentshub-core = { path = "../agentshub-core", version = "0.20.1" }
 anyhow = "1"
 gpui-kit = "0.8.0"
 jiff = "0.2.38"
