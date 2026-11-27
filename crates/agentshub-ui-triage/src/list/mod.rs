@@ -25,8 +25,6 @@ use crate::groups::{Group, Kept, Row, group_of, rows};
 mod card;
 mod filter;
 
-/// How wide the sidebar is.
-pub(crate) const SIDEBAR_WIDTH: Pixels = px(336.);
 /// How often the ages of the chats are brought up to date.
 const AGE_INTERVAL: Duration = Duration::from_secs(60);
 

@@ -1,17 +1,23 @@
 //! The Triage layout: one list of every project's chats, grouped by what
 //! needs the user, beside the shown chat.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
+use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::popover::Popover;
+use gpui_kit::component::resizable::{HandleEdge, resize_handle};
 use gpui_kit::component::{ActiveTheme as _, Selectable, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use agentshub_core::store::Project;
 use agentshub_runtime::Runtime;
-use agentshub_ui_kit::layout::{Body, Commands, Held, LayoutView, NavEvent, Parts, ShownChat};
+use agentshub_ui_kit::layout::{
+    Body, Commands, DEFAULT_SIDEBAR_WIDTH, Held, LayoutView, NavEvent, Parts, ShownChat,
+    save_sidebar_width, sidebar_width,
+};
 use agentshub_ui_kit::marks::marks;
 use agentshub_ui_kit::palette::Pick;
 use agentshub_ui_kit::status::Tone;
@@ -20,11 +26,35 @@ use agentshub_ui_kit::widgets::title_bar;
 use agentshub_ui_kit::workspace::Workspace;
 
 use crate::header::{Banner, Header};
-use crate::list::{SIDEBAR_WIDTH, TriageList};
+use crate::list::TriageList;
 
 /// The title bar's height: the shown chat's header, which the window is
 /// dragged by.
 const TITLE_BAR_HEIGHT: Pixels = px(60.);
+const MIN_SIDEBAR_WIDTH: Pixels = px(280.);
+const MAX_SIDEBAR_WIDTH: Pixels = px(600.);
+/// The least room the sidebar leaves the chat.
+const MIN_MAIN_WIDTH: Pixels = px(360.);
+
+/// What dragging the sidebar's edge carries, and draws: nothing, since the
+/// sidebar itself follows the pointer.
+#[derive(Clone)]
+struct ResizeSidebar;
+
+impl Render for ResizeSidebar {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// `width` kept within the sidebar's limits, and narrow enough to leave the
+/// chat room in a window `window_width` wide.
+fn clamp_sidebar_width(width: Pixels, window_width: Pixels) -> Pixels {
+    let max = MAX_SIDEBAR_WIDTH
+        .min(window_width - MIN_MAIN_WIDTH)
+        .max(MIN_SIDEBAR_WIDTH);
+    width.clamp(MIN_SIDEBAR_WIDTH, max)
+}
 
 /// Where the running chats' menu opens from: a corner of the title bar,
 /// which takes no room.
@@ -53,6 +83,9 @@ pub struct TriageLayout {
     runtime: Entity<Runtime>,
     list: Entity<TriageList>,
     workspace: WeakEntity<Workspace>,
+    /// How wide the user wants the sidebar, saved once a drag of its edge
+    /// ends. A window too narrow for it shows it narrower.
+    sidebar_width: Rc<Cell<Pixels>>,
     _list_events: Subscription,
 }
 
@@ -72,6 +105,7 @@ impl TriageLayout {
             runtime,
             list,
             workspace,
+            sidebar_width: Rc::new(Cell::new(sidebar_width(cx))),
             _list_events: events,
         }
     }
@@ -199,7 +233,7 @@ impl TriageLayout {
             editors: agentshub_ui_kit::editor::editor_choices(cx),
             focus: shown.focus.clone(),
             on: Rc::clone(&shown.body.on),
-            room: window.viewport_size().width - SIDEBAR_WIDTH,
+            room: window.viewport_size().width - self.shown_sidebar_width(window),
         };
         let banner = Banner::new(chat.agent, running, next, shown.focus.clone());
         Some((header, banner))
@@ -227,6 +261,43 @@ impl TriageLayout {
             .child(self.render_title_bar(title, menu, cx))
             .child(v_flex().flex_1().min_h_0().child(body))
             .into_any_element()
+    }
+
+    /// How wide the sidebar shows in `window`.
+    fn shown_sidebar_width(&self, window: &Window) -> Pixels {
+        clamp_sidebar_width(self.sidebar_width.get(), window.viewport_size().width)
+    }
+
+    /// The sidebar's right edge, which resizes it when dragged and restores
+    /// its default width when double clicked.
+    fn render_sidebar_edge(&self) -> impl IntoElement {
+        let runtime = self.runtime.downgrade();
+        let width = Rc::clone(&self.sidebar_width);
+        let workspace = self.workspace.clone();
+        let reset = {
+            let runtime = runtime.clone();
+            let width = Rc::clone(&width);
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                width.set(px(DEFAULT_SIDEBAR_WIDTH));
+                save_sidebar_width(&runtime, width.get(), cx);
+                workspace.update(cx, |_, cx| cx.notify()).ok();
+            }
+        };
+        resize_handle("sidebar-edge", Axis::Horizontal)
+            .inside(HandleEdge::Trailing)
+            .on_drag(ResizeSidebar, move |drag, _, _, cx| {
+                cx.stop_propagation();
+                let runtime = runtime.clone();
+                let width = Rc::clone(&width);
+                cx.new(|cx| {
+                    // The drag lets go of what it carries once it ends, which
+                    // is when the width the user settled on is saved.
+                    cx.on_release(move |_, cx| save_sidebar_width(&runtime, width.get(), cx))
+                        .detach();
+                    drag.clone()
+                })
+            })
+            .on_double_click(reset)
     }
 
     /// The selected project's name.
@@ -342,7 +413,8 @@ impl LayoutView for TriageLayout {
     }
 
     fn render(&self, parts: Parts, window: &mut Window, cx: &mut App) -> AnyElement {
-        let room = window.viewport_size().width - SIDEBAR_WIDTH;
+        let sidebar_width = self.shown_sidebar_width(window);
+        let room = window.viewport_size().width - sidebar_width;
         let menu = parts.running_menu;
         let main = match parts.body {
             Body::Chat(shown) => self.render_chat(&shown, menu, window, cx),
@@ -354,11 +426,29 @@ impl LayoutView for TriageLayout {
             }
             Body::Empty(empty) => self.render_screen(self.selected_name(cx), empty, menu, cx),
         };
+        let resize_sidebar = {
+            let width = Rc::clone(&self.sidebar_width);
+            let workspace = self.workspace.clone();
+            move |event: &DragMoveEvent<ResizeSidebar>, window: &mut Window, cx: &mut App| {
+                let dragged = clamp_sidebar_width(
+                    event.event.position.x - event.bounds.left(),
+                    window.viewport_size().width,
+                );
+                if dragged != width.get() {
+                    width.set(dragged);
+                    workspace.update(cx, |_, cx| cx.notify()).ok();
+                }
+            }
+        };
         h_flex()
             .size_full()
+            // Follows the pointer anywhere in the window while the sidebar's
+            // edge is dragged, since it leaves the edge's thin band at once.
+            .on_drag_move(resize_sidebar)
             .child(
                 div()
-                    .w(SIDEBAR_WIDTH)
+                    .relative()
+                    .w(sidebar_width)
                     .h_full()
                     .flex_none()
                     // Terminal output re-renders the window many times a
@@ -368,7 +458,8 @@ impl LayoutView for TriageLayout {
                         self.list
                             .clone()
                             .cached(StyleRefinement::default().size_full()),
-                    ),
+                    )
+                    .child(self.render_sidebar_edge()),
             )
             .child(
                 v_flex()

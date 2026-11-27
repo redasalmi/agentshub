@@ -16,7 +16,9 @@ use crate::sidebar::{
 };
 use agentshub_app::settings::{DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, Settings};
 use agentshub_runtime::{Intent, Runtime};
-use agentshub_ui_kit::layout::{Body, Commands, Held, LayoutView, NavEvent, Parts, ShownChat};
+use agentshub_ui_kit::layout::{
+    Body, Commands, Held, LayoutView, NavEvent, Parts, ShownChat, save_sidebar_width,
+};
 use agentshub_ui_kit::palette::{Entry, Lead, Pick};
 use agentshub_ui_kit::status::{Filter, Tone};
 use agentshub_ui_kit::workspace::Workspace;
@@ -252,20 +254,6 @@ impl ClassicLayout {
                     .on_double_click(reset),
             )
     }
-}
-
-/// Saves the sidebar's `width`, unless it is the one saved.
-fn save_sidebar_width(runtime: &WeakEntity<Runtime>, width: Pixels, cx: &mut App) {
-    let width = f32::from(width);
-    if cx.global::<Settings>().sidebar_width == width {
-        return;
-    }
-    let saved = Settings::set_sidebar_width(width, cx);
-    runtime
-        .update(cx, |runtime, cx| {
-            runtime.apply(Intent::SaveSettings(vec![saved]), cx)
-        })
-        .ok();
 }
 
 /// Shows the rail `width` wide, naming the projects, or with their marks

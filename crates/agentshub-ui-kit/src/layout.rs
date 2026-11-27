@@ -7,9 +7,10 @@ use std::path::PathBuf;
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::*;
 
+use agentshub_app::settings::Settings;
 use agentshub_core::status::Status;
 use agentshub_core::store::{Chat, Project};
-use agentshub_runtime::{ChatState, Runtime};
+use agentshub_runtime::{ChatState, Intent, Runtime};
 
 use crate::chat_body::ChatBody;
 use crate::palette::{Entry, Pick};
@@ -157,6 +158,27 @@ pub struct ShownChat {
     pub history_open: bool,
     /// What shows under the header.
     pub body: ChatBody,
+}
+
+pub use agentshub_app::settings::DEFAULT_SIDEBAR_WIDTH;
+
+/// How wide the user last left the sidebar.
+pub fn sidebar_width(cx: &App) -> Pixels {
+    px(cx.global::<Settings>().sidebar_width)
+}
+
+/// Saves the sidebar's `width`, unless it is the one saved.
+pub fn save_sidebar_width(runtime: &WeakEntity<Runtime>, width: Pixels, cx: &mut App) {
+    let width = f32::from(width);
+    if cx.global::<Settings>().sidebar_width == width {
+        return;
+    }
+    let saved = Settings::set_sidebar_width(width, cx);
+    runtime
+        .update(cx, |runtime, cx| {
+            runtime.apply(Intent::SaveSettings(vec![saved]), cx)
+        })
+        .ok();
 }
 
 /// What each chat whose CLI runs is doing, as the layouts show it: a CLI
