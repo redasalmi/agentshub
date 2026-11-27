@@ -3,6 +3,7 @@
 
 pub mod actions;
 pub mod appearance;
+pub mod dialogs;
 pub mod editor;
 pub mod history;
 pub mod palette;

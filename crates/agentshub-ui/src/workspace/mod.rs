@@ -1,20 +1,15 @@
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::InteractiveElementExt as _;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::button::{Button, ButtonVariant};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{HandleEdge, resize_handle};
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, StyledExt as _, Theme, ThemeStyled as _, WindowExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, IconName, StyledExt as _, Theme, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -45,7 +40,7 @@ use agentshub_ui_kit::palette::{self, Entry, Lead, Pick};
 use agentshub_ui_kit::settings::{SettingsIntent, SettingsView};
 use agentshub_ui_kit::status::{Tone, dot};
 use agentshub_ui_kit::terminal_view::{self, TerminalView};
-use agentshub_ui_kit::widgets::{group_heading, path_line};
+use agentshub_ui_kit::widgets::group_heading;
 
 mod catalog;
 mod chat_view;
