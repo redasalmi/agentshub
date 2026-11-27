@@ -19,6 +19,11 @@ use crate::status::Tone;
 /// How a layout lists the projects and the chats around the parts every
 /// layout shows, which the workspace hands it.
 pub trait LayoutView {
+    /// Whether the new chat dialog asks which project the chat starts in,
+    /// rather than taking the selected one.
+    fn new_chat_projects(&self, _cx: &App) -> bool {
+        false
+    }
     /// The project new chats, the shell and the empty state are for.
     fn selected_project(&self, cx: &App) -> Option<i64>;
     /// Makes project `project` the selected one, telling the workspace with

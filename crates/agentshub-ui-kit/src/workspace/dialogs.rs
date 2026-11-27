@@ -68,28 +68,43 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let projects = self.layout.new_chat_projects(cx).then(|| {
+            self.runtime
+                .read(cx)
+                .projects()
+                .iter()
+                .filter(|project| project.archived_at.is_none())
+                .map(|project| (project.id, SharedString::from(project.name.clone())))
+                .collect()
+        });
         let args = NewChatArgs {
             path: project.path,
             agents,
             in_git,
             worktree_by_default: cx.global::<Settings>().worktree_by_default,
+            projects,
+            project: project.id,
         };
-        let project = project.id;
         let workspace = cx.weak_entity();
-        dialogs::new_chat(window, cx, args, move |agent, title, worktree, _, cx| {
-            workspace
-                .update(cx, |this, cx| {
-                    this.apply(
-                        Intent::NewChat {
-                            project,
-                            agent,
-                            title,
-                            worktree,
-                        },
-                        cx,
-                    )
-                })
-                .ok();
-        });
+        dialogs::new_chat(
+            window,
+            cx,
+            args,
+            move |project, agent, title, worktree, _, cx| {
+                workspace
+                    .update(cx, |this, cx| {
+                        this.apply(
+                            Intent::NewChat {
+                                project,
+                                agent,
+                                title,
+                                worktree,
+                            },
+                            cx,
+                        )
+                    })
+                    .ok();
+            },
+        );
     }
 }

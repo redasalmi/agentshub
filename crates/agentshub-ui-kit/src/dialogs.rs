@@ -9,8 +9,11 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::searchable_list::SearchableListItem;
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, StyledExt as _, Theme, ThemeStyled as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, IndexPath, StyledExt as _, Theme, ThemeStyled as _, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -31,11 +34,32 @@ pub struct NewChatArgs {
     pub in_git: bool,
     /// Whether the worktree box starts ticked in a git project.
     pub worktree_by_default: bool,
+    /// The projects the chat can start in, by id and name, for a layout that
+    /// lets the dialog pick one. `None` leaves the dialog without the field.
+    pub projects: Option<Vec<(i64, SharedString)>>,
+    /// The project the dialog starts on.
+    pub project: i64,
 }
 
-/// Asks which agent to start, under which name and whether in a worktree.
-/// `on_start` gets the agent picked, the name typed or `None`, and the
-/// worktree box, once the dialog has closed.
+#[derive(Clone)]
+struct ProjectChoice(i64, SharedString);
+
+impl SearchableListItem for ProjectChoice {
+    type Value = i64;
+
+    fn title(&self) -> SharedString {
+        self.1.clone()
+    }
+
+    fn value(&self) -> &i64 {
+        &self.0
+    }
+}
+
+/// Asks which agent to start, under which name and whether in a worktree,
+/// and in which project if `args` lists them. `on_start` gets the project
+/// picked, the agent picked, the name typed or `None`, and the worktree box,
+/// once the dialog has closed.
 #[expect(
     clippy::too_many_lines,
     reason = "the dialog's element tree and the state its controls share"
@@ -44,29 +68,52 @@ pub fn new_chat(
     window: &mut Window,
     cx: &mut App,
     args: NewChatArgs,
-    on_start: impl Fn(Agent, Option<String>, bool, &mut Window, &mut App) + 'static,
+    on_start: impl Fn(i64, Agent, Option<String>, bool, &mut Window, &mut App) + 'static,
 ) {
     let NewChatArgs {
         path,
         agents,
         in_git,
         worktree_by_default,
+        projects,
+        project,
     } = args;
     let agents = Rc::new(agents);
     let none_installed = agents.is_empty();
     // Whether the chat gets a worktree starts as the settings say.
     let use_worktree = Rc::new(Cell::new(in_git && worktree_by_default));
     let chosen = Rc::new(Cell::new(agents.first().copied()));
+    let project = Rc::new(Cell::new(project));
+    let project_select = projects.map(|projects| {
+        let at = projects.iter().position(|(id, _)| *id == project.get());
+        let choices: Vec<_> = projects
+            .into_iter()
+            .map(|(id, name)| ProjectChoice(id, name))
+            .collect();
+        let select = cx.new(|cx| SelectState::new(choices, at.map(IndexPath::new), window, cx));
+        let subscription = cx.subscribe(&select, {
+            let project = Rc::clone(&project);
+            move |_, event: &SelectEvent<Vec<ProjectChoice>>, _| {
+                let SelectEvent::Confirm(Some(id)) = event else {
+                    return;
+                };
+                project.set(*id);
+            }
+        });
+        (select, subscription)
+    });
     // Left empty, the chat is titled after its agent's sessions.
     let title = cx.new(|cx| InputState::new(window, cx).placeholder("Chat name (optional)"));
     let picker = cx.focus_handle().tab_stop(true);
     let start = Rc::new({
-        let (title, use_worktree) = (title.clone(), Rc::clone(&use_worktree));
+        let (title, use_worktree, project) =
+            (title.clone(), Rc::clone(&use_worktree), Rc::clone(&project));
         move |agent: Agent, window: &mut Window, cx: &mut App| {
             let title = title.read(cx).value().to_string();
             window.close_dialog(cx);
             let worktree = use_worktree.get();
             on_start(
+                project.get(),
                 agent,
                 Some(title).filter(|title| !title.is_empty()),
                 worktree,
@@ -109,6 +156,11 @@ pub fn new_chat(
                         }
                         let picked = chosen.get();
                         content
+                            .children(
+                                project_select
+                                    .as_ref()
+                                    .map(|(select, _)| Select::new(select).placeholder("Project")),
+                            )
                             .child(
                                 h_flex()
                                     .id("agents")
