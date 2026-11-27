@@ -84,6 +84,7 @@ impl Workspace {
             RuntimeEvent::StatusChanged(_) => this.sync_sidebar(cx),
             RuntimeEvent::ActiveChanged(active) => this.active_changed(*active, cx),
             RuntimeEvent::TurnTick => cx.notify(),
+            RuntimeEvent::ClosingAfterLookup(ids) => this.close_after_lookup(ids.clone(), cx),
         });
 
         let window_closed = {

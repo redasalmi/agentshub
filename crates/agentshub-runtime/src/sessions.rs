@@ -444,11 +444,8 @@ impl Runtime {
                         closing.push(chat.id);
                     }
                 }
-                // One closed while its CLI was exiting may not be reaped yet,
-                // so its session is read once it is, and nothing else runs in
-                // that session until then.
-                for id in closing {
-                    this.suspend(id, cx);
+                if !closing.is_empty() {
+                    cx.emit(RuntimeEvent::ClosingAfterLookup(closing));
                 }
             })
             .ok();

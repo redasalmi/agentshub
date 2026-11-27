@@ -25,4 +25,9 @@ pub enum RuntimeEvent {
     ActiveChanged(Option<i64>),
     /// The shown chat's turn went on another second.
     TurnTick,
+    /// Chats whose Codex CLI exited while a lookup of its session ran, which
+    /// has now recorded it, so they close: the window closes them as it closes
+    /// the ones the user does, with `Intent::Suspend`, and gives back the
+    /// keyboard they had.
+    ClosingAfterLookup(Vec<i64>),
 }

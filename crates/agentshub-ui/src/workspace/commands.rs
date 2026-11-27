@@ -186,12 +186,7 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn close_chats(
-        &mut self,
-        ids: Vec<i64>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn close_chats(&mut self, ids: Vec<i64>, window: &mut Window, cx: &mut App) {
         if ids.is_empty() {
             return;
         }

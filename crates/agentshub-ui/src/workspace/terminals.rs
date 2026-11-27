@@ -61,6 +61,24 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Closes the chats whose Codex lookup finished after their CLI exited.
+    /// One closed while its CLI was exiting may not be reaped yet, so its
+    /// session is read once it is, and nothing else runs in that session
+    /// until then. The shown chat takes the keyboard with it, which only its
+    /// window can give back.
+    pub(super) fn close_after_lookup(&mut self, ids: Vec<i64>, cx: &mut Context<Self>) {
+        let closed = cx.with_window(cx.entity_id(), |window, cx| {
+            self.close_chats(ids.clone(), window, cx)
+        });
+        // Closed to the tray, the window has no keyboard to give back, and
+        // opening it again focuses the shown chat.
+        if closed.is_none() {
+            for id in ids {
+                self.apply(Intent::Suspend(id), cx);
+            }
+        }
+    }
+
     /// Follows the chat the runtime shows, which comes in front of the
     /// settings and takes the keyboard.
     pub(super) fn active_changed(&mut self, active: Option<i64>, cx: &mut Context<Self>) {
