@@ -9,6 +9,7 @@ members = [
     "crates/agentshub-app",
     "crates/agentshub-core",
     "crates/agentshub-platform",
+    "crates/agentshub-runtime",
     "crates/agentshub-ui",
 ]
 resolver = "3"
@@ -17,6 +18,7 @@ resolver = "3"
 agentshub-app = { path = "crates/agentshub-app", version = "0.19.1" }
 agentshub-core = { path = "crates/agentshub-core", version = "0.19.1" }
 agentshub-platform = { path = "crates/agentshub-platform", version = "0.19.1" }
+agentshub-runtime = { path = "crates/agentshub-runtime", version = "0.19.1" }
 agentshub-ui = { path = "crates/agentshub-ui", version = "0.19.1" }
 gpui-kit = "0.8.0"
 

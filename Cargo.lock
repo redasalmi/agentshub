@@ -116,6 +116,7 @@ dependencies = [
  "agentshub-app",
  "agentshub-core",
  "agentshub-platform",
+ "agentshub-runtime",
  "agentshub-ui",
  "gpui-kit",
 ]
@@ -166,12 +167,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentshub-runtime"
+version = "0.19.1"
+dependencies = [
+ "agentshub-core",
+ "anyhow",
+ "gpui-kit",
+ "jiff",
+ "libghostty-vt",
+ "portable-pty",
+ "smol",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "agentshub-ui"
 version = "0.19.1"
 dependencies = [
  "agentshub-app",
  "agentshub-core",
  "agentshub-platform",
+ "agentshub-runtime",
  "anyhow",
  "fontdb",
  "gpui-kit",
@@ -179,11 +195,9 @@ dependencies = [
  "ksni",
  "libghostty-vt",
  "notify",
- "portable-pty",
  "raw-window-handle",
  "serde_json",
  "smol",
- "unicode-segmentation",
  "uuid",
  "wayland-client",
  "wayland-protocols",

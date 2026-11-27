@@ -11,6 +11,7 @@ use gpui_kit::*;
 use libghostty_vt::style::RgbColor;
 
 use agentshub_app::settings::{Appearance, Settings, ThemeFamily};
+use agentshub_runtime::terminal::Colors;
 
 const LINEAR: &str = include_str!("../../../assets/themes/linear.json");
 const PRIMER: &str = include_str!("../../../assets/themes/primer.json");
@@ -29,15 +30,6 @@ const FONTS: [&[u8]; 9] = [
 
 /// The display face, for titles.
 pub const DISPLAY: &str = "Inter Display";
-
-/// The colors that output without colors of its own is drawn in.
-#[derive(Clone, Copy)]
-pub struct Colors {
-    pub background: RgbColor,
-    pub foreground: RgbColor,
-    /// The 16 ANSI colors, which CLIs pick from by index.
-    pub ansi: [RgbColor; 16],
-}
 
 /// `color` as the terminal's own color type.
 #[expect(

@@ -1,6 +1,6 @@
 //! Every terminal the workspace owns: the chats' and the projects' shells.
 
-use crate::terminal::Colors;
+use agentshub_runtime::terminal::Colors;
 
 use super::*;
 

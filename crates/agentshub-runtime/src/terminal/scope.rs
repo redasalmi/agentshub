@@ -76,7 +76,7 @@ pub(super) fn watch(
     (hooks().watch)(program, pidfd, gone)
 }
 
-pub(crate) fn adopt(pid: u32, desktop_id: &str) {
+pub fn adopt(pid: u32, desktop_id: &str) {
     (hooks().adopt)(pid, desktop_id);
 }
 

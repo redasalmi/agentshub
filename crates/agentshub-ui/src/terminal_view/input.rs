@@ -6,7 +6,7 @@ use gpui_kit::*;
 use libghostty_vt::key::{self, Key};
 use libghostty_vt::mouse;
 
-use crate::terminal::KeyInput;
+use agentshub_runtime::terminal::KeyInput;
 
 pub(super) fn key_mods(modifiers: &Modifiers) -> key::Mods {
     let mut mods = key::Mods::empty();

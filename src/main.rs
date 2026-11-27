@@ -58,7 +58,7 @@ fn main() {
         std::thread::spawn(scope::stop_leftovers);
     }
     #[cfg(target_os = "linux")]
-    agentshub_ui::terminal::set_scope(agentshub_ui::terminal::Scope {
+    agentshub_runtime::terminal::set_scope(agentshub_runtime::terminal::Scope {
         pidfd: scope::pidfd,
         watch: scope::watch,
         available: scope::available,

@@ -10,9 +10,9 @@ use libghostty_vt::render::CursorVisualStyle;
 use libghostty_vt::style::RgbColor;
 use libghostty_vt::terminal::Scrollbar;
 
-use crate::terminal::{Frame, GridSize, MouseInput, Run, Terminal};
 use crate::theme as appearance;
 use agentshub_app::settings::Settings;
+use agentshub_runtime::terminal::{Frame, GridSize, MouseInput, Run, Terminal};
 
 mod font;
 mod input;

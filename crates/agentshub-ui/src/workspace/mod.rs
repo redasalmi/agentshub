@@ -30,7 +30,6 @@ use crate::sidebar::{
     self, Held, MAX_SIDEBAR_WIDTH, MIN_MAIN_WIDTH, MIN_SIDEBAR_WIDTH, Sidebar, SidebarEvent, Tone,
     home_relative, rail_room,
 };
-use crate::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 use crate::terminal_view::{self, TerminalView};
 use agentshub_app::alerts::{self, Alert};
 use agentshub_app::bootstrap::Opened;
@@ -46,6 +45,7 @@ use agentshub_core::store::{self, Change, Store};
 use agentshub_core::worktree::{self, Worktree};
 #[cfg(target_os = "linux")]
 use agentshub_platform::scope;
+use agentshub_runtime::terminal::{self, Exited, Pty, StatusChanged, Terminal};
 
 mod actions;
 mod catalog;

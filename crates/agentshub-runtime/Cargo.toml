@@ -1,0 +1,21 @@
+[package]
+name = "agentshub-runtime"
+version = "0.19.1"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[dependencies]
+agentshub-core = { path = "../agentshub-core", version = "0.19.1" }
+anyhow = "1"
+gpui-kit = "0.8.0"
+jiff = "0.2.38"
+libghostty-vt = "0.2.2"
+portable-pty = "0.9"
+smol = "2"
+
+[dev-dependencies]
+unicode-segmentation = "1"
+
+[lints]
+workspace = true
