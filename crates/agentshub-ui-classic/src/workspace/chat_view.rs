@@ -2,6 +2,7 @@
 
 use crate::chat::ChatSheet;
 use agentshub_ui_kit::chat_body::{ChatBody, ChatIntent, Shell};
+use agentshub_ui_kit::empty::{EmptyIntent, EmptyState, Recent};
 use agentshub_ui_kit::settings::SHORTCUTS_WORK_ANYWHERE;
 
 use super::*;
@@ -310,7 +311,7 @@ impl Workspace {
                 .take(RECENT_CHATS)
                 .map(|(project, chat)| {
                     let tone = Tone::of(sidebar.running(chat.id));
-                    crate::chat::Recent {
+                    Recent {
                         id: chat.id,
                         title: chat.title.clone().unwrap_or_else(|| "New chat".into()),
                         about: sidebar::subtitle(chat, tone, Some(&project.name)),
@@ -322,14 +323,14 @@ impl Workspace {
         let on = {
             let this = cx.weak_entity();
             Rc::new(
-                move |intent: crate::chat::EmptyIntent, window: &mut Window, cx: &mut App| {
+                move |intent: EmptyIntent, window: &mut Window, cx: &mut App| {
                     if let Some(this) = this.upgrade() {
                         this.update(cx, |this, cx| this.empty_intent(intent, window, cx));
                     }
                 },
             )
         };
-        crate::chat::EmptyState {
+        EmptyState {
             selected,
             agents,
             recent,
@@ -338,19 +339,14 @@ impl Workspace {
         .render(window, cx)
     }
 
-    fn empty_intent(
-        &mut self,
-        intent: crate::chat::EmptyIntent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn empty_intent(&mut self, intent: EmptyIntent, window: &mut Window, cx: &mut Context<Self>) {
         match intent {
-            crate::chat::EmptyIntent::StartAgent(project, agent) => {
+            EmptyIntent::StartAgent(project, agent) => {
                 self.apply(Intent::StartAgent { project, agent }, cx)
             }
-            crate::chat::EmptyIntent::NewChat => self.new_chat_here(&NewChat, window, cx),
-            crate::chat::EmptyIntent::AddProject => self.add_project(window, cx),
-            crate::chat::EmptyIntent::OpenChat(id) => self.open_chat(id, window, cx),
+            EmptyIntent::NewChat => self.new_chat_here(&NewChat, window, cx),
+            EmptyIntent::AddProject => self.add_project(window, cx),
+            EmptyIntent::OpenChat(id) => self.open_chat(id, window, cx),
         }
     }
 }

@@ -7,6 +7,7 @@ pub mod appearance;
 pub mod chat_body;
 pub mod dialogs;
 pub mod editor;
+pub mod empty;
 pub mod frontend;
 pub mod history;
 pub mod palette;
