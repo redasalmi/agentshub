@@ -222,7 +222,10 @@ dependencies = [
 name = "agentshub-ui-triage"
 version = "0.19.1"
 dependencies = [
+ "agentshub-core",
+ "agentshub-runtime",
  "agentshub-ui-kit",
+ "gpui-kit",
 ]
 
 [[package]]

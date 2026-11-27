@@ -21,6 +21,7 @@ gpui_kit::assets::icon_assets!(
         ArchiveRestore,
         Clock,
         FolderCode,
+        GitBranch,
         Pencil,
         Pin,
         PinOff,
