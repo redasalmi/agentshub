@@ -60,7 +60,8 @@ commands in its project shell.
 check the keyboard is back with the workspace by starting Claude from the New
 Chat dialog; pin that chat from the search box, archive it with Ctrl+Shift+A
 and take it back with Undo, archive it again and bring it back from the
-sidebar's archived chats; then start a chat in a worktree of a project with a
+sidebar's archived chats; open the shortcut list, the settings and the running
+chats from the keyboard; then start a chat in a worktree of a project with a
 large untracked file, quit while it is checked out, and check no CLI and no
 worktree is left.
 

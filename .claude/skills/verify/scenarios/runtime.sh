@@ -1,9 +1,11 @@
 # Closes a Codex chat from the sidebar and starts another chat from the
-# keyboard, pins, archives and brings back that chat, then quits while a new
+# keyboard, pins, archives and brings back that chat, opens the shortcut list,
+# the settings and the running chats from the keyboard, then quits while a new
 # chat's worktree is checked out.
 # Covers: closing a chat hands the keyboard back to the workspace, pinning,
-# archiving with Undo and bringing back an archived chat, and quitting during
-# a checkout leaves no CLI and no worktree behind.
+# archiving with Undo and bringing back an archived chat, the workspace's
+# shortcuts, and quitting during a checkout leaves no CLI and no worktree
+# behind.
 
 project="$AHV_WORK/project"
 seed_project "$project"
@@ -78,6 +80,23 @@ sleep 0.4
 click 363 285
 wait_until 5 "Bring back to restore the chat" listed
 shot restored
+
+# With the chat running, open the shortcut list, the settings and the running
+# chats with their shortcuts, then select the project and show its chat.
+key alt+1
+wait_until 15 "claude to run in the restored chat" claudes_at_least 3
+key ctrl+question
+shot shortcuts
+key Escape
+key ctrl+comma
+shot settings
+key ctrl+comma
+key ctrl+0
+shot running
+key Escape
+key ctrl+1
+key alt+1
+shot alt-one
 
 app_stop
 assert_clis_gone
