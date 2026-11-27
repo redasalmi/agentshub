@@ -6,8 +6,9 @@ enforced by the Cargo workspace (see `Cargo.toml`) and by
 
 ```
 bin ──▶ ui-classic ──▶ ui-kit ──▶ runtime ──▶ app ──▶ core
- │          │            │
- │          └────────────┴──▶ platform
+ │          │            ▲ │
+ │          └────────────┼─┴──▶ platform
+ ├──▶ ui-triage ─────────┘
  └──▶ ui-kit
 ```
 
@@ -35,11 +36,15 @@ bin ──▶ ui-classic ──▶ ui-kit ──▶ runtime ──▶ app ──
   and footer, which `ClassicLayout` lays out around the shared workspace,
   with the actions only it has. Its views read runtime and app state and send
   intents.
+- **ui-triage** — the Triage layout: one list of every project's chats,
+  grouped by what needs the user, with a project filter at its top, and the
+  shown chat's header, which `TriageLayout` lays out around the shared
+  workspace. It keeps to ui-classic's limits and names no other layout.
 - **platform** — Linux adapters: tray, D-Bus notifications, systemd scope,
   desktop motion, single instance and SIGTERM. It calls back into the app or
   UI for window and workspace actions instead of naming them.
 - **bin** — composition root: starts the app, builds the runtime, opens the
-  layout, wires the scopes, and wires the notifications and tray to the
+  layout the `layout` setting names, wires the scopes, and wires the notifications and tray to the
   layout through `Frontend`.
 
 ## Where things belong
