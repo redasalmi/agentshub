@@ -33,7 +33,7 @@ if [ "$current" = "$version" ] ||
 	die "$version is not greater than $current"
 fi
 
-manifests=(Cargo.toml crates/agentshub-{app,core,platform,ui}/Cargo.toml)
+manifests=(Cargo.toml crates/*/Cargo.toml)
 sed -i "s/\"$current\"/\"$version\"/g" "${manifests[@]}"
 cargo update -w --quiet
 changed=$(git diff --name-only | sort | tr '\n' ' ')

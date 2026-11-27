@@ -64,8 +64,20 @@ esac
 EOF
 	printf '#!/bin/sh\necho check-arch >>"$CALLS"\n' >"$work/scripts/check-arch.sh"
 	printf '#!/bin/sh\necho smoke >>"$CALLS"\necho PASS\n' >"$work/.claude/skills/verify/scripts/run.sh"
+	mkdir -p "$work/crates/agentshub-fixture/src"
+	: >"$work/crates/agentshub-fixture/src/lib.rs"
+	cat >"$work/crates/agentshub-fixture/Cargo.toml" <<EOF
+[package]
+name = "agentshub-fixture"
+version = "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$work/Cargo.toml" | head -n1)"
+edition = "2021"
+
+[dependencies]
+agentshub-core = { path = "../agentshub-core", version = "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$work/Cargo.toml" | head -n1)" }
+EOF
 	chmod +x "$root/bin/cargo" "$root/bin/gh" "$work/scripts/check-arch.sh" \
 		"$work/.claude/skills/verify/scripts/run.sh"
+	git -C "$work" add -A crates scripts .claude
 	git -C "$work" commit -qam "test stubs"
 	git -C "$work" push -q origin main
 	PATH="$root/bin:$PATH"
@@ -92,7 +104,8 @@ happy_path() {
 	git -C "$remote" rev-parse -q --verify refs/tags/v9.9.9 >/dev/null || ok=1
 	[ "$(head_of "$remote" main)" = "$(head_of "$work" main)" ] || ok=1
 	[ "$(git -C "$work" show --name-only --format= HEAD | sort | tr '\n' ' ')" = \
-		"Cargo.lock Cargo.toml crates/agentshub-app/Cargo.toml crates/agentshub-core/Cargo.toml crates/agentshub-platform/Cargo.toml crates/agentshub-ui/Cargo.toml " ] || ok=1
+		"$(cd "$work" && printf '%s\n' Cargo.lock Cargo.toml crates/*/Cargo.toml | sort | tr '\n' ' ')" ] || ok=1
+	! git -C "$work" grep -qF "\"$current\"" -- Cargo.toml 'crates/*/Cargo.toml' || ok=1
 	[ "$(tr '\n' ' ' <"$CALLS")" = "fmt clippy test check-arch deny build smoke " ] || ok=1
 	[ "$last" = "released v9.9.9: https://example.invalid/releases/v9.9.9" ] || ok=1
 	[ "$ok" = 0 ] || printf '%s\n' "$out" | tail -n5
@@ -165,7 +178,7 @@ failing_check() {
 	[ "$(head_of "$work")" = "$before" ] || ok=1
 	! git -C "$work" rev-parse -q --verify refs/tags/v9.9.9 >/dev/null || ok=1
 	! git -C "$remote" rev-parse -q --verify refs/tags/v9.9.9 >/dev/null || ok=1
-	[ "$(git -C "$work" status --short | wc -l)" = 6 ] || ok=1
+	[ "$(git -C "$work" status --short | wc -l)" = "$(cd "$work" && printf '%s\n' Cargo.lock Cargo.toml crates/*/Cargo.toml | wc -l)" ] || ok=1
 	[ "$ok" = 0 ] || printf 'got: %s (exit %s)\n' "$last" "$status"
 	check "failing check stops before commit" "$ok"
 }
