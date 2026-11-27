@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName as ExtraIcon;
-use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
@@ -14,21 +14,18 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use agentshub_core::agent::Agent;
-use agentshub_core::format::{Turn, activity, capitalized, duration};
+use agentshub_core::format::{Turn, activity};
 use agentshub_core::status::Status;
 use agentshub_ui_kit::actions::{
-    ArchiveChat, DeleteChat, NextNeedingYou, OpenInEditor, RenameChat, ToggleHistory, TogglePin,
-    ToggleShell,
+    ArchiveChat, DeleteChat, NextNeedingYou, RenameChat, ToggleHistory, TogglePin, ToggleShell,
 };
-use agentshub_ui_kit::chat_body::ChatIntent;
-use agentshub_ui_kit::editor::{EditorChoice, SetEditor, editor_icon, editor_menu};
-use agentshub_ui_kit::status::{Tone, dot, live_dot};
+use agentshub_ui_kit::chat_body::{ChatIntent, On};
+use agentshub_ui_kit::editor::{EditorChoice, editor_button};
+use agentshub_ui_kit::status::{Tone, dot, status_pill};
 use agentshub_ui_kit::theme::{self as appearance, Tint};
-use agentshub_ui_kit::widgets::path_line;
+use agentshub_ui_kit::widgets::{path_line, stay_put};
 
 use crate::list::project_mark;
-
-type On = Rc<dyn Fn(ChatIntent, &mut Window, &mut App)>;
 
 /// The widest the project's name and the branch get in the header; the
 /// folder gives way first.
@@ -194,75 +191,6 @@ impl Header {
                     }),
             )
     }
-}
-
-/// Opens the chat's folder in the default editor; its menu changes which one
-/// that is.
-fn editor_button(current: &EditorChoice, all: Vec<EditorChoice>, on: On) -> impl IntoElement {
-    let editor = current.editor;
-    let set: SetEditor = {
-        let on = Rc::clone(&on);
-        Rc::new(move |editor, window, cx| on(ChatIntent::SetEditor(editor), window, cx))
-    };
-    let open = format!("Open in {}", editor.name());
-    DropdownButton::new("editor")
-        .secondary()
-        .small()
-        .button(
-            Button::new("open-editor")
-                .small()
-                .child(editor_icon(current.icon.as_ref()))
-                .accessibility_label(open.clone())
-                .tooltip_with_action(open, &OpenInEditor, None)
-                .on_click(move |_, window, cx| on(ChatIntent::OpenEditor(editor), window, cx)),
-        )
-        .menu_accessibility_label("Choose the default editor")
-        .dropdown_menu(move |menu, _, _| editor_menu(menu, editor, &all, &set))
-}
-
-/// What the agent is doing, with how long it has been doing it.
-fn status_pill(tone: Tone, turn: Option<Turn>, spin: bool, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
-    let palette = appearance::palette(cx);
-    let label = capitalized(tone.label());
-    let (label, time) = match turn {
-        Some(Turn::Since(start)) => (format!("{label} ·"), Some(duration(start.elapsed()))),
-        Some(Turn::Took(took)) => (format!("{label} · took"), Some(duration(took))),
-        None => (label, None),
-    };
-    let (background, foreground) = tone
-        .tint(cx)
-        .map(|tint| (tint.soft, tint.text))
-        .unwrap_or((palette.strong, palette.secondary_foreground));
-    h_flex()
-        .flex_none()
-        .h(px(26.))
-        .px_2p5()
-        .gap_2()
-        .rounded_full()
-        .bg(background)
-        .text_color(foreground)
-        .text_xs()
-        .font_medium()
-        .child(if spin {
-            live_dot(tone, cx)
-        } else {
-            dot(tone, cx)
-        })
-        .child(h_flex().gap_1().child(label).when_some(time, |this, time| {
-            this.child(
-                div()
-                    .font_family(theme.mono_font_family.clone())
-                    .child(time),
-            )
-        }))
-}
-
-/// Keeps a press on the header's controls from moving the window.
-fn stay_put(element: Div) -> Div {
-    element
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
 }
 
 /// What the banner says the chat needs, naming its agent, while the agent

@@ -47,7 +47,8 @@ pub enum ChatIntent {
     SetEditor(Editor),
 }
 
-type On = Rc<dyn Fn(ChatIntent, &mut Window, &mut App)>;
+/// What a chat's controls ask the workspace for.
+pub type On = Rc<dyn Fn(ChatIntent, &mut Window, &mut App)>;
 type Save = Rc<dyn Fn(&mut App)>;
 
 /// The shell beside the chat, with the folder it runs in.

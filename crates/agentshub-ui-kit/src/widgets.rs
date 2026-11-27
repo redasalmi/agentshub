@@ -79,3 +79,10 @@ pub fn key_number(index: usize, cx: &App) -> Div {
         .text_color(theme.foreground)
         .child((index + 1).to_string())
 }
+
+/// Keeps a press on the title bar's controls from moving the window.
+pub fn stay_put(element: Div) -> Div {
+    element
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+}

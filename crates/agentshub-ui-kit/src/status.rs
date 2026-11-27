@@ -2,10 +2,11 @@
 
 use std::time::Duration;
 
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use agentshub_core::format::age;
+use agentshub_core::format::{Turn, age, capitalized, duration};
 use agentshub_core::status::{Need, Status};
 use agentshub_core::store::Chat;
 
@@ -168,6 +169,44 @@ pub fn dot(tone: Tone, cx: &App) -> Div {
 /// costs more than the whole animation is worth.
 pub fn live_dot(tone: Tone, cx: &App) -> Div {
     status_glyph(tone, true, None, cx)
+}
+
+/// What the agent is doing, with how long it has been doing it.
+pub fn status_pill(tone: Tone, turn: Option<Turn>, spin: bool, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let palette = appearance::palette(cx);
+    let label = capitalized(tone.label());
+    let (label, time) = match turn {
+        Some(Turn::Since(start)) => (format!("{label} ·"), Some(duration(start.elapsed()))),
+        Some(Turn::Took(took)) => (format!("{label} · took"), Some(duration(took))),
+        None => (label, None),
+    };
+    let (background, foreground) = tone
+        .tint(cx)
+        .map(|tint| (tint.soft, tint.text))
+        .unwrap_or((palette.strong, palette.secondary_foreground));
+    h_flex()
+        .flex_none()
+        .h(px(26.))
+        .px_2p5()
+        .gap_2()
+        .rounded_full()
+        .bg(background)
+        .text_color(foreground)
+        .text_xs()
+        .font_medium()
+        .child(if spin {
+            live_dot(tone, cx)
+        } else {
+            dot(tone, cx)
+        })
+        .child(h_flex().gap_1().child(label).when_some(time, |this, time| {
+            this.child(
+                div()
+                    .font_family(theme.mono_font_family.clone())
+                    .child(time),
+            )
+        }))
 }
 
 /// `pop` names the swell a glyph that needs the user gives when it has just

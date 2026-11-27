@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName as ExtraIcon;
+use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable as _, h_flex};
 use gpui_kit::*;
@@ -11,6 +12,9 @@ use gpui_kit::*;
 use agentshub_app::editors::{ICON_SIZE, Installed};
 use agentshub_app::settings::Settings;
 use agentshub_core::editors::{self, Editor, Found};
+
+use crate::actions::OpenInEditor;
+use crate::chat_body::{ChatIntent, On};
 
 /// An installed editor, with its icon.
 #[derive(Clone)]
@@ -72,4 +76,29 @@ pub fn editor_menu(
                 .on_click(move |_, window, cx| set(editor, window, cx)),
             )
         })
+}
+
+/// Opens the chat's folder in the default editor; its menu changes which one
+/// that is. A filled surface, the one ghost buttons take on hover, tells it
+/// apart from the header's plain buttons as a control with a menu.
+pub fn editor_button(current: &EditorChoice, all: Vec<EditorChoice>, on: On) -> impl IntoElement {
+    let editor = current.editor;
+    let set: SetEditor = {
+        let on = Rc::clone(&on);
+        Rc::new(move |editor, window, cx| on(ChatIntent::SetEditor(editor), window, cx))
+    };
+    let open = format!("Open in {}", editor.name());
+    DropdownButton::new("editor")
+        .secondary()
+        .small()
+        .button(
+            Button::new("open-editor")
+                .small()
+                .child(editor_icon(current.icon.as_ref()))
+                .accessibility_label(open.clone())
+                .tooltip_with_action(open, &OpenInEditor, None)
+                .on_click(move |_, window, cx| on(ChatIntent::OpenEditor(editor), window, cx)),
+        )
+        .menu_accessibility_label("Choose the default editor")
+        .dropdown_menu(move |menu, _, _| editor_menu(menu, editor, &all, &set))
 }
