@@ -29,6 +29,8 @@ pub struct Kept {
     pub group: Group,
 }
 
+/// The group a chat whose dot shows `tone` is listed in: Archived when it is
+/// `archived`, whatever its agent last did.
 pub fn group_of(tone: Tone, archived: bool) -> Group {
     if archived {
         return Group::Archived;
