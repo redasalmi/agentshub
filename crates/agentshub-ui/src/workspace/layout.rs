@@ -87,16 +87,9 @@ impl Workspace {
 
     pub(super) fn save_rail(&mut self, cx: &mut Context<Self>) {
         let settings = *cx.global::<Settings>();
-        let store = self.runtime.read(cx).store().clone();
-        let width = Settings::set_rail_width(&store, settings.rail_width, cx);
-        let names = Settings::set_project_names(&store, settings.project_names, cx);
-        self.save_setting(
-            async move {
-                width.await?;
-                names.await
-            },
-            cx,
-        );
+        let width = Settings::set_rail_width(settings.rail_width, cx);
+        let names = Settings::set_project_names(settings.project_names, cx);
+        self.apply(Intent::SaveSettings(vec![width, names]), cx);
     }
 
     /// Shows the shell taking `share` of the window's height, without saving
@@ -115,8 +108,7 @@ impl Workspace {
 
     pub(super) fn save_shell_share(&mut self, cx: &mut Context<Self>) {
         let share = cx.global::<Settings>().shell_share;
-        let store = self.runtime.read(cx).store().clone();
-        let saved = Settings::set_shell_share(&store, share, cx);
+        let saved = Settings::set_shell_share(share, cx);
         self.save_setting(saved, cx);
     }
 
@@ -125,8 +117,7 @@ impl Workspace {
         if cx.global::<Settings>().sidebar_width == width {
             return;
         }
-        let store = self.runtime.read(cx).store().clone();
-        let saved = Settings::set_sidebar_width(&store, width, cx);
+        let saved = Settings::set_sidebar_width(width, cx);
         self.save_setting(saved, cx);
     }
 }

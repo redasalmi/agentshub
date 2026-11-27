@@ -142,6 +142,7 @@ impl Runtime {
             Intent::Export(path) => self.export(path, cx),
             Intent::Import(path) => self.check_import(path, cx),
             Intent::ConfirmImport(pending) => self.confirm_import(&pending, cx),
+            Intent::SaveSettings(settings) => self.save_settings(settings, cx),
         }
     }
 

@@ -128,8 +128,7 @@ impl Workspace {
             ChatIntent::ResizeShell(share) => self.resize_shell(share, cx),
             ChatIntent::OpenEditor(editor) => self.open_chat_in(editor, id, cx),
             ChatIntent::SetEditor(editor) => {
-                let store = self.runtime.read(cx).store().clone();
-                let saved = Settings::set_editor(&store, editor, cx);
+                let saved = Settings::set_editor(editor, cx);
                 self.save_setting(saved, cx);
             }
         }

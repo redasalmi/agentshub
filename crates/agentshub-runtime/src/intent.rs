@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use agentshub_app::settings::Value;
 use agentshub_core::agent::Agent;
 use agentshub_core::store::{Change, PendingImport};
 use agentshub_core::worktree::Worktree;
@@ -78,4 +79,7 @@ pub enum Intent {
     /// Puts a checked database in place of this one, and has the app
     /// restart to use it.
     ConfirmImport(PendingImport),
+    /// Saves settings the window applied, as each setter of `Settings` gives
+    /// them: if one can't be saved, it lasts until the app quits.
+    SaveSettings(Vec<(&'static str, Value)>),
 }

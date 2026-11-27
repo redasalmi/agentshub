@@ -2,9 +2,10 @@
 //! global.
 
 use std::collections::HashMap;
+use std::pin::Pin;
 
 use gpui_kit::*;
-use rusqlite::types::{FromSql, Value};
+use rusqlite::types::{self, FromSql};
 
 use agentshub_core::editors::Editor;
 use agentshub_core::store::Store;
@@ -24,6 +25,30 @@ const SHELL_SHARE: &str = "shell_share";
 const MOTION: &str = "motion";
 const TERMINAL_FONT_SIZE: &str = "terminal_font_size";
 const EDITOR: &str = "editor";
+
+/// A setting as the database keeps it, which a setter gives with its key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Value {
+    Flag(bool),
+    Number(f64),
+    /// One of several words.
+    Text(&'static str),
+}
+
+impl Value {
+    /// Saves the setting as `key`, which the future it returns waits for.
+    pub fn save(
+        self,
+        key: &'static str,
+        store: &Store,
+    ) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+        match self {
+            Self::Flag(value) => Box::pin(store.set_flag(key, value)),
+            Self::Number(value) => Box::pin(store.set_number(key, value)),
+            Self::Text(value) => Box::pin(store.set_text(key, value)),
+        }
+    }
+}
 
 /// The sidebar's width until the user drags its edge.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 340.;
@@ -201,8 +226,8 @@ impl Global for Settings {}
 impl Settings {
     /// The settings saved in `saved`, by name. One that can't be read has its
     /// default.
-    pub fn load(saved: &HashMap<String, Value>) -> Self {
-        fn read<T: FromSql>(saved: &HashMap<String, Value>, key: &str) -> Option<T> {
+    pub fn load(saved: &HashMap<String, types::Value>) -> Self {
+        fn read<T: FromSql>(saved: &HashMap<String, types::Value>, key: &str) -> Option<T> {
             T::column_result(saved.get(key)?.into())
                 .inspect_err(|err| eprintln!("can't read the settings: {err}"))
                 .ok()

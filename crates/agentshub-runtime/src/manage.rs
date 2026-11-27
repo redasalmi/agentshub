@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use gpui_kit::{AppContext as _, Context};
 
 use agentshub_app::alerts;
+use agentshub_app::settings::Value;
 use agentshub_core::lifecycle::Deleted;
 use agentshub_core::status::Status;
 use agentshub_core::store::{self, Change};
@@ -125,6 +126,34 @@ impl Runtime {
                 "Couldn't import the database: {err:#}"
             ))),
         }
+    }
+
+    /// Saves settings the window applied, in order. If one can't be saved,
+    /// the user is told it lasts until Agents Hub quits, and the ones after it
+    /// aren't waited for.
+    pub(crate) fn save_settings(
+        &self,
+        settings: Vec<(&'static str, Value)>,
+        cx: &mut Context<Self>,
+    ) {
+        let saved: Vec<_> = settings
+            .into_iter()
+            .map(|(key, value)| value.save(key, &self.store))
+            .collect();
+        cx.spawn(async move |this, cx| {
+            for saved in saved {
+                if let Err(err) = saved.await {
+                    eprintln!("can't save the settings: {err:#}");
+                    let message = format!(
+                        "Couldn't save the setting, so it lasts until Agents Hub quits: {err}"
+                    );
+                    this.update(cx, |_, cx| cx.emit(RuntimeEvent::Notice(message)))
+                        .ok();
+                    return;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The ids of a project's chats.

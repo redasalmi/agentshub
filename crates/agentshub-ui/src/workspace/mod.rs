@@ -31,7 +31,7 @@ use crate::terminal_view::{self, TerminalView};
 use agentshub_app::alerts;
 use agentshub_app::settings::{
     Appearance, DEFAULT_RAIL_WIDTH, DEFAULT_SIDEBAR_WIDTH, DEFAULT_TERMINAL_FONT_SIZE, Motion,
-    Settings, ThemeFamily,
+    Settings, ThemeFamily, Value,
 };
 use agentshub_core::agent::Agent;
 use agentshub_core::status::Status;

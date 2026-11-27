@@ -1,170 +1,118 @@
-//! Applying a setting and saving it, which lasts until the app quits if the
-//! save fails.
+//! Applying a setting, and what saving it writes, which lasts until the app
+//! quits if the save fails.
 
 use super::*;
 
 impl Settings {
-    pub fn set_notification_popups(
-        store: &Store,
-        value: bool,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_notification_popups(value: bool, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             notification_popups: value,
             ..*cx.global::<Self>()
         });
-        store.set_flag(NOTIFICATION_POPUPS, value)
+        (NOTIFICATION_POPUPS, Value::Flag(value))
     }
 
-    pub fn set_notification_sound(
-        store: &Store,
-        value: bool,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_notification_sound(value: bool, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             notification_sound: value,
             ..*cx.global::<Self>()
         });
-        store.set_flag(NOTIFICATION_SOUND, value)
+        (NOTIFICATION_SOUND, Value::Flag(value))
     }
 
-    // The setters apply the setting, which only lasts until the app quits
-    // when it can't be saved.
+    // The setters apply the setting, and give the key and value to save, which
+    // only lasts until the app quits when it can't be saved.
 
-    pub fn set_close_to_tray(
-        store: &Store,
-        value: bool,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_close_to_tray(value: bool, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             close_to_tray: value,
             ..*cx.global::<Self>()
         });
-        store.set_flag(CLOSE_TO_TRAY, value)
+        (CLOSE_TO_TRAY, Value::Flag(value))
     }
 
-    pub fn set_worktree_by_default(
-        store: &Store,
-        value: bool,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_worktree_by_default(value: bool, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             worktree_by_default: value,
             ..*cx.global::<Self>()
         });
-        store.set_flag(WORKTREE_BY_DEFAULT, value)
+        (WORKTREE_BY_DEFAULT, Value::Flag(value))
     }
 
-    pub fn set_project_names(
-        store: &Store,
-        value: bool,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_project_names(value: bool, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             project_names: value,
             ..*cx.global::<Self>()
         });
-        store.set_flag(PROJECT_NAMES, value)
+        (PROJECT_NAMES, Value::Flag(value))
     }
 
-    pub fn set_rail_width(
-        store: &Store,
-        value: f32,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_rail_width(value: f32, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             rail_width: value,
             ..*cx.global::<Self>()
         });
-        store.set_number(RAIL_WIDTH, value.into())
+        (RAIL_WIDTH, Value::Number(value.into()))
     }
 
-    pub fn set_shell_share(
-        store: &Store,
-        value: f32,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_shell_share(value: f32, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             shell_share: value,
             ..*cx.global::<Self>()
         });
-        store.set_number(SHELL_SHARE, value.into())
+        (SHELL_SHARE, Value::Number(value.into()))
     }
 
-    pub fn set_sidebar_width(
-        store: &Store,
-        value: f32,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_sidebar_width(value: f32, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             sidebar_width: value,
             ..*cx.global::<Self>()
         });
-        store.set_number(SIDEBAR_WIDTH, value.into())
+        (SIDEBAR_WIDTH, Value::Number(value.into()))
     }
 
     /// Callers put the theme in the new mode with `appearance::apply`.
-    pub fn set_appearance(
-        store: &Store,
-        value: Appearance,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_appearance(value: Appearance, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             appearance: value,
             ..*cx.global::<Self>()
         });
-        store.set_text(APPEARANCE, value.key())
+        (APPEARANCE, Value::Text(value.key()))
     }
 
     /// Callers make it take effect with `appearance::apply_motion`.
-    pub fn set_motion(
-        store: &Store,
-        value: Motion,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_motion(value: Motion, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             motion: value,
             ..*cx.global::<Self>()
         });
-        store.set_text(MOTION, value.key())
+        (MOTION, Value::Text(value.key()))
     }
 
     /// Kept within the sizes the terminals zoom to.
-    pub fn set_terminal_font_size(
-        store: &Store,
-        value: f32,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_terminal_font_size(value: f32, cx: &mut App) -> (&'static str, Value) {
         let value = value.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE);
         cx.set_global(Self {
             terminal_font_size: value,
             ..*cx.global::<Self>()
         });
-        store.set_number(TERMINAL_FONT_SIZE, value.into())
+        (TERMINAL_FONT_SIZE, Value::Number(value.into()))
     }
 
     /// Callers put the theme in the new family with `appearance::apply`.
-    pub fn set_theme(
-        store: &Store,
-        value: ThemeFamily,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_theme(value: ThemeFamily, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             theme: value,
             ..*cx.global::<Self>()
         });
-        store.set_text(THEME, value.key())
+        (THEME, Value::Text(value.key()))
     }
 
-    pub fn set_editor(
-        store: &Store,
-        value: Editor,
-        cx: &mut App,
-    ) -> impl Future<Output = Result<()>> + use<> {
+    pub fn set_editor(value: Editor, cx: &mut App) -> (&'static str, Value) {
         cx.set_global(Self {
             editor: Some(value),
             ..*cx.global::<Self>()
         });
-        store.set_text(EDITOR, value.key())
+        (EDITOR, Value::Text(value.key()))
     }
 }

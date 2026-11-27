@@ -3,22 +3,10 @@
 use super::*;
 
 impl Workspace {
-    /// Says so if a setting couldn't be saved, which then lasts until Agents
-    /// Hub quits.
-    pub(super) fn save_setting(
-        &self,
-        saved: impl Future<Output = Result<()>> + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            if let Err(err) = saved.await {
-                eprintln!("can't save the settings: {err:#}");
-                let message =
-                    format!("Couldn't save the setting, so it lasts until Agents Hub quits: {err}");
-                this.update(cx, |this, cx| this.say(message, cx)).ok();
-            }
-        })
-        .detach();
+    /// Has the runtime save a setting just applied, which then lasts until
+    /// Agents Hub quits if it can't be.
+    pub(super) fn save_setting(&self, saved: (&'static str, Value), cx: &mut App) {
+        self.apply(Intent::SaveSettings(vec![saved]), cx);
     }
 
     /// Says `message` in the window, unless it is closed to the tray.
