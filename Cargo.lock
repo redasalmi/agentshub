@@ -139,6 +139,7 @@ name = "agentshub-core"
 version = "0.18.0"
 dependencies = [
  "anyhow",
+ "image",
  "jiff",
  "libc",
  "notify",

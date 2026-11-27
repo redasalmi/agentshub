@@ -29,7 +29,7 @@ Press the same key again to hide it. The shell keeps running while hidden, and e
 
 To look at what the agent changed in your own editor, click the editor's icon at the top of the chat. It opens the folder the agent works in, which for a chat in a worktree is that chat's own copy of the project.
 
-Agents Hub lists the editors it knows that are installed: Zed, VS Code, VSCodium, Cursor, Sublime Text, Emacs and Kate. Click the arrow beside the icon to open the folder in another of them; that one is then used from every chat. You can also choose it in [Settings](settings.md), under **Code editor**. The button only shows when one of these editors is installed.
+Agents Hub lists the editors it knows that are installed: Zed, VS Code, VSCodium, Cursor, Sublime Text, Emacs and Kate. Click the arrow beside the icon to choose which one the icon opens, for every chat; choosing doesn't open anything. You can also choose it in [Settings](settings.md), under **Code editor**. The button only shows when one of these editors is installed.
 
 ## Earlier sessions
 

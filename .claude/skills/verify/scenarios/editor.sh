@@ -28,18 +28,20 @@ editor_setting() { [ "$(sql "SELECT value FROM settings WHERE key = 'editor'")" 
 
 click 1148 86
 shot editor-menu
-click 1110 147
+click 1113 173
 wait_until 5 "VS Code to be saved as the editor" editor_setting vscode
-wait_until 5 "VS Code to open the project" grep -qxF "code|$project|$project" "$EDITOR_LOG"
 shot header-vscode
+grep -q '^code|' "$EDITOR_LOG" && fail "picking VS Code in the menu opened it"
+click 1120 86
+wait_until 5 "VS Code to open the project" grep -qxF "code|$project|$project" "$EDITOR_LOG"
 
 key ctrl+comma
 xdotool mousemove 640 400
 for _ in 1 2 3 4 5; do xdotool click 5; sleep 0.1; done
 shot settings
-click 1054 561
+click 1067 562
 shot settings-menu
-click 1060 594
+click 1060 619
 wait_until 5 "Zed to be saved as the editor" editor_setting zed
 shot settings-zed
 assert_eq "$(grep -c '^dev.zed.Zed|' "$EDITOR_LOG")" 1 "editors opened from the settings"

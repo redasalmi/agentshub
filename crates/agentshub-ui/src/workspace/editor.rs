@@ -19,8 +19,8 @@ impl Workspace {
         };
         let Some(found) = cx
             .try_global::<Installed>()
-            .and_then(|installed| installed.0.iter().find(|found| found.editor == editor))
-            .cloned()
+            .and_then(|installed| installed.0.iter().find(|each| each.found.editor == editor))
+            .map(|each| each.found.clone())
         else {
             return;
         };

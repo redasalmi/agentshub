@@ -62,10 +62,11 @@ text attributes) and shoots it at the default size and zoomed in. Compare the
 shots with the same text in Ghostty.
 
 `scenarios/editor.sh`: installs a fake Zed (with an icon) and VS Code (without),
-opens the chat's folder from the header, picks VS Code from its menu, checks
-both launches in `editor.log` and the saved setting, then picks Zed in the
-settings and checks nothing opened. Editors installed under `/usr/share` show in
-the menus too, after the fakes.
+opens the chat's folder from the header, picks VS Code in its menu and checks it
+only became the default, opens the folder again from the icon, checks both
+launches in `editor.log`, the environment handed back to the editor and the
+saved setting, then picks Zed in the settings and checks nothing opened.
+Editors installed under `/usr/share` show in the menus too, after the fakes.
 
 To cover a change, add a scenario next to it or a step to an existing one. A
 scenario is bash sourced with `set -e` after `scripts/lib.sh`:

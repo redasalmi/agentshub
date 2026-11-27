@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 jiff = "0.2.38"
 libc = "0.2"
 notify = "8"

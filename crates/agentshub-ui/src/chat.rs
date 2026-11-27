@@ -1,6 +1,6 @@
 //! The chat sheet: its header, history, terminal and shell.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use agentshub_app::editors::Installed;
+use agentshub_app::editors::{ICON_SIZE, Installed};
 use agentshub_app::settings::{DEFAULT_SHELL_SHARE, Settings};
 use agentshub_core::agent::Agent;
 use agentshub_core::editors::{self, Editor, Found};
@@ -64,8 +64,8 @@ pub enum ChatIntent {
     ResizeShell(f32),
     /// Opens the chat's folder in that editor.
     OpenEditor(Editor),
-    /// Makes that editor the one chats open in, and opens the chat's folder.
-    PickEditor(Editor),
+    /// Makes that editor the one chats open in.
+    SetEditor(Editor),
 }
 
 type On = Rc<dyn Fn(ChatIntent, &mut Window, &mut App)>;
@@ -493,67 +493,76 @@ impl ChatSheet {
     }
 }
 
-/// An installed editor, with the icon its desktop entry names.
+/// An installed editor, with its icon.
 #[derive(Clone)]
 pub struct EditorChoice {
     pub editor: Editor,
-    pub icon: Option<PathBuf>,
+    pub icon: Option<ImageSource>,
 }
 
 /// The editor chats open in, and every installed one, once they are known.
 pub fn editor_choices(cx: &App) -> Option<(EditorChoice, Vec<EditorChoice>)> {
     let installed = &cx.try_global::<Installed>()?.0;
-    let choice = |found: &Found| EditorChoice {
-        editor: found.editor,
-        icon: found.icon.clone(),
-    };
-    let current = editors::pick(installed, cx.global::<Settings>().editor)?;
-    Some((choice(current), installed.iter().map(choice).collect()))
+    let found: Vec<Found> = installed.iter().map(|each| each.found.clone()).collect();
+    let current = editors::pick(&found, cx.global::<Settings>().editor)?.editor;
+    let all: Vec<EditorChoice> = installed
+        .iter()
+        .map(|each| EditorChoice {
+            editor: each.found.editor,
+            icon: each.icon.clone(),
+        })
+        .collect();
+    let current = all.iter().find(|choice| choice.editor == current)?.clone();
+    Some((current, all))
 }
 
 /// An editor's icon, or a folder of code when none was found.
-pub fn editor_icon(icon: Option<&Path>) -> AnyElement {
+pub fn editor_icon(icon: Option<&ImageSource>) -> AnyElement {
+    let size = px(f32::from(ICON_SIZE));
     match icon {
-        Some(path) => img(path.to_path_buf())
-            .flex_none()
-            .size_4()
+        Some(icon) => img(icon.clone()).flex_none().size(size).into_any_element(),
+        None => Icon::new(ExtraIcon::FolderCode)
+            .with_size(size)
             .into_any_element(),
-        None => Icon::new(ExtraIcon::FolderCode).small().into_any_element(),
     }
 }
 
-pub type PickEditor = Rc<dyn Fn(Editor, &mut Window, &mut App)>;
+pub type SetEditor = Rc<dyn Fn(Editor, &mut Window, &mut App)>;
 
-/// The installed editors with their icons, `current` checked.
+/// The installed editors with their icons, `current` checked. Picking one
+/// only makes it the default.
 pub fn editor_menu(
     menu: PopupMenu,
     current: Editor,
     all: &[EditorChoice],
-    pick: &PickEditor,
+    set: &SetEditor,
 ) -> PopupMenu {
-    all.iter().fold(menu, |menu, choice| {
-        let (editor, icon) = (choice.editor, choice.icon.clone());
-        let pick = Rc::clone(pick);
-        menu.item(
-            PopupMenuItem::element(move |_, _| {
-                h_flex()
-                    .gap_2()
-                    .child(editor_icon(icon.as_deref()))
-                    .child(editor.name())
-            })
-            .checked(editor == current)
-            .on_click(move |_, window, cx| pick(editor, window, cx)),
-        )
-    })
+    all.iter()
+        .fold(menu.label("Default editor"), |menu, choice| {
+            let (editor, icon) = (choice.editor, choice.icon.clone());
+            let set = Rc::clone(set);
+            menu.item(
+                PopupMenuItem::element(move |_, _| {
+                    h_flex()
+                        .gap_2p5()
+                        .child(editor_icon(icon.as_ref()))
+                        .child(editor.name())
+                })
+                .checked(editor == current)
+                .on_click(move |_, window, cx| set(editor, window, cx)),
+            )
+        })
 }
 
-/// Opens the chat's folder in the current editor, or picks another.
+/// Opens the chat's folder in the default editor; its menu changes which one
+/// that is.
 fn editor_button(current: &EditorChoice, all: Vec<EditorChoice>, on: On) -> impl IntoElement {
     let editor = current.editor;
-    let pick: PickEditor = {
+    let set: SetEditor = {
         let on = Rc::clone(&on);
-        Rc::new(move |editor, window, cx| on(ChatIntent::PickEditor(editor), window, cx))
+        Rc::new(move |editor, window, cx| on(ChatIntent::SetEditor(editor), window, cx))
     };
+    let open = format!("Open in {}", editor.name());
     DropdownButton::new("editor")
         .ghost()
         .small()
@@ -561,12 +570,13 @@ fn editor_button(current: &EditorChoice, all: Vec<EditorChoice>, on: On) -> impl
             Button::new("open-editor")
                 .ghost()
                 .small()
-                .child(editor_icon(current.icon.as_deref()))
-                .tooltip(format!("Open in {}", editor.name()))
+                .child(editor_icon(current.icon.as_ref()))
+                .accessibility_label(open.clone())
+                .tooltip(open)
                 .on_click(move |_, window, cx| on(ChatIntent::OpenEditor(editor), window, cx)),
         )
-        .menu_accessibility_label("Choose the editor")
-        .dropdown_menu(move |menu, _, _| editor_menu(menu, editor, &all, &pick))
+        .menu_accessibility_label("Choose the default editor")
+        .dropdown_menu(move |menu, _, _| editor_menu(menu, editor, &all, &set))
 }
 
 /// The bar on the edge of the terminal that has the keyboard.

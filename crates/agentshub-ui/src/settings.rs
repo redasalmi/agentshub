@@ -19,7 +19,7 @@ use agentshub_app::settings::{
 };
 use agentshub_core::editors::Editor;
 
-use crate::chat::{PickEditor, editor_choices, editor_icon, editor_menu};
+use crate::chat::{SetEditor, editor_choices, editor_icon, editor_menu};
 use crate::palette;
 use crate::theme as appearance;
 
@@ -458,7 +458,7 @@ fn render_settings(
 fn render_editor_row(cx: &mut Context<SettingsView>) -> Option<AnyElement> {
     let (current, all) = editor_choices(cx)?;
     let view = cx.entity().downgrade();
-    let pick: PickEditor = Rc::new(move |editor, window, cx| {
+    let set: SetEditor = Rc::new(move |editor, window, cx| {
         view.update(cx, |this, cx| {
             this.send(SettingsIntent::SetEditor(editor), window, cx);
         })
@@ -474,11 +474,11 @@ fn render_editor_row(cx: &mut Context<SettingsView>) -> Option<AnyElement> {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(editor_icon(current.icon.as_deref()))
+                    .child(editor_icon(current.icon.as_ref()))
                     .child(editor.name()),
             )
             .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| editor_menu(menu, editor, &all, &pick))
+            .dropdown_menu(move |menu, _, _| editor_menu(menu, editor, &all, &set))
             .into_any_element(),
         cx,
     ))

@@ -132,10 +132,9 @@ impl Workspace {
             ChatIntent::ToggleShell => self.toggle_shell(&ToggleShell, window, cx),
             ChatIntent::ResizeShell(share) => self.resize_shell(share, cx),
             ChatIntent::OpenEditor(editor) => self.open_chat_in(editor, id, cx),
-            ChatIntent::PickEditor(editor) => {
+            ChatIntent::SetEditor(editor) => {
                 let saved = Settings::set_editor(&self.store, editor, cx);
                 self.save_setting(saved, cx);
-                self.open_chat_in(editor, id, cx);
             }
         }
     }

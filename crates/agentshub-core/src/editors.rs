@@ -343,6 +343,22 @@ fn find_icon(icon: &str, dirs: &Dirs) -> Option<PathBuf> {
     themed.chain(pixmaps).find(|path| path.is_file())
 }
 
+/// A raster icon shrunk to fit `size` pixels with a filter that keeps thin
+/// strokes, as PNG. Drawn straight from a file many times larger, an icon such
+/// as Zed's loses most of its mark. `None` for an SVG, which scales by itself,
+/// or a file that can't be read.
+pub fn icon_png(path: &Path, size: u32) -> Option<Vec<u8>> {
+    if path.extension().is_some_and(|extension| extension == "svg") {
+        return None;
+    }
+    let icon = image::open(path).ok()?;
+    let mut png = Vec::new();
+    icon.resize(size, size, image::imageops::FilterType::Lanczos3)
+        .write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some(png)
+}
+
 /// The editor to open folders in: the saved one while it is installed, or else
 /// the first installed.
 pub fn pick(installed: &[Found], saved: Option<Editor>) -> Option<&Found> {
@@ -645,6 +661,20 @@ mod tests {
             Some(base.join("sys/pixmaps/emacs.png"))
         );
         assert_eq!(icon(Editor::Cursor), None);
+    }
+
+    #[test]
+    fn shrinks_raster_icons_to_the_size_asked() {
+        let base = temp_dir();
+        let big = base.join("big.png");
+        image::RgbaImage::from_pixel(512, 256, image::Rgba([20, 20, 20, 255]))
+            .save(&big)
+            .unwrap();
+        let small = image::load_from_memory(&icon_png(&big, 40).unwrap()).unwrap();
+        assert_eq!((small.width(), small.height()), (40, 20));
+        write(&base, "logo.svg", "<svg/>");
+        assert_eq!(icon_png(&base.join("logo.svg"), 40), None);
+        assert_eq!(icon_png(&base.join("missing.png"), 40), None);
     }
 
     #[test]
