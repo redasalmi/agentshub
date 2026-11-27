@@ -1,21 +1,16 @@
 mod alerts;
 mod tray;
 
-pub use agentshub_app::{bootstrap, settings};
-pub use agentshub_core::{
-    agent, lifecycle, process, reports, sessions, status, store, transcript, worktree,
-};
-#[cfg(target_os = "linux")]
-pub use agentshub_platform::scope;
-pub use agentshub_platform::{instance, motion, sigterm};
-pub use agentshub_ui_kit::{appearance, history};
-
 use std::borrow::Cow;
 
+use agentshub_app::{bootstrap, settings};
+#[cfg(target_os = "linux")]
+use agentshub_platform::scope;
+use agentshub_platform::sigterm::quit_on_sigterm;
+use agentshub_platform::{instance, motion};
 use agentshub_runtime::Runtime;
+use agentshub_ui_kit::appearance;
 use gpui_kit::*;
-
-use sigterm::quit_on_sigterm;
 
 // The icons agentshub uses beyond the components' own.
 gpui_kit::assets::icon_assets!(
