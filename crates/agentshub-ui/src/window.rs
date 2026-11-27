@@ -51,7 +51,6 @@ pub fn open_window(
         let workspace = match contents {
             Contents::Workspace(workspace) => {
                 workspace.update(cx, |workspace, cx| {
-                    workspace.set_window(window);
                     workspace.set_hidden(false, cx);
                     workspace.focus_chat(window, cx);
                 });

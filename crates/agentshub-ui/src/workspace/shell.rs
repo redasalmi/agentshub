@@ -109,11 +109,6 @@ impl Workspace {
         }
     }
 
-    /// Has the workspace shown in `window`, opened again from the tray.
-    pub fn set_window(&mut self, window: &Window) {
-        self.window = window.window_handle();
-    }
-
     /// Stops the shown terminals from building frames while the window is
     /// closed to the tray, and starts them again when it opens.
     pub fn set_hidden(&mut self, hidden: bool, cx: &mut App) {

@@ -129,7 +129,6 @@ impl Workspace {
             settings_shown: false,
             running_menu: None,
             hidden: false,
-            window: window.window_handle(),
             focus_handle: cx.focus_handle(),
             chat_focus: cx.focus_handle(),
             sidebar_width: px(cx.global::<Settings>().sidebar_width),

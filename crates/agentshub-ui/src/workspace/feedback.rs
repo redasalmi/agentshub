@@ -22,10 +22,10 @@ impl Workspace {
     }
 
     /// Says `message` in the window, unless it is closed to the tray.
-    pub(super) fn say(&self, message: String, cx: &mut App) {
-        self.window
-            .update(cx, |_, window, cx| window.push_notification(message, cx))
-            .ok();
+    pub(super) fn say(&self, message: String, cx: &mut Context<Self>) {
+        cx.with_window(cx.entity_id(), |window, cx| {
+            window.push_notification(message, cx)
+        });
     }
 
     /// Says `message` with a button that makes the `undo` change.

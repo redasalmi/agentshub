@@ -547,15 +547,14 @@ impl Workspace {
             // its session is read once it is, and nothing else runs in that
             // session until then. The shown chat takes the keyboard with it,
             // which only its window can give back.
-            let Ok(window) = this.read_with(cx, |this, _| this.window) else {
-                return;
-            };
-            let closed = window.update(cx, |_, window, cx| {
-                this.update(cx, |this, cx| this.close_chats(closing.clone(), window, cx))
+            let closed = cx.update(|cx| {
+                cx.with_window(this.entity_id(), |window, cx| {
+                    this.update(cx, |this, cx| this.close_chats(closing.clone(), window, cx))
+                })
             });
             // Closed to the tray, the window has no keyboard to give back, and
             // opening it again focuses the shown chat.
-            if !matches!(closed, Ok(Ok(()))) {
+            if !matches!(closed, Some(Ok(()))) {
                 this.update(cx, |this, cx| {
                     for id in closing {
                         this.suspend(id, cx);

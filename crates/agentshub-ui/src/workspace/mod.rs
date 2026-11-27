@@ -139,10 +139,6 @@ pub struct Workspace {
     running_menu: Option<Entity<PopupMenu>>,
     /// Whether the window is closed to the tray, so no terminal is shown.
     hidden: bool,
-    /// The window last opened on the workspace, for work that finishes
-    /// without one, like a chat closing once a Codex lookup is done, to give
-    /// the keyboard back.
-    window: AnyWindowHandle,
     /// Holds the focus when nothing in the workspace does, so its key
     /// bindings still reach it.
     focus_handle: FocusHandle,

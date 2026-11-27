@@ -274,17 +274,22 @@ impl Workspace {
                 },
                 _ => Ok(true),
             };
-            let Ok(window) = this.read_with(cx, |this, _| this.window) else {
-                return;
-            };
-            let finished = window.update(cx, |_, window, cx| {
-                this.update(cx, |this, cx| {
-                    this.finish_adding(new.clone(), added.clone(), kept.clone(), Some(window), cx)
+            let finished = cx.update(|cx| {
+                cx.with_window(this.entity_id(), |window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.finish_adding(
+                            new.clone(),
+                            added.clone(),
+                            kept.clone(),
+                            Some(window),
+                            cx,
+                        )
+                    })
                 })
             });
             // Closed to the tray, the window can't show the chat, which is
             // only listed then.
-            if !matches!(finished, Ok(Ok(()))) {
+            if !matches!(finished, Some(Ok(()))) {
                 this.update(cx, |this, cx| {
                     this.finish_adding(new, added, kept, None, cx)
                 })
