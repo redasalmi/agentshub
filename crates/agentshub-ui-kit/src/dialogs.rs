@@ -168,6 +168,13 @@ pub fn new_chat(
                 v_flex()
                     .gap_3()
                     .child(path_line(&path, cx))
+                    .children(project_select.as_ref().map(|(select, _)| {
+                        div().child(
+                            Select::new(select)
+                                .id("new-chat-project")
+                                .placeholder("Project"),
+                        )
+                    }))
                     .map(|content| {
                         if none_installed {
                             return content.child(div().text_sm().child(
@@ -177,13 +184,6 @@ pub fn new_chat(
                         }
                         let picked = chosen.get();
                         content
-                            .children(project_select.as_ref().map(|(select, _)| {
-                                div().child(
-                                    Select::new(select)
-                                        .id("new-chat-project")
-                                        .placeholder("Project"),
-                                )
-                            }))
                             .child(
                                 h_flex()
                                     .id("agents")
