@@ -27,11 +27,12 @@ bin ──▶ ui-classic ──▶ ui-kit ──▶ runtime ──▶ app ──
 - **ui-kit** — what every layout shares: theme and fonts, terminal view,
   history, status glyphs, actions and their shortcuts, editor choices, search
   box, settings screen, shortcut list, dialogs, the chat body under a chat's
-  header with its shell, the empty state, and the `Frontend` interface the
+  header with its shell, the empty state, the `LayoutView` interface the
+  workspace reaches its layout through, and the `Frontend` interface the
   binary opens a layout through. It names no layout.
-- **ui-classic** — the Classic layout: rail, chat list, chat header, toolbar,
-  footer and the workspace that lays them out. Its views read runtime and app
-  state and send intents.
+- **ui-classic** — the Classic layout: rail, chat list, chat header, toolbar
+  and footer, which `ClassicLayout` lays out, and the workspace behind them.
+  Its views read runtime and app state and send intents.
 - **platform** — Linux adapters: tray, D-Bus notifications, systemd scope,
   desktop motion, single instance and SIGTERM. It calls back into the app or
   UI for window and workspace actions instead of naming them.

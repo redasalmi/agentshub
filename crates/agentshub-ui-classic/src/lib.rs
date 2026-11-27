@@ -1,5 +1,6 @@
-//! The Classic layout: the rail, the chat list, the chat header, the toolbar,
-//! the footer and the workspace that lays them out.
+//! The Classic layout: the rail, the chat list, the chat header, the toolbar
+//! and the footer, which `ClassicLayout` lays out, and the workspace behind
+//! them.
 
 use std::rc::Rc;
 
