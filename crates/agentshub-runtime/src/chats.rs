@@ -10,9 +10,10 @@ use anyhow::Result;
 use gpui_kit::{App, AppContext as _, Context, Entity, SharedString, Subscription, Task};
 
 use agentshub_app::alerts::{self, Alert};
+use agentshub_app::catalog::Catalog;
 use agentshub_core::agent::Agent;
 use agentshub_core::format::{Turn, activity, duration};
-use agentshub_core::lifecycle::{Codex, Reaped};
+use agentshub_core::lifecycle::{Codex, Lifecycle, Reaped};
 use agentshub_core::reports;
 use agentshub_core::sessions;
 use agentshub_core::status::Status;
@@ -142,6 +143,43 @@ pub fn take_and_remove(
     agentshub_core::lifecycle::take_and_remove(job, worktree::remove)
 }
 
+/// How a chat opens.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Open {
+    /// Its CLI runs, so it only shows.
+    Show,
+    /// Its CLI starts, resuming session `resume` if given.
+    Start { resume: Option<i64> },
+    /// It is being deleted, or its project removed, so it doesn't open.
+    Blocked,
+}
+
+/// How chat `chat` opens. `running` says whether its CLI runs, and `last` is
+/// its last session, once read, with whether its transcript is still there:
+/// only a session with a prompt and a transcript can be resumed.
+pub(crate) fn plan_open(
+    lifecycle: &Lifecycle,
+    catalog: &Catalog,
+    running: bool,
+    chat: i64,
+    last: Option<(&store::Session, bool)>,
+) -> Open {
+    let removing = catalog.projects().iter().any(|project| {
+        lifecycle.is_removing_project(project.id)
+            && project.chats.iter().any(|each| each.id == chat)
+    });
+    if lifecycle.is_deleting(chat) || removing {
+        return Open::Blocked;
+    }
+    if running {
+        return Open::Show;
+    }
+    let resume = last
+        .filter(|(session, exists)| session.prompted && *exists)
+        .map(|(session, _)| session.id);
+    Open::Start { resume }
+}
+
 /// Whether a chat's CLI, at rest by `pick_idle`, can be stopped without
 /// losing anything else the user would miss: it holds no draft, and can
 /// resume its session. `kept` says whether its transcript exists, and
@@ -226,14 +264,6 @@ impl Runtime {
         })
     }
 
-    /// Whether chat `id`'s project is being removed.
-    fn is_removing(&self, id: i64) -> bool {
-        self.projects().iter().any(|project| {
-            self.lifecycle.is_removing_project(project.id)
-                && project.chats.iter().any(|chat| chat.id == id)
-        })
-    }
-
     /// Which chat `id` is, for telling the user about it away from the
     /// sidebar: its title and its project's name.
     fn describe(&self, id: i64) -> Option<String> {
@@ -253,7 +283,9 @@ impl Runtime {
         reason = "the states a chat can be in when opened, checked in order"
     )]
     pub(crate) fn open_chat(&mut self, id: i64, cx: &mut Context<Self>) {
-        if self.lifecycle.is_deleting(id) || self.is_removing(id) {
+        let running = self.chats.iter().any(|chat| chat.id == id);
+        let open = plan_open(&self.lifecycle, &self.catalog, running, id, None);
+        if open == Open::Blocked {
             return;
         }
         if self.is_archived(id) {
@@ -263,7 +295,7 @@ impl Runtime {
         // to be asked for meanwhile. This is the request that a completion
         // compares itself with.
         let request = self.lifecycle.request(id);
-        if self.chats.iter().any(|chat| chat.id == id) {
+        if open == Open::Show {
             self.activate(id, cx);
             return;
         }
@@ -351,15 +383,20 @@ impl Runtime {
                 if !this.lifecycle.opened(id) {
                     return;
                 }
-                // The chat may have been deleted, or opened elsewhere, meanwhile,
-                // or its project be being removed.
-                if this.chats.iter().any(|chat| chat.id == id) || this.is_removing(id) {
+                // The chat may have been opened elsewhere meanwhile, or its
+                // project be being removed.
+                let running = this.chats.iter().any(|chat| chat.id == id);
+                let last = opened
+                    .as_ref()
+                    .ok()
+                    .and_then(|(_, sessions, last_exists)| Some((sessions.last()?, *last_exists)));
+                let Open::Start { resume } =
+                    plan_open(&this.lifecycle, &this.catalog, running, id, last)
+                else {
                     return;
-                }
-                let (agent, cwd, sessions, last_exists) = match opened {
-                    Ok((Some((agent, cwd)), sessions, last_exists)) => {
-                        (agent, cwd, sessions, last_exists)
-                    }
+                };
+                let (agent, cwd, sessions) = match opened {
+                    Ok((Some((agent, cwd)), sessions, _)) => (agent, cwd, sessions),
                     Ok((None, ..)) => {
                         // If the chat is gone, the one it took over the
                         // view from still shows when it opens.
@@ -377,7 +414,7 @@ impl Runtime {
                 };
                 let mut notice = None;
                 let resumed = match sessions.last() {
-                    Some(last) if last.prompted && last_exists => Some(last),
+                    Some(last) if resume.is_some() => Some(last),
                     // Claude deletes old transcripts. What the chat kept of the
                     // session stays in its history, and the banner says why a
                     // new session started.

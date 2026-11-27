@@ -8,13 +8,13 @@ use agentshub_core::format::{Turn, duration};
 use agentshub_core::lifecycle::Lifecycle;
 use agentshub_core::reports::Reports;
 use agentshub_core::status::Status;
-use agentshub_core::store::{Change, Db, Store};
+use agentshub_core::store::{Change, Chat, Db, Project, Session, Store};
 use agentshub_core::transcript;
 use agentshub_core::worktree::{Removal, Worktree};
 use serde_json::json;
 
 use crate::ChatState;
-use crate::chats::take_and_remove;
+use crate::chats::{Open, plan_open, take_and_remove};
 use crate::manage::pick_idle;
 use crate::runtime::apply_change;
 use crate::sessions::{import_chat, reported_sessions};
@@ -274,4 +274,54 @@ fn idle_chats_leave_out_busy_unseen_and_exited_ones() {
         chat(4, Status::Idle, false, false),
     ];
     assert_eq!(pick_idle(&states), vec![1]);
+}
+
+#[test]
+fn open_chat_starts_a_saved_chat_on_its_last_session() {
+    let chat = Chat {
+        id: 7,
+        project_id: 1,
+        agent: Agent::Claude,
+        title: None,
+        pinned: false,
+        updated_at: 0,
+        archived_at: None,
+        worktree: None,
+    };
+    let catalog = Catalog::new(vec![Project {
+        id: 1,
+        path: "/project".into(),
+        name: "project".into(),
+        archived_at: None,
+        chats: vec![chat],
+    }]);
+    let mut lifecycle = Lifecycle::default();
+    let last = Session {
+        id: 42,
+        agent_id: "last".into(),
+        transcript_path: "/project/last.jsonl".into(),
+        title: None,
+        prompted: true,
+        started_at: 0,
+        missing: false,
+        ended: None,
+    };
+    assert_eq!(
+        plan_open(&lifecycle, &catalog, false, 7, Some((&last, true))),
+        Open::Start { resume: Some(42) }
+    );
+    assert_eq!(
+        plan_open(&lifecycle, &catalog, true, 7, Some((&last, true))),
+        Open::Show
+    );
+    // A transcript the CLI deleted has nothing to resume.
+    assert_eq!(
+        plan_open(&lifecycle, &catalog, false, 7, Some((&last, false))),
+        Open::Start { resume: None }
+    );
+    lifecycle.remove_project(1, "/project".into());
+    assert_eq!(
+        plan_open(&lifecycle, &catalog, true, 7, Some((&last, true))),
+        Open::Blocked
+    );
 }
