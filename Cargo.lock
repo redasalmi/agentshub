@@ -198,10 +198,8 @@ dependencies = [
  "jiff",
  "ksni",
  "raw-window-handle",
- "uuid",
  "wayland-client",
  "wayland-protocols",
- "zbus 5.19.0",
 ]
 
 [[package]]
